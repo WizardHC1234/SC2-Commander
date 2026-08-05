@@ -18,8 +18,9 @@ _MACRO_EXECUTION_MODEL = """\
 Macro execution model:
 * Each macro tool sets one absolute declarative target. The runtime executes all
   active macro tools concurrently; one blocked goal does not block later goals.
-* Tool-call order is absolute resource priority: urgent bottlenecks and short-term
-  needs come before long-term goals.
+* Tool-call order is absolute resource priority and is preserved by the runtime
+  (no reordering): urgent bottlenecks and short-term needs come before long-term
+  goals.
 * An absolute target remains active until the requested total is reached
   (including under-construction)."""
 

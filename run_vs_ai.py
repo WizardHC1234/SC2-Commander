@@ -58,15 +58,10 @@ DEFAULT_MAP_NAME = "KairosJunctionLE"
 DEFAULT_REAL_TIME = False
 
 DEFAULT_ENEMY_RACE = "terran"
-DEFAULT_ENEMY_DIFFICULTY = "medium"
+DEFAULT_ENEMY_DIFFICULTY = "mediumhard"
 DEFAULT_ENEMY_BUILD = "macro"
 
 DEFAULT_COMMANDER_MODEL = "qwen3-32b"
-# Deprecated aliases kept for older scripts.
-DEFAULT_COORDINATOR_MODEL = DEFAULT_COMMANDER_MODEL
-DEFAULT_MACRO_MODEL = DEFAULT_COMMANDER_MODEL
-DEFAULT_TRANSLATOR_MODEL = DEFAULT_COMMANDER_MODEL
-
 DEFAULT_FORCE_STRATEGY = "mid_tank"
 
 # --- 其它 ---
@@ -208,30 +203,20 @@ def _map_code(map_name: str) -> str:
     return _safe_match_part(cleaned or raw, max_len=6)
 
 
-def _model_code(*models: str) -> str:
-    """Compress model keys, e.g. kimi-k2.5 -> k25, DeepSeek-V4-flash -> dsv4f."""
-    cleaned = []
-    for model in models:
-        text = str(model or "").strip()
-        if not text:
-            continue
-        # Keep letters/digits only, drop separators, then truncate.
-        compact = "".join(ch for ch in text.lower() if ch.isalnum())
-        # Prefer a stable short form for common names.
-        if compact.startswith("kimi"):
-            digits = "".join(ch for ch in compact if ch.isdigit())
-            compact = f"k{digits}" if digits else "kimi"
-        elif compact.startswith("deepseek"):
-            compact = "ds" + compact.replace("deepseek", "", 1)[:4]
-        elif compact.startswith("qwen"):
-            compact = "qw" + compact.replace("qwen", "", 1)[:4]
-        cleaned.append(_safe_match_part(compact, max_len=8))
-    if not cleaned:
+def _model_code(model: str) -> str:
+    """Compress model key, e.g. kimi-k2.5 -> k25, DeepSeek-V4-flash -> dsv4f."""
+    text = str(model or "").strip()
+    if not text:
         return "nm"
-    unique = list(dict.fromkeys(cleaned))
-    if len(unique) == 1:
-        return unique[0]
-    return _safe_match_part("".join(unique), max_len=12)
+    compact = "".join(ch for ch in text.lower() if ch.isalnum())
+    if compact.startswith("kimi"):
+        digits = "".join(ch for ch in compact if ch.isdigit())
+        compact = f"k{digits}" if digits else "kimi"
+    elif compact.startswith("deepseek"):
+        compact = "ds" + compact.replace("deepseek", "", 1)[:4]
+    elif compact.startswith("qwen"):
+        compact = "qw" + compact.replace("qwen", "", 1)[:4]
+    return _safe_match_part(compact, max_len=8)
 
 
 def _strategy_code(strategy: Optional[str]) -> str:
@@ -259,16 +244,14 @@ def build_match_id(
     enemy_build: str,
     map_name: str,
     bot_race: str,
-    coordinator_model: str,
-    macro_model: str,
-    translator_model: str,
+    commander_model: str,
     run_index: Optional[int],
     force_strategy: Optional[str] = None,
 ) -> str:
     """Build a compact, path-safe match folder name.
 
     Example:
-      260723_192457_TvT_hr_mac_KJ_k25_2bt
+      260723_192457_TvT_hr_mac_KJ_qw332b_mt
 
     Full metadata is also written to ``match_info.txt``
     beside ``{match_id}.json`` and ``{match_id}.SC2Replay``.
@@ -285,7 +268,7 @@ def build_match_id(
         _difficulty_code(enemy_difficulty),
         _build_code(enemy_build),
         _map_code(map_name),
-        _model_code(coordinator_model, macro_model, translator_model),
+        _model_code(commander_model),
     ]
     strategy = _strategy_code(force_strategy)
     if strategy:
@@ -312,9 +295,6 @@ def play_vs_ai(
     bot_instruct: str = DEFAULT_BOT_INSTRUCT,
     bot_race: str = DEFAULT_BOT_RACE,
     commander_model: str = DEFAULT_COMMANDER_MODEL,
-    coordinator_model: str = "",
-    macro_model: str = "",
-    translator_model: str = "",
     batch_name: Optional[str] = None,
     run_index: Optional[int] = None,
     output_base_dir: str = OUTPUT_BASE_DIR,
@@ -339,12 +319,7 @@ def play_vs_ai(
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_for_id = (
-        commander_model
-        or macro_model
-        or coordinator_model
-        or DEFAULT_COMMANDER_MODEL
-    )
+    model_key = (commander_model or DEFAULT_COMMANDER_MODEL).strip()
     match_id = build_match_id(
         timestamp=timestamp,
         my_bot_name=my_bot_name,
@@ -353,9 +328,7 @@ def play_vs_ai(
         enemy_build=enemy_build,
         map_name=map_name,
         bot_race=bot_race,
-        coordinator_model=model_for_id,
-        macro_model=model_for_id,
-        translator_model=model_for_id,
+        commander_model=model_key,
         run_index=run_index,
         force_strategy=force_strategy,
     )
@@ -379,7 +352,6 @@ def play_vs_ai(
             handle.write(record_dir)
 
     # Human-readable sidecar so the folder id can stay compact.
-    army_model = os.environ.get("LLM_ARMY_CONTROL_MODEL", "")
     info_path = os.path.join(record_dir, "match_info.txt")
     with open(info_path, "w", encoding="utf-8") as handle:
         handle.write(
@@ -393,10 +365,7 @@ def play_vs_ai(
                     f"enemy:             AI {enemy_race} / {enemy_difficulty} / {enemy_build}",
                     f"map:               {map_name}",
                     f"force_strategy:    {force_strategy or '(auto)'}",
-                    f"coordinator_model: {coordinator_model}",
-                    f"macro_model:       {macro_model}",
-                    f"translator_model:  {translator_model}",
-                    f"army_model:        {army_model or '(default)'}",
+                    f"commander_model:   {model_key}",
                     f"batch_name:        {batch_name or '-'}",
                     f"run_index:         {run_index if run_index is not None else '-'}",
                     f"record_dir:        {record_dir}",
@@ -416,13 +385,6 @@ def play_vs_ai(
         "--record-dir", record_dir,
         "--match-id", match_id,
     ]
-    
-    model_key = (
-        commander_model
-        or macro_model
-        or coordinator_model
-        or DEFAULT_COMMANDER_MODEL
-    )
 
     if real_time:
         args.append("-rt")
@@ -430,7 +392,6 @@ def play_vs_ai(
         args.extend(["--instruct", bot_instruct])
     if model_key:
         args.extend(["--commander-model", model_key])
-        args.extend(["--macro-model", model_key])
     if force_strategy:
         args.extend(["--force-strategy", force_strategy])
 
@@ -491,9 +452,6 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--bot-instruct", default=DEFAULT_BOT_INSTRUCT, help="战术指令")
     p.add_argument("--bot-race", default=DEFAULT_BOT_RACE, help="我方种族")
     p.add_argument("--commander-model", default=DEFAULT_COMMANDER_MODEL, help="Commander model key")
-    p.add_argument("--coordinator-model", default=DEFAULT_COORDINATOR_MODEL, help="Alias of --commander-model")
-    p.add_argument("--macro-model", default=DEFAULT_MACRO_MODEL, help="Alias of --commander-model")
-    p.add_argument("--translator-model", default=DEFAULT_TRANSLATOR_MODEL, help="Unused alias")
     p.add_argument("--batch-name", default="", help="记录写入 game_records/<batch-name>/ 归档")
     p.add_argument("--run-index", type=int, default=None, help="批处理序号以防并发冲突")
     p.add_argument("--output-base-dir", default=OUTPUT_BASE_DIR, help="记录根目录")
@@ -532,9 +490,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         enemy_build=ns.enemy_build,
         bot_instruct=ns.bot_instruct,
         bot_race=ns.bot_race,
-        commander_model=getattr(ns, "commander_model", None)
-        or ns.macro_model
-        or ns.coordinator_model,
+        commander_model=ns.commander_model,
         batch_name=ns.batch_name or None,
         run_index=ns.run_index,
         output_base_dir=ns.output_base_dir,

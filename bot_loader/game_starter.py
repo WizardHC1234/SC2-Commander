@@ -150,21 +150,6 @@ Builds:
             default="",
         )
         parser.add_argument(
-            "--coordinator-model",
-            help="Deprecated alias for --commander-model.",
-            default="",
-        )
-        parser.add_argument(
-            "--macro-model",
-            help="Deprecated alias for --commander-model.",
-            default="",
-        )
-        parser.add_argument(
-            "--translator-model",
-            help="Deprecated unused alias.",
-            default="",
-        )
-        parser.add_argument(
             "--force-strategy",
             help="Force a strategy folder under skills/<race>/ (e.g. mid_tank).",
             default="",
@@ -305,19 +290,9 @@ Builds:
                     recorder.output_folder = record_dir
             if getattr(args, "instruct", None) and hasattr(my_bot, "instruct"):
                 my_bot.instruct = args.instruct
-            commander_model = (
-                getattr(args, "commander_model", None)
-                or getattr(args, "macro_model", None)
-                or getattr(args, "coordinator_model", None)
-            )
+            commander_model = getattr(args, "commander_model", None)
             if commander_model and hasattr(my_bot, "commander_model_key"):
                 my_bot.commander_model_key = commander_model
-            if commander_model and hasattr(my_bot, "macro_model_key"):
-                my_bot.macro_model_key = commander_model
-            if commander_model and hasattr(my_bot, "coordinator_model_key"):
-                my_bot.coordinator_model_key = commander_model
-            if getattr(args, "translator_model", None) and hasattr(my_bot, "translator_model_key"):
-                my_bot.translator_model_key = args.translator_model
             if hasattr(my_bot, "force_strategy"):
                 fs = (getattr(args, "force_strategy", "") or "").strip()
                 my_bot.force_strategy = fs if fs and fs.lower() != "none" else None

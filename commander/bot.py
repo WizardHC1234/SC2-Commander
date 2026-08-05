@@ -1,4 +1,4 @@
-"""Single-agent Commander bot: strategy.md + tool_calls every 20s."""
+"""Single-agent Commander bot: strategy.md + tool_calls on a fixed interval."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _is_enemy_gg_message(message: str) -> bool:
 class CommanderBot(KnowledgeBot):
     """Execute one strategy.md via a single LLM with OpenAI tool_calls."""
 
-    DECISION_INTERVAL: float = 20.0
+    DECISION_INTERVAL: float = 60.0
     zone_manager: IZoneManager
 
     def __init__(
@@ -51,31 +51,11 @@ class CommanderBot(KnowledgeBot):
         record_dir: str = "",
         *,
         force_strategy: Optional[str] = None,
-        **legacy_kwargs: Any,
     ):
         super().__init__("SC2 Commander")
-        # GameStarter may still pass coordinator/macro/translator keys.
-        legacy_model = (
-            legacy_kwargs.pop("macro_model_key", "")
-            or legacy_kwargs.pop("coordinator_model_key", "")
-            or legacy_kwargs.pop("translator_model_key", "")
-            or ""
-        )
-        legacy_kwargs.pop("coordinator_model_key", None)
-        legacy_kwargs.pop("macro_model_key", None)
-        legacy_kwargs.pop("translator_model_key", None)
-        if legacy_kwargs:
-            logger.warning("Ignoring unexpected kwargs: %s", sorted(legacy_kwargs))
-
         self.race_name = race_name.strip().lower()
         self.instruct = (instruct or "").strip()
-        self.commander_model_key = (
-            commander_model_key or legacy_model or ""
-        ).strip()
-        # Aliases so GameStarter can still assign macro_model_key etc.
-        self.macro_model_key = self.commander_model_key
-        self.coordinator_model_key = self.commander_model_key
-        self.translator_model_key = self.commander_model_key
+        self.commander_model_key = (commander_model_key or "").strip()
         self.record_dir = (record_dir or "").strip()
         force = (force_strategy or "").strip()
         self.force_strategy: Optional[str] = (
@@ -221,11 +201,7 @@ class CommanderBot(KnowledgeBot):
     # ------------------------------------------------------------------
 
     def _resolved_model_key(self) -> str:
-        return (
-            (self.commander_model_key or "").strip()
-            or (getattr(self, "macro_model_key", "") or "").strip()
-            or (getattr(self, "coordinator_model_key", "") or "").strip()
-        )
+        return (self.commander_model_key or "").strip()
 
     def _run_decision(self, *, trigger_reason: str) -> None:
         model_key = self._resolved_model_key()
@@ -308,8 +284,6 @@ class CommanderBot(KnowledgeBot):
         content = (outcome.get("content") or "").strip()
         if content:
             preview = content.replace("\n", " ")
-            if len(preview) > 240:
-                preview = preview[:240] + "…"
             self._emit("  content=%s", preview)
         self._record_llm_interaction(
             {

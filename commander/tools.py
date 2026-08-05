@@ -261,6 +261,10 @@ def apply_tool_calls(
             if to_count <= 0:
                 issues.append(f"non_positive_to_count:{name}")
                 continue
+            # Last write wins for to_count; move key to the end so list order
+            # matches the LLM's resource-priority order (last occurrence).
+            if name in macro_by_key:
+                del macro_by_key[name]
             macro_by_key[name] = to_count
             continue
 
@@ -293,12 +297,11 @@ def apply_tool_calls(
 
         issues.append(f"unknown_tool:{name}")
 
+    # Keep LLM tool-call order as resource priority (dict insertion order).
     tasks = [
         {"action": key, "to_count": count}
         for key, count in macro_by_key.items()
     ]
-    # Preserve call order roughly by last-write; sort for stability
-    tasks.sort(key=lambda t: t["action"])
 
     policy = ArmyControlPolicy(
         commands=list(group_commands.values()),
