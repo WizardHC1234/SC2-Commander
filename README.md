@@ -8,6 +8,7 @@
 - 可执行命令均为 tool（训练/建造/研究/扩张/调兵/扫描/探图）
 - 每轮**整表替换**活跃目标
 - Demo：Kairos Junction + `mid_tank` + 内置 AI
+- 内置人族策略：`early_marine`、`mid_tank`、`late_battlecruiser`
 
 ## 目录
 
@@ -15,7 +16,7 @@
 SC2-Commander/
   commander/     # Bot、提示词、tool、观测、军队执行
   llm/           # API 调用；config.example.json（密钥勿提交）
-  skills/        # 策略与 Action 空间（如 terran/mid_tank）
+  skills/        # 策略与 Action 空间（terran/early_marine|mid_tank|late_battlecruiser）
   scripts/       # 启动脚本
   docs/          # 方案笔记
   sharpy/        # Sharpy 运行时
@@ -50,6 +51,8 @@ Copy-Item llm\config.example.json llm\config.json
 
 ```powershell
 python run_vs_ai.py --force-strategy mid_tank --commander-model qwen3-32b
+python run_vs_ai.py --force-strategy early_marine --commander-model qwen3-32b
+python run_vs_ai.py --force-strategy late_battlecruiser --commander-model qwen3-32b
 ```
 
 常用参数：`--map-name`、`--enemy-race`、`--enemy-difficulty`、`--commander-model`、`--force-strategy`。

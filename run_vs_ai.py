@@ -175,13 +175,9 @@ _MAP_CODE = {
 }
 
 _STRATEGY_CODE = {
+    "early_marine": "em",
     "mid_tank": "mt",
-    "two_base_tanks_llm_combat": "2bt",
-    "marine_rush_llm_combat": "mr",
-    "battle_cruisers_llm_combat": "bc",
-    "two_base_tanks": "2bt0",
-    "marine_rush": "mr0",
-    "battle_cruisers": "bc0",
+    "late_battlecruiser": "lbc",
 }
 
 
