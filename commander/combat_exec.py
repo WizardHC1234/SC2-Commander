@@ -1,4 +1,4 @@
-﻿from typing import Dict, List, Optional
+from typing import Dict, List, Optional
 
 from sc2.ids.ability_id import AbilityId
 from sc2.ids.unit_typeid import UnitTypeId
@@ -12,6 +12,7 @@ from sharpy.plans.acts.act_base import ActBase
 from sharpy.plans.tactics.terran.scan_enemy import ScanEnemy
 
 from commander.combat_policy import (
+    MOVE_TYPE_BY_MOVEMENT_MODE,
     ArmyControlPolicy,
     ArmyGroupCommand,
     InjectedArmyPolicyProvider,
@@ -110,9 +111,53 @@ class CombatControlAct(ActBase):
                 getattr(self.ai, "time", 0.0)
             )
         self._execute_scout_control()
+        # Refresh groups every frame so newly produced units become group_1
+        # before we apply (and possibly augment) the last LLM policy.
+        self._update_groups(self._select_main_army_units())
+        policy = self._augment_policy_for_new_groups(policy)
         self._execute_policy(policy)
         return False
 
+    def _augment_policy_for_new_groups(
+        self, policy: ArmyControlPolicy
+    ) -> ArmyControlPolicy:
+        """Fill missing group commands from the main-force order.
+
+        Between LLM decisions, newly produced units form reinforcement
+        (group_1) while the cached policy often only commands group_0.
+        Inherit destination/mode so reinforcements join the same objective.
+        """
+        if not self._current_groups or not policy.commands:
+            return policy
+
+        by_id = {command.group_id: command for command in policy.commands}
+        main_id = self._main_group_id or self.MAIN_GROUP_ID
+        source = by_id.get(main_id)
+        if source is None:
+            # Fall back to the only/first command when main is not listed.
+            source = next(iter(policy.commands), None)
+        if source is None:
+            return policy
+
+        added: List[ArmyGroupCommand] = []
+        for group_id in self._current_groups:
+            if group_id in by_id:
+                continue
+            added.append(
+                ArmyGroupCommand(
+                    group_id=group_id,
+                    destination_zone_id=source.destination_zone_id,
+                    movement_mode=source.movement_mode,
+                    move_type=MOVE_TYPE_BY_MOVEMENT_MODE[source.movement_mode],
+                )
+            )
+        if not added:
+            return policy
+        return ArmyControlPolicy(
+            commands=list(policy.commands) + added,
+            scan_zone_id=policy.scan_zone_id,
+            scout_zone_id=policy.scout_zone_id,
+        )
     def _update_production_rallies(self) -> None:
         target = getattr(self.gather_manager, "gather_point", None)
         if target is None:

@@ -16,6 +16,10 @@ from typing import List, Optional, Sequence
 
 sys.path.insert(1, "python-sc2")
 
+import sc2_compat
+
+sc2_compat.apply()
+
 from bot_loader import GameStarter, BotDefinitions
 from version import update_version_txt
 

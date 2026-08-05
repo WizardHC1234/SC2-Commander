@@ -215,6 +215,7 @@ class CommanderBot(KnowledgeBot):
             return
 
         obs_text, full_obs, _view = self._capture_observation_bundle("top")
+        cleanup_hint = self._cleanup_runtime_hint()
         previous_macro = [
             {"action": t.get("action"), "to_count": t.get("to_count")}
             for t in self.active_tasks
@@ -225,6 +226,7 @@ class CommanderBot(KnowledgeBot):
             observation_text=obs_text,
             previous_macro_tasks=previous_macro,
             previous_army_summary=self._last_army_summary,
+            runtime_hint=cleanup_hint,
             action_space=action_space,
             model_key=model_key,
             full_observation=full_obs,
@@ -305,6 +307,23 @@ class CommanderBot(KnowledgeBot):
     # ------------------------------------------------------------------
     # observation / tasks
     # ------------------------------------------------------------------
+
+    def _cleanup_runtime_hint(self) -> str:
+        """Append map-clear cue when program-side cleanup conditions hold."""
+        act = getattr(self, "llm_army_control_act", None)
+        if act is None:
+            return ""
+        try:
+            from commander.combat_state import (
+                build_cleanup_runtime_hint,
+                collect_army_control_state,
+            )
+
+            state = collect_army_control_state(act)
+            return (build_cleanup_runtime_hint(act, state) or "").strip()
+        except Exception as exc:
+            logger.warning("cleanup runtime hint failed: %s", exc)
+            return ""
 
     def _capture_observation_bundle(self, view_type: str = "top"):
         recorder = getattr(self, "llm_observation_recorder", None)

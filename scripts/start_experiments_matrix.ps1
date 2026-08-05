@@ -35,7 +35,7 @@ $COMMANDER_MODEL = "qwen3-32b"
 # 3. Run control
 # =============================================================================
 $DEFAULT_MATCHES_PER_EXPERIMENT = 10
-$CONCURRENCY = 2
+$CONCURRENCY = 5
 
 # =============================================================================
 # 4. Experiment list
@@ -47,9 +47,56 @@ $CONCURRENCY = 2
 # Strategy        : skills/<BOT_RACE>/<Strategy>；省略则用 $FORCE_STRATEGY
 # Matches         : 省略则用 $DEFAULT_MATCHES_PER_EXPERIMENT
 $EXPERIMENTS = @(
-    @{ EnemyRace = "terran"; EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "early_marine"; Matches = 10 }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "mid_tank"; Matches = 10 }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "late_battlecruiser"; Matches = 10 }
+
+
+    @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro";    Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";    Strategy = "late_battlecruiser"; Matches = 10 }
+
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "hard"; EnemyBuild = "macro";    Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "zerg";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";    Strategy = "late_battlecruiser"; Matches = 10 }
+
+
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "hard"; EnemyBuild = "macro";    Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "late_battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "early_marine"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "mid_tank"; Matches = 10 }
+    @{ EnemyRace = "protoss";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";    Strategy = "late_battlecruiser"; Matches = 10 }
 
     # @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard"; EnemyBuild = "macro"; Strategy = "mid_tank"; Matches = 10 }
     # @{ EnemyRace = "zerg";   EnemyDifficulty = "hard";     EnemyBuild = "macro"; Strategy = "mid_tank"; Matches = 10 }
@@ -179,6 +226,8 @@ for ($experimentIndex = 0; $experimentIndex -lt $EXPERIMENTS.Count; $experimentI
     Write-Host "Batch    : $batchName"
     Write-Host "=================================================="
 
+    # Empty string args are dropped by powershell.exe -File, so omit optional
+    # -BOT_INSTRUCT when blank (start_batch.ps1 already defaults it to "").
     $batchArgs = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
@@ -191,12 +240,14 @@ for ($experimentIndex = 0; $experimentIndex -lt $EXPERIMENTS.Count; $experimentI
         "-ENEMY_BUILD", $enemyBuild,
         "-BOT_RACE", $BOT_RACE,
         "-FORCE_STRATEGY", $strategy,
-        "-BOT_INSTRUCT", $BOT_INSTRUCT,
         "-COMMANDER_MODEL", $COMMANDER_MODEL,
         "-TOTAL_MATCHES", $matches,
         "-CONCURRENCY", $CONCURRENCY,
         "-BATCH_NAME", $batchName
     )
+    if (-not [string]::IsNullOrWhiteSpace($BOT_INSTRUCT)) {
+        $batchArgs += @("-BOT_INSTRUCT", $BOT_INSTRUCT)
+    }
 
     & $powerShellExe @batchArgs
     $batchExitCode = $LASTEXITCODE

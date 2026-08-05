@@ -1,20 +1,18 @@
 """人族动作空间 (Action Space).
 
-定义 LLM 唯一被允许产出的动作 key（dict.keys() of ``_ACTION_REGISTRY``），并把每个
-key 翻译成具体的 Sharpy ``ActBase`` 实例。
+定义 LLM 唯一被允许产出的动作 key（dict.keys() of ``_ACTION_REGISTRY``）。
 
-设计意图与 ``llm_bot.py`` 的状态机协同：
+* 宏观 key（``unit`` / ``building`` / ``tech``）：翻译成 Sharpy ``ActBase``，参数为
+  ``to_count``。
+* 军队控制 key（``army``：``move_group`` / ``scanner_sweep`` / ``scout``）：与宏观同一
+  注册表，由 Commander 执行 zone/mode；无 Sharpy ``action_func``。
 
-* LLM 输出的格式严格限制为 ``{"action": <key>, "to_count": n}``，**目标导向（Goal-Oriented）**。
-* 上层 Bot 维护动作历史序列，每个动作持有一个 lazy 实例化的 Sharpy Act；动态运营层
-  每帧 ``await act.execute()`` 让 Sharpy 自动调度资源。
-* 动作历史不会再根据完成条件出队；是否继续产生实际指令交给对应 Sharpy Act 的内部逻辑。
+API：
 
-新增 API：
-
-* ``get_action_space() -> Dict[str, str]`` —— 原有；返回 ``key: description``。
-* ``get_action(key, *args, **kwargs)`` —— 原有；按 key 生成 Sharpy Act 实例。
-* ``get_action_type(key) -> str`` —— 标记 ``unit`` / ``building`` / ``tech`` 等粗粒度类型。
+* ``get_action_space()`` —— 宏观 + 军队控制，统一合法 tool 清单。
+* ``get_macro_action_space()`` —— 仅宏观（可 ``get_action``）。
+* ``get_action(key, ...)`` —— 按宏观 key 生成 Sharpy Act。
+* ``get_action_type(key)`` —— ``unit`` / ``building`` / ``tech`` / ``army``。
 """
 
 from typing import Dict
@@ -399,34 +397,83 @@ _ACTION_REGISTRY: Dict[str, Dict] = {
         "type": "building",
         "action_func": lambda *args: MorphPlanetary(*args),
     },
+    # ==========================
+    # 5. 军队控制 (Army Control)
+    # 与宏观 key 同一注册表；无 Sharpy action_func，由 Commander 执行 zone/mode。
+    # 参数约定写在 description / tools schema 里，供模型按工具填参。
+    # ==========================
+    "move_group": {
+        "description": (
+            "Command one army_group to a destination zone with a movement mode. "
+            "Call exactly once per group_id present in this cycle's army_groups "
+            "(no duplicates, no omitted groups). When army_groups is empty, do not "
+            "call move_group. Copy group_id and destination_zone_id from the "
+            "observation; do not invent ids. movement_mode must be one of: "
+            "regroup, push, assault, harass, defensive_retreat, panic_retreat, "
+            "search_and_destroy."
+        ),
+        "type": "army",
+    },
+    "scanner_sweep": {
+        "description": (
+            "Request one Scanner Sweep on a zone (costs 50 Orbital energy). "
+            "zone_id must exist in the observation. Omit this tool to request no "
+            "scan this cycle."
+        ),
+        "type": "army",
+    },
+    "scout": {
+        "description": (
+            "Send or keep one SCV zone scout. zone_id must exist in the "
+            "observation. While an SCV scout is already active, repeat the same "
+            "zone_id to preserve it. Omit this tool to cancel any active scout."
+        ),
+        "type": "army",
+    },
 }
+
+ARMY_ACTION_KEYS = frozenset(
+    key for key, meta in _ACTION_REGISTRY.items() if meta.get("type") == "army"
+)
 
 
 def get_action_space() -> Dict[str, str]:
-    """返回 ``{action_key: description}`` 字典，作为提供给 LLM 的合法动作清单。
-
-    LLM 的输出必须严格属于这些 key；任何 key 之外的动作都被视为非法 JSON，调用
-    侧将拒绝并触发重试（或回退到 ``none``）。
-    """
+    """返回 ``{action_key: description}``：宏观 + 军队控制，统一合法 tool 清单。"""
     return {key: value["description"] for key, value in _ACTION_REGISTRY.items()}
+
+
+def get_macro_action_space() -> Dict[str, str]:
+    """仅宏观（可实例化为 Sharpy Act、参数为 to_count）的 key。"""
+    return {
+        key: value["description"]
+        for key, value in _ACTION_REGISTRY.items()
+        if value.get("type") != "army"
+    }
 
 
 def get_action(action_key: str, *args, **kwargs):
     """实例化 action_key 对应的 Sharpy Act 对象，转交动态运营层调度。"""
     if action_key not in _ACTION_REGISTRY:
         raise ValueError(f"Action key '{action_key}' not found in action space.")
-    return _ACTION_REGISTRY[action_key]["action_func"](*args, **kwargs)
+    meta = _ACTION_REGISTRY[action_key]
+    if meta.get("type") == "army":
+        raise ValueError(
+            f"Action key '{action_key}' is an army-control tool; it has no Sharpy Act."
+        )
+    return meta["action_func"](*args, **kwargs)
 
 
 def get_action_type(action_key: str) -> str:
-    """返回粗粒度动作类型 ``unit`` / ``building`` / ``tech``，未知则返回 ``unknown``。"""
+    """返回粗粒度类型 ``unit`` / ``building`` / ``tech`` / ``army``，未知则 ``unknown``。"""
     if action_key not in _ACTION_REGISTRY:
         return "unknown"
     return _ACTION_REGISTRY[action_key].get("type", "unknown")
 
 
 __all__ = [
+    "ARMY_ACTION_KEYS",
     "get_action_space",
+    "get_macro_action_space",
     "get_action",
     "get_action_type",
 ]

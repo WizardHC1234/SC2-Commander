@@ -1,4 +1,4 @@
-﻿"""Commander Agent: OpenAI tool_calls schema and application helpers."""
+"""Commander Agent: OpenAI tool_calls schema and application helpers."""
 
 from __future__ import annotations
 
@@ -11,13 +11,22 @@ from commander.combat_policy import (
     ArmyGroupCommand,
 )
 
+# Must match Action.py entries with type == "army".
 ARMY_TOOL_NAMES = frozenset({"move_group", "scanner_sweep", "scout"})
 
 
+def _macro_keys(action_space: Dict[str, str]) -> Dict[str, str]:
+    return {
+        name: description
+        for name, description in action_space.items()
+        if name not in ARMY_TOOL_NAMES
+    }
+
+
 def build_macro_tools(action_space: Dict[str, str]) -> List[Dict[str, Any]]:
-    """One OpenAI function tool per Action.py key."""
+    """One OpenAI function tool per macro Action.py key (to_count)."""
     tools: List[Dict[str, Any]] = []
-    for name, description in action_space.items():
+    for name, description in _macro_keys(action_space).items():
         tools.append(
             {
                 "type": "function",
@@ -46,33 +55,47 @@ def build_macro_tools(action_space: Dict[str, str]) -> List[Dict[str, Any]]:
     return tools
 
 
-def build_army_tools() -> List[Dict[str, Any]]:
+def build_army_tools(action_space: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Army-control tools; descriptions prefer Action.py registry when provided."""
+    space = action_space or {}
     modes = sorted(ALLOWED_MOVEMENT_MODES)
     return [
         {
             "type": "function",
             "function": {
                 "name": "move_group",
-                "description": (
-                    "Command one army_group to a destination zone with a movement mode. "
-                    "Call once per group present in the observation; omit a group to leave "
-                    "it without a command this cycle (full replace)."
+                "description": space.get(
+                    "move_group",
+                    (
+                        "Command one army_group to a destination zone with a movement mode. "
+                        "Call exactly once per group_id in army_groups; omit when empty."
+                    ),
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "group_id": {
                             "type": "string",
-                            "description": "Existing group id, e.g. group_0",
+                            "description": (
+                                "Exact group_id from this cycle's army_groups "
+                                "(e.g. group_0). Must exist in the observation."
+                            ),
                         },
                         "destination_zone_id": {
                             "type": "string",
-                            "description": "Existing zone id, e.g. zone_5",
+                            "description": (
+                                "Exact zone_id from the observation zone table "
+                                "(e.g. zone_5). Must exist in the observation."
+                            ),
                         },
                         "movement_mode": {
                             "type": "string",
                             "enum": modes,
-                            "description": "Movement / combat mode for this group",
+                            "description": (
+                                "How the group moves: regroup (safe gather), push, "
+                                "assault, harass, defensive_retreat, panic_retreat, "
+                                "or search_and_destroy (only with a runtime hint)."
+                            ),
                         },
                     },
                     "required": [
@@ -88,16 +111,22 @@ def build_army_tools() -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "scanner_sweep",
-                "description": (
-                    "Request one Scanner Sweep on a zone (50 Orbital energy). "
-                    "Omit this tool this cycle to request no scan."
+                "description": space.get(
+                    "scanner_sweep",
+                    (
+                        "Request one Scanner Sweep on a zone (50 Orbital energy). "
+                        "Omit to request no scan."
+                    ),
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "zone_id": {
                             "type": "string",
-                            "description": "Target zone id",
+                            "description": (
+                                "Exact zone_id from the observation (e.g. zone_5). "
+                                "Must exist in the observation."
+                            ),
                         }
                     },
                     "required": ["zone_id"],
@@ -109,16 +138,22 @@ def build_army_tools() -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "scout",
-                "description": (
-                    "Send or keep one SCV zone scout. Omit this tool this cycle to cancel "
-                    "any active scout."
+                "description": space.get(
+                    "scout",
+                    (
+                        "Send or keep one SCV zone scout. Omit to cancel any active scout."
+                    ),
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "zone_id": {
                             "type": "string",
-                            "description": "Target zone id",
+                            "description": (
+                                "Exact zone_id from the observation (e.g. zone_3). "
+                                "If a scout is already active, repeat the same zone_id "
+                                "to preserve it."
+                            ),
                         }
                     },
                     "required": ["zone_id"],
@@ -130,7 +165,8 @@ def build_army_tools() -> List[Dict[str, Any]]:
 
 
 def build_commander_tools(action_space: Dict[str, str]) -> List[Dict[str, Any]]:
-    return build_macro_tools(action_space) + build_army_tools()
+    """Flat tool list from unified Action registry (macro + army control)."""
+    return build_macro_tools(action_space) + build_army_tools(action_space)
 
 
 def normalize_tool_calls(raw_tool_calls: Any) -> List[Dict[str, Any]]:

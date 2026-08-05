@@ -1,4 +1,4 @@
-﻿"""One Commander decision cycle: tool calls → macro tasks + army policy."""
+"""One Commander decision cycle: tool calls → macro tasks + army policy."""
 
 from __future__ import annotations
 
@@ -9,11 +9,20 @@ from llm.caller import call_openai_detailed, load_agent_pool
 
 from commander.prompts import build_commander_messages
 from commander.tools import (
+    ARMY_TOOL_NAMES,
     apply_tool_calls,
     build_commander_tools,
     normalize_tool_calls,
     parse_tool_calls_from_content,
 )
+
+
+def _macro_action_space(action_space: Dict[str, str]) -> Dict[str, str]:
+    return {
+        key: description
+        for key, description in action_space.items()
+        if key not in ARMY_TOOL_NAMES
+    }
 
 logger = logging.getLogger("commander.agent")
 
@@ -83,6 +92,7 @@ def run_commander_decision(
     model_key: str,
     full_observation: Optional[Dict[str, Any]] = None,
     ensure_addon_parents=None,
+    runtime_hint: str = "",
 ) -> Dict[str, Any]:
     """Call the model and return applied macro/army results."""
     tool_mode = _resolve_tool_mode(model_key)
@@ -93,6 +103,7 @@ def run_commander_decision(
             observation_text=observation_text,
             previous_macro_tasks=previous_macro_tasks,
             previous_army_summary=previous_army_summary,
+            runtime_hint=runtime_hint,
             action_space=action_space,
             model_key=model_key,
             full_observation=full_observation,
@@ -101,14 +112,16 @@ def run_commander_decision(
 
     # Native OpenAI tools. Do NOT send tool_choice="auto" — many vLLM servers
     # reject it unless started with --enable-auto-tool-choice.
+    macro_space = _macro_action_space(action_space)
     messages = build_commander_messages(
         race=race,
         strategy_description=strategy_description,
         observation_text=observation_text,
         previous_macro_tasks=previous_macro_tasks,
         previous_army_summary=previous_army_summary,
+        runtime_hint=runtime_hint,
         tool_mode="native",
-        action_space=action_space,
+        action_space=macro_space,
     )
     tools = build_commander_tools(action_space)
     result = call_openai_detailed(
@@ -130,6 +143,7 @@ def run_commander_decision(
             observation_text=observation_text,
             previous_macro_tasks=previous_macro_tasks,
             previous_army_summary=previous_army_summary,
+            runtime_hint=runtime_hint,
             action_space=action_space,
             model_key=model_key,
             full_observation=full_observation,
@@ -144,7 +158,7 @@ def run_commander_decision(
 
     tasks, policy, issues = apply_tool_calls(
         tool_calls,
-        legal_action_keys=set(action_space.keys()),
+        legal_action_keys=set(macro_space.keys()),
     )
     if full_observation is not None and callable(ensure_addon_parents):
         tasks = ensure_addon_parents(tasks, full_observation)
@@ -170,15 +184,18 @@ def _run_json_mode(
     model_key: str,
     full_observation: Optional[Dict[str, Any]],
     ensure_addon_parents,
+    runtime_hint: str = "",
 ) -> Dict[str, Any]:
+    macro_space = _macro_action_space(action_space)
     messages = build_commander_messages(
         race=race,
         strategy_description=strategy_description,
         observation_text=observation_text,
         previous_macro_tasks=previous_macro_tasks,
         previous_army_summary=previous_army_summary,
+        runtime_hint=runtime_hint,
         tool_mode="json",
-        action_space=action_space,
+        action_space=macro_space,
     )
     result = call_openai_detailed(
         messages,
@@ -190,7 +207,7 @@ def _run_json_mode(
     tool_calls = parse_tool_calls_from_content(content)
     tasks, policy, issues = apply_tool_calls(
         tool_calls,
-        legal_action_keys=set(action_space.keys()),
+        legal_action_keys=set(macro_space.keys()),
     )
     if full_observation is not None and callable(ensure_addon_parents):
         tasks = ensure_addon_parents(tasks, full_observation)
