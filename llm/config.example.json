@@ -1,0 +1,27 @@
+{
+  "llm_agents_pool": {
+    "kimi-k2.5": {
+      "api_url": "https://your-provider.example/v1",
+      "api_key": "YOUR_SECRET_API_KEY",
+      "model_name": "kimi-k2.5",
+      "temperature": 0.5,
+      "top_p": null,
+      "max_tokens": null,
+      "is_reasoning": false,
+      "enable_identity": false,
+      "identity_prompt": ""
+    },
+    "example-local-openai-compatible": {
+      "api_url": "http://127.0.0.1:8000/v1",
+      "api_key": "EMPTY",
+      "model_name": "your-model-id",
+      "temperature": 0.5,
+      "top_p": null,
+      "max_tokens": null,
+      "is_reasoning": false,
+      "enable_identity": false,
+      "identity_prompt": "",
+      "tool_mode": "json"
+    }
+  }
+}

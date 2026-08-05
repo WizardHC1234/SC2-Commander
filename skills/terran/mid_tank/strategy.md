@@ -1,0 +1,35 @@
+# Summary
+
+A two-base Marine-Siege Tank strategy focused on a concentrated mid-game push. Establish a moderate economy, protect the Tank core with Marines, and reinforce the attack with the same composition.
+
+# Details
+
+* Opening and Economy: Build a total of 4 Refineries by taking both gas geysers at each of the first two bases, and grow to approximately 44 living SCVs. Replace lost SCVs as needed while preserving resources for Marine and Siege Tank production.
+* Expansion: Build an early second Command Center and remain on two bases until the main attack begins. Start the third Command Center after the attack has begun.
+* Production: Scale to 3 Barracks and 2 Factories. Continuously produce Marines and Siege Tanks while maintaining the resources and supply required for both unit types.
+* Technology: Equip 2 Barracks with Reactors, 1 Barracks with a Tech Lab, and both Factories with Tech Labs. Research Combat Shield. Keep the tech path on Barracks, Factories, and Combat Shield for the Marine-Siege Tank core.
+* Scouting: Send one early SCV to scout the enemy main base when the route is reasonably safe. Before the planned attack, update the enemy natural or intended first objective when its information is missing or stale; after an objective is cleared, scout the next relevant enemy base or neutral mineral expansion only when needed.
+* Scans: Request a Scanner Sweep when missing vision affects the attack, when necessary ground scouting is unsafe, or when cloaked or burrowed enemies require detection. Prefer scanning in parallel with a ready attack rather than holding the push for vision alone.
+* Pre-Attack Army Posture: Before the attack gate is satisfied, keep available Marines and Siege Tanks concentrated in one safe staging zone near the forward route. Launch the planned attack only after that force is gathered and complete.
+* Main Attack Gate: Begin the planned attack as soon as at least 45 completed and living Marines and 10 completed and living Siege Tanks are available. Both unit thresholds must be satisfied.
+* Attack Objective: Attack the enemy main base directly and maintain this objective while it remains valid. After it is cleared, continue toward the nearest known enemy base or structure.
+* Engagement and Reinforcement: After the planned attack begins, keep the concentrated force advancing toward the current objective while it can make progress. Send newly completed Marines and Siege Tanks to the same objective instead of starting a separate attack route.
+* Recovery and Cleanup: If the force can no longer make progress against a superior defense, withdraw the survivors to a safe owned zone, rebuild to 45 Marines and 10 Siege Tanks, and concentrate them before attacking again. Search remaining expansions after known enemy bases are destroyed.
+* Ultimate Goal: Continue toward approximately 96 Marines, 20 Siege Tanks, and 44 SCVs to fill the 200-supply limit. Replace combat losses until all enemy structures are destroyed.
+
+# Resource Costs
+
+* SCV: 50 minerals, 0 gas, 1 supply. Produced from a Command Center.
+* Marine: 50 minerals, 0 gas, 1 supply. Produced from a Barracks.
+* Siege Tank: 150 minerals, 125 gas, 3 supply. Produced from a Factory with a Factory Tech Lab.
+* Supply Depot: 100 minerals, 0 gas. Provides 8 supply.
+* Refinery: 75 minerals, 0 gas. Collects gas.
+* Barracks: 150 minerals, 0 gas. Requires a completed Supply Depot.
+* Factory: 150 minerals, 100 gas. Requires a Barracks.
+* Barracks Reactor: 50 minerals, 50 gas. Attached to a completed Barracks and enables two Marine production queues.
+* Barracks Tech Lab: 50 minerals, 25 gas. Attached to a completed Barracks and required for Combat Shield.
+* Factory Tech Lab: 50 minerals, 25 gas. Attached to a completed Factory and required for Siege Tank production.
+* Combat Shield: 100 minerals, 100 gas. Researched at a Barracks Tech Lab.
+* Command Center: 400 minerals, 0 gas. Produces SCVs.
+* Orbital Command: 150 minerals, 0 gas. Requires a Barracks.
+* Scanner Sweep: 50 Orbital energy. Requires an Orbital Command and provides temporary vision and detection.

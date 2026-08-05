@@ -1,0 +1,61 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.dll
+
+# Packaging / envs
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.env
+ENV/
+
+# IDE / tools
+.idea/
+.vscode/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.claude/
+.codegraph/
+.codex/
+.agents/
+.workbuddy/
+
+# Secrets & local machine config
+llm/config.json
+config-local.ini
+.env.*
+
+# Match / analysis / runtime data (do not upload)
+game_records/
+analysis_results/
+paper_notes/
+paper_assets/
+data/
+tmp/
+game/
+Bots/
+*.SC2Replay
+*.log
+optimizer_timeline.txt
+version.txt
+
+# Native / large build artifacts
+sc2-pathlib/
+sc2pathlib/target/
+sc2pathlib/*.pyd
+sc2pathlib/*.so
+sc2pathlib/*.dll
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db

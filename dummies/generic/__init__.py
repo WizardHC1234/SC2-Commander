@@ -1,0 +1,1 @@
+"""Generic dummy bots package."""
