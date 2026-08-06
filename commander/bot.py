@@ -91,6 +91,7 @@ class CommanderBot(KnowledgeBot):
         self.llm_previous_decision: Optional[Dict[str, Any]] = None
         self._last_decision_time: float = -self.WAKE_COOLDOWN
         self._decision_count: int = 0
+        self._map_topology_text: Optional[str] = None
         self._wake_event: Optional[Dict[str, Any]] = None
         self._wake_prev_satisfied: Optional[bool] = None
         self._wake_is_fallback: bool = False
@@ -328,6 +329,28 @@ class CommanderBot(KnowledgeBot):
             baseline_objective_status=self._wake_baseline_objective_status,
         )
 
+    def _get_map_topology_text(self) -> str:
+        """Static map topology for the system prompt; computed once per match."""
+        if self._map_topology_text is not None:
+            return self._map_topology_text
+        text = ""
+        try:
+            from commander.combat_state import _zone_topology
+            from commander.observation import format_map_topology
+
+            zones = list(getattr(self.zone_manager, "expansion_zones", []) or [])
+            if zones:
+                topology = _zone_topology(
+                    zones,
+                    set(getattr(self.zone_manager, "gather_points", []) or []),
+                )
+                text = format_map_topology(topology)
+        except Exception as exc:
+            logger.warning("map topology build failed: %s", exc)
+            text = ""
+        self._map_topology_text = text
+        return text
+
     def _run_decision(
         self,
         *,
@@ -368,6 +391,7 @@ class CommanderBot(KnowledgeBot):
             previous_macro_tasks=previous_macro,
             previous_army_summary=self._last_army_summary,
             runtime_hint=runtime_hint,
+            map_topology_text=self._get_map_topology_text(),
             action_space=action_space,
             model_key=model_key,
             full_observation=full_obs,
@@ -375,9 +399,25 @@ class CommanderBot(KnowledgeBot):
         )
         tasks = outcome["tasks"]
         policy = outcome["policy"]
-        self._replace_active_tasks(tasks)
-        self.commander_army_policy = policy
-        self._last_army_summary = outcome["army_summary"]
+        accepted = bool(outcome.get("accepted", True))
+        if accepted:
+            self._replace_active_tasks(tasks)
+            self.commander_army_policy = policy
+            self._last_army_summary = outcome["army_summary"]
+        else:
+            # Validation failed even after reflection: inherit the previous
+            # decision rather than wiping macro tasks / army policy with the
+            # empty parses from the rejected response.
+            issues = list(outcome.get("issues") or [])
+            if "decision_inherited_from_previous" not in issues:
+                issues.append("decision_inherited_from_previous")
+            outcome["issues"] = issues
+            prev_decision = self.llm_previous_decision or {}
+            tasks = [
+                {"action": c.get("name"), "to_count": c.get("to_count")}
+                for c in (prev_decision.get("macro_commands") or [])
+                if isinstance(c, dict) and c.get("name")
+            ]
         wake_event = outcome.get("wake_event")
         wake_fallback = False
         if not wake_event:
@@ -417,7 +457,9 @@ class CommanderBot(KnowledgeBot):
             "wake_baseline_objective_status": self._wake_baseline_objective_status,
         }
         # Available to the next observation cycle as [Previous Decision].
-        army_summary = outcome.get("army_summary") or {}
+        # Reuse _last_army_summary so a rejected cycle reports the inherited
+        # (still active) army commands instead of the rejected empty parse.
+        army_summary = self._last_army_summary or {}
         self.llm_previous_decision = {
             "game_time_seconds": round(float(self.time), 1),
             "macro_commands": [
@@ -481,7 +523,8 @@ class CommanderBot(KnowledgeBot):
                 ),
             )
         else:
-            self._emit("  army=(no groups)")
+            # Applied commands this cycle (not observation army_groups).
+            self._emit("  army=(no commands applied)")
         if army.get("scan_zone_id"):
             self._emit("  scan=%s", army["scan_zone_id"])
         if army.get("scout_zone_id"):

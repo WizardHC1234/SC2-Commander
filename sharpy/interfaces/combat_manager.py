@@ -26,6 +26,9 @@ class MoveType(enum.IntEnum):
     Harass = 5
     # Attempt to regroup with other units.
     ReGroup = 6
+    # Move to the target and stay there; shoot enemies in range but never
+    # chase and never attack structures. Used by Commander hold/contain.
+    Hold = 7
 
 
 retreat_move_types = {MoveType.DefensiveRetreat, MoveType.PanicRetreat}

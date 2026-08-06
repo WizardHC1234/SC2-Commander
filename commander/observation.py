@@ -398,6 +398,7 @@ def build_full_observation(
             "remembered_enemy_unit_count": army.get("remembered_enemy_units", 0),
             "visible_enemy_unit_count_near_army": army.get("close_enemy_units", 0),
             "army_nearest_zone": army.get("army_nearest_zone"),
+            "zone_topology": deepcopy(_dict(army.get("zone_topology"))),
         },
         "capabilities": {
             "scan": {
@@ -751,10 +752,48 @@ def _group_lines(army_control: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def format_map_topology(topology: Dict[str, Any]) -> str:
+    """Render the static map topology block for the system prompt."""
+    topology = _dict(topology)
+    topo_zones = [_dict(zone) for zone in _list(topology.get("zones"))]
+    primary_route = _list(topology.get("primary_route"))
+
+    lines: List[str] = ["[Map Topology]"]
+    if primary_route:
+        lines.append(f"primary_route={_items(primary_route)}")
+    if topo_zones:
+        lines.append("zone_id|role|ramp|island|route|neighbors|path_to_enemy_main")
+        for zone in topo_zones:
+            adjacent = "; ".join(
+                f"{item.get('zone_id')}({item.get('path_distance')})"
+                for item in _list(zone.get("neighbors"))
+            ) or "none"
+            lines.append(
+                "|".join(
+                    str(value)
+                    for value in (
+                        _value(zone.get("zone_id")),
+                        _value(zone.get("zone_role")),
+                        "yes" if zone.get("has_ramp") else "no",
+                        "yes" if zone.get("is_island") else "no",
+                        "yes" if zone.get("on_primary_route") else "no",
+                        adjacent,
+                        _value(zone.get("path_distance_to_enemy_main")),
+                    )
+                )
+            )
+    else:
+        lines.append("none")
+    return "\n".join(lines)
+
+
 def _zone_lines(army_control: Dict[str, Any]) -> List[str]:
     zones = [_dict(zone) for zone in _list(army_control.get("zones"))]
+
+    lines: List[str] = ["[Zone State Table]"]
     if not zones:
-        return ["none"]
+        lines.append("none")
+        return lines
 
     def compact_row(values: Iterable[Any]) -> str:
         return "|".join(
@@ -762,27 +801,31 @@ def _zone_lines(army_control: Dict[str, Any]) -> List[str]:
             for value in values
         )
 
+    lines.append(f"row_count={len(zones)}")
+    lines.append(
+        "columns="
+        + compact_row(
+            (
+                "zone_id",
+                "owner",
+                "zone_role",
+                "vision_state",
+                "own_contents",
+                "visible_enemy_contents",
+                "last_seen_enemy_contents",
+                "enemy_information_age_seconds",
+                "under_attack",
+            )
+        )
+    )
+
     owner_order = {"own": 0, "enemy": 1, "neutral": 2}
     zones.sort(
         key=lambda zone: (
             owner_order.get(str(zone.get("owner")), 3),
-            _numeric(zone.get("distance_from_army")),
             _zone_number(zone.get("zone_id")),
         )
     )
-    lines = [
-        "[Zone State Table]",
-        f"row_count={len(zones)}",
-        "columns=" + compact_row(
-            (
-                "zone_id", "owner", "zone_role", "vision_state",
-                "distance_from_army", "distance_to_own_main",
-                "distance_to_enemy_main", "own_non_army_contents",
-                "visible_enemy_contents", "last_seen_enemy_contents",
-                "enemy_information_age_seconds", "under_attack",
-            )
-        ),
-    ]
     for zone in zones:
         lines.append(
             compact_row(
@@ -791,9 +834,6 @@ def _zone_lines(army_control: Dict[str, Any]) -> List[str]:
                     _value(zone.get("owner")),
                     _value(zone.get("zone_role")),
                     _value(zone.get("vision_state")),
-                    _value(zone.get("distance_from_army")),
-                    _value(zone.get("distance_to_own_main")),
-                    _value(zone.get("distance_to_enemy_main")),
                     _counts(
                         zone.get(
                             "own_non_army_contents",

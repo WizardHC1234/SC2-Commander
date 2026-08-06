@@ -260,7 +260,6 @@ def collect_army_control_state(act: Any) -> Dict[str, Any]:
         act,
         army_position,
         zones,
-        set(getattr(act.zone_manager, "gather_points", [])),
         float(getattr(ai, "time", 0.0)),
         controlled_unit_tags=set(getattr(controlled_units, "tags", set())),
     )
@@ -332,6 +331,7 @@ def collect_army_control_state(act: Any) -> Dict[str, Any]:
         "own_unit_type_counts": _living_combat_unit_counts(act),
         "close_enemy_type_counts": _unit_counts(close_enemies),
         "known_enemy_type_counts": _unit_counts(enemy_combat_units),
+        "zone_topology": _zone_topology(zones, set(getattr(act.zone_manager, "gather_points", []))),
     }
 
 
@@ -479,15 +479,13 @@ def _available_zones(
     act: Any,
     position: Any,
     zones: list,
-    gather_points: set,
     current_time: float,
     controlled_unit_tags: Optional[set] = None,
 ) -> list:
+    del position
     result = []
     controlled_unit_tags = controlled_unit_tags or set()
     zone_count = len(zones)
-    own_main = zones[0] if zones else None
-    enemy_main = zones[-1] if zones else None
     for index, zone in enumerate(zones):
         owner = "own" if getattr(zone, "is_ours", False) else (
             "enemy" if getattr(zone, "is_enemys", False) else "neutral"
@@ -548,7 +546,6 @@ def _available_zones(
             "owner": owner,
             "zone_role": _zone_role(index, zone_count, owner),
             "under_attack": under_attack,
-            "on_gather_route": index in gather_points,
             "own_units": len(own_units),
             "own_non_army_units": len(own_non_army_units),
             "known_enemy_units": len(known_enemy_units),
@@ -564,28 +561,7 @@ def _available_zones(
             "visible_enemy_power": visible_enemy_combat_power,
             "remembered_enemy_power": remembered_enemy_combat_power,
             "combat_power_balance": combat_power_balance,
-            "own_power": _power_value(getattr(zone, "our_power", None)),
-            "known_enemy_power": _power_value(
-                getattr(zone, "known_enemy_power", None)
-            ),
-            "enemy_static_power": enemy_static_power,
         }
-        item["power_balance"] = round(
-            item["own_power"] - item["known_enemy_power"], 2
-        )
-        if position is not None:
-            distance_from_army = round(
-                position.distance_to(zone.center_location), 1
-            )
-            item["distance_from_army"] = distance_from_army
-        if own_main is not None:
-            item["distance_to_own_main"] = round(
-                zone.center_location.distance_to(own_main.center_location), 1
-            )
-        if enemy_main is not None:
-            item["distance_to_enemy_main"] = round(
-                zone.center_location.distance_to(enemy_main.center_location), 1
-            )
         result.append(item)
     return result
 
@@ -604,6 +580,95 @@ def _zone_role(index: int, zone_count: int, owner: str) -> str:
     if owner == "enemy":
         return "enemy_expansion"
     return "neutral_expansion"
+
+
+def _zone_topology(zones: list, gather_points: set) -> Dict[str, Any]:
+    """Static zone topology for LLM: adjacency, primary route, node labels.
+
+    Adjacency uses a via-test on Sharpy's precomputed zone.paths:
+    i and j are adjacent only if the shortest path does not pass through
+    another zone's center (triangle inequality + waypoint proximity).
+    """
+    if not zones:
+        return {"primary_route": [], "zones": []}
+
+    zone_count = len(zones)
+    enemy_main_index = zone_count - 1
+    primary_route = [f"zone_{index}" for index in sorted(gather_points)]
+    enemy_main_zone_id = f"zone_{enemy_main_index}"
+    if enemy_main_zone_id not in primary_route:
+        primary_route.append(enemy_main_zone_id)
+
+    def path_distance(i: int, j: int) -> Optional[float]:
+        path = getattr(zones[i], "paths", {}).get(j)
+        if path is None:
+            return None
+        distance = float(getattr(path, "distance", 0.0))
+        return distance if distance > 0 else None
+
+    def path_goes_near_zone(i: int, j: int, k: int, radius: float = 14.0) -> bool:
+        path = getattr(zones[i], "paths", {}).get(j)
+        if path is None:
+            return False
+        waypoints = getattr(path, "path", ()) or ()
+        center = zones[k].center_location
+        step = max(1, len(waypoints) // 30)
+        for idx in range(0, len(waypoints), step):
+            point = path.get_index(idx)
+            if point is None:
+                continue
+            if point.distance_to_point2(center) < radius:
+                return True
+        return False
+
+    adjacent: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(zone_count)}
+    eps = 8.0
+    for i in range(zone_count):
+        for j in range(i + 1, zone_count):
+            direct = path_distance(i, j)
+            if direct is None:
+                continue
+            via = False
+            for k in range(zone_count):
+                if k in (i, j):
+                    continue
+                d_ik = path_distance(i, k)
+                d_kj = path_distance(k, j)
+                if d_ik is not None and d_kj is not None:
+                    if d_ik + d_kj <= direct + eps:
+                        via = True
+                        break
+                if path_goes_near_zone(i, j, k):
+                    via = True
+                    break
+            if not via:
+                adjacent[i].append({"zone_id": f"zone_{j}", "path_distance": round(direct, 1)})
+                adjacent[j].append({"zone_id": f"zone_{i}", "path_distance": round(direct, 1)})
+
+    topology_zones: List[Dict[str, Any]] = []
+    for index, zone in enumerate(zones):
+        owner = "own" if getattr(zone, "is_ours", False) else (
+            "enemy" if getattr(zone, "is_enemys", False) else "neutral"
+        )
+        distance_to_enemy_main = path_distance(index, enemy_main_index)
+        topology_zones.append(
+            {
+                "zone_id": f"zone_{index}",
+                "zone_role": _zone_role(index, zone_count, owner),
+                "has_ramp": getattr(zone, "ramp", None) is not None,
+                "is_island": bool(getattr(zone, "is_island", False)),
+                "on_primary_route": index in gather_points,
+                "neighbors": adjacent[index],
+                "path_distance_to_enemy_main": round(distance_to_enemy_main, 1)
+                if distance_to_enemy_main is not None
+                else None,
+            }
+        )
+
+    return {
+        "primary_route": primary_route,
+        "zones": topology_zones,
+    }
 
 
 def _power_value(power: Any) -> float:

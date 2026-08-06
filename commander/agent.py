@@ -240,6 +240,7 @@ def run_commander_decision(
     full_observation: Optional[Dict[str, Any]] = None,
     ensure_addon_parents=None,
     runtime_hint: str = "",
+    map_topology_text: str = "",
 ) -> Dict[str, Any]:
     """Call the model and return applied macro/army results."""
     tool_mode = _resolve_preferred_tool_mode(model_key)
@@ -251,6 +252,7 @@ def run_commander_decision(
             previous_macro_tasks=previous_macro_tasks,
             previous_army_summary=previous_army_summary,
             runtime_hint=runtime_hint,
+            map_topology_text=map_topology_text,
             action_space=action_space,
             model_key=model_key,
             full_observation=full_observation,
@@ -267,6 +269,7 @@ def run_commander_decision(
         previous_macro_tasks=previous_macro_tasks,
         previous_army_summary=previous_army_summary,
         runtime_hint=runtime_hint,
+        map_topology_text=map_topology_text,
         action_space=action_space,
         model_key=model_key,
         full_observation=full_observation,
@@ -289,6 +292,7 @@ def run_commander_decision(
             previous_macro_tasks=previous_macro_tasks,
             previous_army_summary=previous_army_summary,
             runtime_hint=runtime_hint,
+            map_topology_text=map_topology_text,
             action_space=action_space,
             model_key=model_key,
             full_observation=full_observation,
@@ -310,6 +314,7 @@ def _run_with_wake_reflection(
     full_observation: Optional[Dict[str, Any]],
     ensure_addon_parents,
     runtime_hint: str,
+    map_topology_text: str,
     tool_mode: str,
 ) -> Dict[str, Any]:
     macro_space = _macro_action_space(action_space)
@@ -326,6 +331,7 @@ def _run_with_wake_reflection(
         previous_macro_tasks=previous_macro_tasks,
         previous_army_summary=previous_army_summary,
         runtime_hint=runtime_hint,
+        map_topology_text=map_topology_text,
         tool_mode=tool_mode,
         action_space=prompt_action_space,
     )

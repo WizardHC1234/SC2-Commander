@@ -66,7 +66,7 @@ class GenericMicro(MicroStep):
         if self.move_type == MoveType.DefensiveRetreat or self.move_type == MoveType.PanicRetreat:
             return current_command
 
-        if self.move_type == MoveType.Push or self.move_type == MoveType.ReGroup:
+        if self.move_type == MoveType.Push or self.move_type == MoveType.ReGroup or self.move_type == MoveType.Hold:
             return current_command
 
         # in combat
@@ -111,7 +111,7 @@ class GenericMicro(MicroStep):
     def unit_solve_combat(self, unit: Unit, current_command: Action) -> Action:
         closest = self.closest_units.get(unit.tag, None)
 
-        if self.move_type == MoveType.DefensiveRetreat or self.move_type == MoveType.ReGroup:
+        if self.move_type == MoveType.DefensiveRetreat or self.move_type == MoveType.ReGroup or self.move_type == MoveType.Hold:
             if self.ready_to_shoot(unit):
                 if closest and self.is_target(closest):
                     range = self.unit_values.real_range(unit, closest)

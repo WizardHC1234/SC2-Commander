@@ -251,8 +251,10 @@ def format_wake_reflection_feedback(
             "",
             "Rules:",
             "- When army_groups is non-empty, emit exactly one move_group for every "
-            "group_id in this cycle (regroup to a safe staging zone is fine before "
+            "group_id in this cycle (hold at a safe defensive zone is fine before "
             "the attack gate). Do not omit army tools while waiting on production.",
+            "- Emit one valid JSON object with a tool_calls array. Do not add extra "
+            "closing braces (bad: \"seconds\":30}}]; good: \"seconds\":30}]).",
             "- set_wake_event is required and must be reachable from the macro tools "
             "you emit in THIS response.",
             "- If you wake on unit_count_at_least or unit_count_less_than for a "

@@ -96,8 +96,11 @@ def build_army_tools(action_space: Optional[Dict[str, str]] = None) -> List[Dict
                             "enum": modes,
                             "description": (
                                 "How the group moves: regroup (safe gather), push, "
-                                "assault, harass, defensive_retreat, panic_retreat, "
-                                "or search_and_destroy (only with a runtime hint)."
+                                "assault, harass, hold (settle at the zone and fight "
+                                "only what comes in range), contain (settle outside "
+                                "an enemy zone, never enter), defensive_retreat, "
+                                "panic_retreat, or search_and_destroy (only with a "
+                                "runtime hint)."
                             ),
                         },
                     },
@@ -319,8 +322,64 @@ def normalize_tool_calls(raw_tool_calls: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _extract_tool_calls_payload(data: Any) -> Optional[Dict[str, Any]]:
+    """Pick a dict that looks like tool_calls JSON from json / json_repair output."""
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        for item in data:
+            found = _extract_tool_calls_payload(item)
+            if found is not None and (
+                "tool_calls" in found
+                or "tools" in found
+                or "name" in found
+            ):
+                return found
+        for item in data:
+            found = _extract_tool_calls_payload(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _loads_tool_json(text: str) -> Any:
+    """Strict json.loads first; fall back to json_repair for LLM-broken JSON."""
+    import json
+    import re
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        blob = match.group(0)
+        try:
+            return json.loads(blob)
+        except Exception:
+            pass
+        try:
+            from json_repair import loads as repair_loads
+
+            return repair_loads(blob)
+        except Exception:
+            pass
+
+    try:
+        from json_repair import loads as repair_loads
+
+        return repair_loads(text)
+    except Exception:
+        return None
+
+
 def parse_tool_calls_from_content(text: str) -> List[Dict[str, Any]]:
-    """Parse JSON tool_calls embedded in assistant content (vLLM / no native tools)."""
+    """Parse JSON tool_calls embedded in assistant content (vLLM / no native tools).
+
+    Falls back to ``json_repair`` when the model emits broken braces/commas, which
+    is common with JSON tool_mode (e.g. ``\"seconds\":1438}}]``).
+    """
     import json
     import re
 
@@ -331,16 +390,7 @@ def parse_tool_calls_from_content(text: str) -> List[Dict[str, Any]]:
         cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned).strip()
 
-    data: Any = None
-    try:
-        data = json.loads(cleaned)
-    except Exception:
-        match = re.search(r"\{[\s\S]*\}", cleaned)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-            except Exception:
-                data = None
+    data = _extract_tool_calls_payload(_loads_tool_json(cleaned))
     if not isinstance(data, dict):
         return []
 
@@ -368,7 +418,12 @@ def parse_tool_calls_from_content(text: str) -> List[Dict[str, Any]]:
             try:
                 args = json.loads(args)
             except Exception:
-                args = {}
+                try:
+                    from json_repair import loads as repair_loads
+
+                    args = repair_loads(args)
+                except Exception:
+                    args = {}
         if not isinstance(name, str) or not name:
             continue
         if not isinstance(args, dict):
@@ -419,7 +474,7 @@ def validate_army_tools_for_cycle(
         return [
             "army_move_group:missing — army_groups is non-empty so emit exactly "
             f"one move_group per group_id ({', '.join(required)}); typically "
-            "regroup to a safe staging zone while production continues"
+            "hold at a safe defensive zone while production continues"
         ]
     return [
         "army_move_group:incomplete — missing move_group for "

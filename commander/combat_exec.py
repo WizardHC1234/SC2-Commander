@@ -26,6 +26,7 @@ MOVE_TYPE_BY_NAME = {
     "DefensiveRetreat": MoveType.DefensiveRetreat,
     "PanicRetreat": MoveType.PanicRetreat,
     "ReGroup": MoveType.ReGroup,
+    "Hold": MoveType.Hold,
     "SearchAndDestroy": MoveType.SearchAndDestroy,
 }
 RETREAT_MODES = {"defensive_retreat", "panic_retreat"}
@@ -364,7 +365,13 @@ class CombatControlAct(ActBase):
                     command.destination_zone_id,
                     enter_zone=True,
                 )
+            elif command.movement_mode == "contain":
+                target = self._resolve_contain_target(
+                    command.destination_zone_id, units
+                )
             else:
+                # hold and retreats: settle at the zone's safe point
+                # (own/neutral: gather-point side; enemy: zone center).
                 target = self._resolve_target(command.destination_zone_id)
             if target is None:
                 continue
@@ -932,6 +939,27 @@ class CombatControlAct(ActBase):
             key=lambda item: position.distance_to(item.center_location),
         )
         return self._safe_own_base_target(nearest)
+
+    def _resolve_contain_target(
+        self,
+        destination_zone_id: str,
+        units: Units,
+    ) -> Optional[Point2]:
+        """Contain = settle outside the target zone's entrance, never inside.
+
+        Uses the zone's gather point (its ground entrance) when available,
+        otherwise a point on the own-main side of the zone.
+        """
+        zones = list(self.knowledge.zone_manager.expansion_zones)
+        zone = self._zone_by_id(zones, destination_zone_id)
+        if zone is None:
+            return None
+        center = zone.center_location
+        gather_point = getattr(zone, "gather_point", None)
+        if gather_point is not None and gather_point.distance_to(center) > 0:
+            return self._outside_expansion_footprint(center, gather_point)
+        reference = units.center if units.exists else self.ai.start_location
+        return self._outside_expansion_footprint(center, reference)
 
     def _safe_expansion_target(self, zone) -> Point2:
         center = zone.center_location

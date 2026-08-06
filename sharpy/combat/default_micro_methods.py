@@ -36,7 +36,9 @@ class DefaultMicroMethods:
         for group in combat.own_groups:
             # LLM / explicit ReGroup: destination has priority over cohesion
             # and local fights (same level as retreat).
-            if move_type == MoveType.ReGroup:
+            # Hold: same destination priority, units settle and only fight
+            # what comes in range (handled in unit_solve_combat).
+            if move_type == MoveType.ReGroup or move_type == MoveType.Hold:
                 combat.move_to(group, target, move_type)
                 continue
 

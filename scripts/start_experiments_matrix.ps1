@@ -26,9 +26,9 @@ $FORCE_STRATEGY = "tank"
 # =============================================================================
 # 2. Commander model (must exist in llm/config.json -> llm_agents_pool)
 # =============================================================================
-# $COMMANDER_MODEL = "qwen3-32b"
+$COMMANDER_MODEL = "qwen3-32b"
 # $COMMANDER_MODEL = "kimi-k2.5"
-$COMMANDER_MODEL = "deepseek-v4-flash"
+# $COMMANDER_MODEL = "deepseek-v4-flash"
 
 # =============================================================================
 # 3. Run control

@@ -73,11 +73,12 @@ _ARMY_ZONE_AND_OUTPUT = """\
 
 You also command each army_group's destination zone and movement mode, one Scanner Sweep request, and at most one SCV zone-scout request via tools. You do not control production, economy, general worker allocation, upgrades, expansions, unit tags, positions, or individual combat units with army tools.
 
-[4.1] Zone table reading
+[4.1] Zone topology and state
 
-- The columns= line defines the | separated field order; row_count is the number of following zone rows.
-- own_non_army_contents excludes controlled combat units already represented in army_groups; never add zone contents to a group's composition.
-- distance_from_army uses the current controlled-army center. distance_to_own_main and distance_to_enemy_main use fixed map landmarks; none of these fields selects an objective or proves safety.
+- [Map Topology] in the system prompt is static map information (sent once, not repeated in each observation). primary_route is the default ground attack route. Each row lists role, ramp, island, route membership, neighbors with true ground path distances, and path distance to the enemy main.
+- neighbors means the zones connect directly by ground without passing through another zone; the number in parentheses is the ground path distance. Example: "neighbors=zone_1(28.5); zone_2(45.1)" means this zone is directly connected to zone_1 (distance 28.5) and zone_2 (distance 45.1). Use only the zone_id part (e.g. zone_1) as tool parameters. Use neighbors to plan staging, retreat, and multi-hop assaults instead of guessing from zone numbers.
+- [Zone State Table] is dynamic. The columns= line defines the | separated field order; row_count is the number of following zone rows.
+- own_contents excludes controlled combat units already represented in army_groups; never add zone contents to a group's composition.
 - vision_state reports current visibility. visible_enemy_contents is visible now; last_seen_enemy_contents is remembered under fog; enemy_information_age_seconds reports its age or no_enemy_record.
 - A fogged or partially_visible zone with no visible enemies is not confirmed empty.
 
@@ -87,15 +88,17 @@ You also command each army_group's destination zone and movement mode, one Scann
 - move_group: exactly one call per group_id currently present in army_groups. When army_groups is empty, emit no move_group tools.
 - scanner_sweep / scout: call at most once this cycle, or omit (omit scout = cancel; omit scanner_sweep = no scan).
 
-[4.3] Movement semantics
+[4.3] Movement semantics (how the runtime actually executes them)
 
-- regroup: move toward a safe own or neutral-zone gather point while preserving cohesion. A neutral zone is safe only when it has no known enemy units, enemy power, static defense, or active threat.
-- push: advance through or toward the selected zone, taking limited forward fights without chasing targets behind the advance.
-- assault: actively attack toward an enemy or useful neutral zone.
-- harass: pressure a vulnerable enemy or useful neutral objective while avoiding the enemy main force and unfavorable committed engagements.
-- defensive_retreat: withdraw to an own zone while allowing defensive fire.
-- panic_retreat: escape to an own zone with survival as the priority.
-- search_and_destroy: begin at the selected zone and automatically sweep different expansion zones while this mode remains active. Visible enemy structures are attacked first.
+- regroup: explicit move toward the selected zone; the group does not stop for local fights and does not fight enemy buildings. Use regroup only while relocating across the map to a safe zone — do NOT leave a group parked in regroup. If the group should stay at a position and defend it, use hold instead. Choose a safe own zone (or a neutral zone only when it has no known enemy units, enemy power, static defense, or active threat).
+- push: attack-move toward the selected zone; units fight back when engaged from the sides but do not chase targets behind the advance. Use it to travel forward under fire.
+- assault: attack-move toward an enemy or useful neutral zone. This is a committed attack, not a cautious probe — while advancing, the army may first close with nearby own groups or local enemies instead of running a perfect straight line. Do not use it just to reposition.
+- harass: for Terran main armies this behaves much like a normal attack-move toward the zone; it does NOT automatically avoid the enemy main force or hunt workers. Any avoidance must come from your chosen destination zone, not from the mode itself. Prefer push/regroup unless a strategy explicitly calls for a dedicated harasser.
+- defensive_retreat: move to an own zone while still shooting back; the army keeps firing as it withdraws.
+- panic_retreat: move to an own zone with escape as the priority; it does not stop to fight.
+- hold: move to the zone's defensive point and stay there; units shoot enemies that come in range but never chase and never attack structures. Siege tanks stay sieged when enemies are near. Use it to guard an own zone or a taken position without advancing.
+- contain: move to the entrance just OUTSIDE the target (usually enemy) zone and stay there, engaging only what comes out. Use it to blockade or siege-wait at an enemy base without committing to an assault; pick the target zone using [Zone Topology].neighbors.
+- search_and_destroy: the Commander sweeps for targets itself. All idle combat units from every army_group are sent together; visible enemy structures are attacked first, otherwise the army automatically rotates through expansion zones. This cycle's other move_group modes are ignored while a search_and_destroy command is active.
 """
 
 _ARMY_DECISION_RULES = """\
@@ -106,7 +109,7 @@ _ARMY_DECISION_RULES = """\
 - Act as a strategy executor. Treat required conditions that cannot be confirmed from the observation as unsatisfied.
 - Use only the supplied observation and treat masked information as unknown. Completed and under-construction units, structures, and technology are prerequisite evidence only for gates; do not invent missing combat power. Read living vs training composition from [Own Forces].
 - Base every decision on the current observation. A previous offensive or regroup order is historical context, not permission to repeat it when the situation changed.
-- Treat zone_id as an identifier only; adjacent zone numbers do not imply adjacent map positions.
+- Use zone_id as an identifier. Use [Map Topology].neighbors and primary_route to understand map connections; never infer adjacency from zone numbers.
 
 [5.2] Main force and reinforcement
 
@@ -119,9 +122,10 @@ _ARMY_DECISION_RULES = """\
 
 - Evaluate strategy attack-composition readiness from the combined combat units across all current army_groups, excluding units still in production. If that combined force would meet the strategy gate only by ignoring separated reinforcement or detached combat units, treat the army as not yet attack-ready and merge first.
 - Before initiating a planned offensive, explicitly compare each numeric attack-gate component with completed living units in the reasoning; every component must be satisfied, and being nearly ready or having a favorable estimated advantage is insufficient. Once a valid offensive begins, use current progress and the strategy recovery conditions rather than automatically reapplying the opening gate after each loss.
-- Unmet attack gates mean do not start the planned offensive yet. They do not mean skipping army tools: when army_groups is non-empty, still issue move_group each cycle—typically regroup to a safe staging zone—so the force concentrates while production continues.
+- Unmet attack gates mean do not start the planned offensive yet. They do not mean skipping army tools: when army_groups is non-empty, still issue move_group each cycle—typically hold at a safe defensive zone (e.g. your natural) so the force concentrates while production continues and can fight off an incoming attack; use regroup only while the group is still relocating to that staging zone.
 - Do not select an unsafe enemy zone as an ordinary regroup point. Use push or assault for an active enemy objective; use regroup only for a currently safe own or neutral gather zone.
 - Clear local advantage at the active enemy objective is evidence that the forward group can still make progress; maintain its pressure while reinforcements travel forward.
+- A direct long-range assault into the enemy main from your own side of the map is fragile when your force is slow, siege-oriented, or still gathering. In that case stage first: contain at the enemy zone or its neighbor on the primary_route to hold the entrance while reinforcements arrive, then switch to assault when local evidence supports it.
 - current_destination_reached and current_objective_status summarize evidence for each group's existing destination. confirmed_clear means the destination is currently visible with no enemy presence; that alone is not a map-wide cleanup cue.
 - Do not begin search_and_destroy from missing vision or "no enemy is visible" alone. Begin or continue search_and_destroy only when a [Runtime Search-And-Destroy Hint] block is present in the observation; follow its required_action for that cycle (typically every combat group in search_and_destroy from its nearest zone). Once that mode has started under a hint, keep combat groups in search_and_destroy rather than returning to push/assault on empty former enemy zones.
 
@@ -262,13 +266,14 @@ def build_commander_messages(
     previous_macro_tasks: Sequence[Dict[str, Any]],
     previous_army_summary: Optional[Dict[str, Any]] = None,
     runtime_hint: str = "",
+    map_topology_text: str = "",
     tool_mode: str = "json",
     action_space: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, str]]:
     """Build chat messages.
 
-    System is match-static (numbered rule sections + strategy + output format).
-    Previous Commander commands live in the observation under
+    System is match-static (numbered rule sections + strategy + map topology
+    + output format). Previous Commander commands live in the observation under
     ``[Previous Decision]``. ``previous_macro_tasks`` /
     ``previous_army_summary`` are kept for call-site compatibility.
     """
@@ -290,6 +295,7 @@ def build_commander_messages(
         "[4] Army control (zones, tools, movement)\n"
         "[5] Army decision rules\n"
         "[Strategy] current strategy.md\n"
+        "[Map Topology] static zone graph (when present)\n"
         "[6] Output format\n"
         f"\n{_SC2_GAME_RULES}"
         f"\n{_MACRO_EXECUTION_MODEL}"
@@ -298,6 +304,9 @@ def build_commander_messages(
         f"\n{_ARMY_DECISION_RULES}"
         f"\n[Strategy]\n{strategy_block}\n"
     )
+    topology_block = (map_topology_text or "").strip()
+    if topology_block:
+        system_msg += f"\n{topology_block}\n"
     if tool_mode == "json":
         system_msg += _json_output_format(action_space or {})
         user_tail = (
