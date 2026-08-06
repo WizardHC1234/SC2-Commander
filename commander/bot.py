@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import logging
@@ -27,6 +28,7 @@ from commander.wake_events import (
     build_wake_snapshot,
     evaluate_wake_event,
     fallback_wake_event,
+    list_satisfied_wake_conditions,
     rising_edge,
 )
 
@@ -37,6 +39,13 @@ _RACE_MAP = {
     "zerg": Race.Zerg,
     "protoss": Race.Protoss,
     "random": Race.Random,
+}
+
+# Legacy multi-agent folder names → current skills/<race>/<name> directories.
+_STRATEGY_FOLDER_ALIASES = {
+    "early_marine": "marine",
+    "mid_tank": "tank",
+    "late_battlecruiser": "battlecruiser",
 }
 
 
@@ -74,6 +83,7 @@ class CommanderBot(KnowledgeBot):
 
         self.selected_strategy: Optional[str] = None
         self.strategy_description: str = ""
+        self.strategy_hash: str = ""
         self.active_tasks: List[Dict[str, Any]] = []
         self.commander_army_policy = None
         self._last_army_summary: Dict[str, Any] = {}
@@ -135,7 +145,9 @@ class CommanderBot(KnowledgeBot):
         )
 
     def _apply_forced_strategy(self, name: str) -> None:
-        target_dir = os.path.join(self._skills_race_dir, name)
+        key = str(name or "").strip()
+        folder = _STRATEGY_FOLDER_ALIASES.get(key.lower(), key)
+        target_dir = os.path.join(self._skills_race_dir, folder)
         md_path = os.path.join(target_dir, "strategy.md")
         if not os.path.isdir(target_dir):
             raise FileNotFoundError(f"strategy folder not found: {target_dir}")
@@ -147,18 +159,24 @@ class CommanderBot(KnowledgeBot):
             parsed = parse_strategy_document(raw)
             detail = parsed.get("detail") or raw.strip()
 
-        self.selected_strategy = name
+        self.selected_strategy = folder
         self.strategy_description = detail
+        self.strategy_hash = hashlib.sha256(
+            detail.encode("utf-8")
+        ).hexdigest()[:16]
         self._emit(
-            "force_strategy=%s description_chars=%d",
-            name,
+            "force_strategy=%s description_chars=%d hash=%s",
+            folder,
             len(detail),
+            self.strategy_hash,
         )
         self._record_llm_interaction(
             {
                 "game_time": 0.0,
                 "trigger_reason": "strategy_forced",
                 "forced_strategy": name,
+                "strategy_id": name,
+                "strategy_hash": self.strategy_hash,
                 "strategy_description": detail,
             }
         )
@@ -196,7 +214,7 @@ class CommanderBot(KnowledgeBot):
 
     async def on_start(self):
         self._load_race_action_module()
-        strategy = self.force_strategy or "mid_tank"
+        strategy = self.force_strategy or "tank"
         self._apply_forced_strategy(strategy)
         await super().on_start()
         self.zone_manager = self.knowledge.get_required_manager(IZoneManager)
@@ -213,7 +231,10 @@ class CommanderBot(KnowledgeBot):
             return
         reason = self._poll_wake_trigger()
         if reason:
-            self._run_decision(trigger_reason=reason)
+            self._run_decision(
+                trigger_reason=reason["reason"],
+                fired_conditions=reason.get("fired_conditions") or [],
+            )
 
     async def create_plan(self) -> BuildOrder:
         return BuildOrder(
@@ -232,8 +253,8 @@ class CommanderBot(KnowledgeBot):
     def _resolved_model_key(self) -> str:
         return (self.commander_model_key or "").strip()
 
-    def _poll_wake_trigger(self) -> Optional[str]:
-        """Return trigger reason on rising-edge wake or deadline fuse."""
+    def _poll_wake_trigger(self) -> Optional[Dict[str, Any]]:
+        """Return trigger payload on rising-edge wake or deadline fuse."""
         snapshot = self._build_wake_snapshot()
         event_ok = (
             evaluate_wake_event(self._wake_event, snapshot)
@@ -243,9 +264,16 @@ class CommanderBot(KnowledgeBot):
         event_edge = rising_edge(event_ok, self._wake_prev_satisfied)
         self._wake_prev_satisfied = event_ok
         if event_edge:
+            fired = list_satisfied_wake_conditions(self._wake_event, snapshot)
             if self._wake_is_fallback:
-                return "wake_fallback_timeout"
-            return "wake_event"
+                return {
+                    "reason": "wake_fallback_timeout",
+                    "fired_conditions": fired or ["runtime_deadline_fuse"],
+                }
+            return {
+                "reason": "wake_event",
+                "fired_conditions": fired,
+            }
         # Always-on now+N fuse: fires once even if the model event stays false
         # (or stays sticky-true without a new rising edge).
         if (
@@ -253,7 +281,10 @@ class CommanderBot(KnowledgeBot):
             and float(self.time) >= float(self._wake_deadline)
         ):
             self._wake_deadline = None
-            return "wake_fallback_timeout"
+            return {
+                "reason": "wake_fallback_timeout",
+                "fired_conditions": ["runtime_deadline_fuse"],
+            }
         return None
 
     def _build_wake_snapshot(self) -> Dict[str, Any]:
@@ -297,7 +328,12 @@ class CommanderBot(KnowledgeBot):
             baseline_objective_status=self._wake_baseline_objective_status,
         )
 
-    def _run_decision(self, *, trigger_reason: str) -> None:
+    def _run_decision(
+        self,
+        *,
+        trigger_reason: str,
+        fired_conditions: Optional[List[str]] = None,
+    ) -> None:
         model_key = self._resolved_model_key()
         if not model_key:
             logger.warning("commander model key empty; skip")
@@ -316,6 +352,7 @@ class CommanderBot(KnowledgeBot):
             trigger_hint = build_trigger_hint(
                 reason=trigger_reason,
                 event=self._wake_event,
+                fired_conditions=fired_conditions,
             )
         runtime_hint = "\n\n".join(
             part for part in (cleanup_hint, trigger_hint) if part
@@ -406,10 +443,11 @@ class CommanderBot(KnowledgeBot):
             "issues": list(outcome.get("issues") or []),
         }
         self._emit(
-            "t=%.1f reason=%s mode=%s tools=%d macro=%d groups=%d "
+            "t=%.1f reason=%s woken_by=%s mode=%s tools=%d macro=%d groups=%d "
             "wake_fallback=%s deadline=%.1f reflect=%s issues=%s err=%s",
             float(self.time),
             trigger_reason,
+            "; ".join(fired_conditions or []) or "-",
             outcome.get("tool_mode") or "?",
             len(outcome["tool_calls"]),
             len(tasks),
@@ -453,29 +491,45 @@ class CommanderBot(KnowledgeBot):
         if content:
             preview = content.replace("\n", " ")
             self._emit("  content=%s", preview)
-        self._record_llm_interaction(
-            {
-                "trigger_reason": trigger_reason,
-                "agent": "commander",
-                "game_time": round(float(self.time), 1),
-                "model_key": model_key,
-                "text_observation": obs_text,
-                "tool_calls": outcome["tool_calls"],
-                "macro_tasks": tasks,
-                "army_policy": self._last_army_summary,
-                "wake_event": wake_event,
-                "wake_fallback": wake_fallback,
-                "wake_armed_at": self._wake_armed_at,
-                "wake_deadline": self._wake_deadline,
-                "reflection_retries": outcome.get("reflection_retries") or 0,
-                "reflection_issues": outcome.get("reflection_issues") or [],
-                "issues": outcome["issues"],
-                "error": outcome["error"],
-                "latency_seconds": outcome.get("latency_seconds"),
-                "finish_reason": outcome.get("finish_reason"),
-                "content": outcome.get("content") or "",
-            }
-        )
+        record: Dict[str, Any] = {
+            "trigger_reason": trigger_reason,
+            "woken_by": list(fired_conditions or []),
+            "agent": "commander",
+            "game_time": round(float(self.time), 1),
+            "model_key": model_key,
+            "tool_mode": outcome.get("tool_mode") or "json",
+            "strategy_id": self.selected_strategy,
+            "strategy_hash": self.strategy_hash,
+            "text_observation": obs_text,
+            "observation": full_obs,
+            "runtime_hint": runtime_hint,
+            "messages": outcome.get("messages") or [],
+            "messages_transcript": outcome.get("messages_transcript") or [],
+            "assistant_content": outcome.get("assistant_content")
+            or outcome.get("content")
+            or "",
+            "content": outcome.get("content") or "",
+            "tool_calls": outcome["tool_calls"],
+            "macro_tasks": tasks,
+            "army_policy": self._last_army_summary,
+            "wake_event": wake_event,
+            "wake_fallback": wake_fallback,
+            "wake_armed_at": self._wake_armed_at,
+            "wake_deadline": self._wake_deadline,
+            "reflection_retries": outcome.get("reflection_retries") or 0,
+            "reflection_issues": outcome.get("reflection_issues") or [],
+            "reflection_rounds": outcome.get("reflection_rounds") or [],
+            "accepted": bool(outcome.get("accepted", True)),
+            "issues": outcome["issues"],
+            "error": outcome["error"],
+            "latency_seconds": outcome.get("latency_seconds"),
+            "finish_reason": outcome.get("finish_reason"),
+            "usage": outcome.get("usage") or {},
+            "usage_total": outcome.get("usage_total") or {},
+        }
+        if outcome.get("raw_message") is not None:
+            record["raw_message"] = outcome.get("raw_message")
+        self._record_llm_interaction(record)
 
     # ------------------------------------------------------------------
     # observation / tasks

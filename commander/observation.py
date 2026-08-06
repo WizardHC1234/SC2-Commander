@@ -314,9 +314,12 @@ def build_full_observation(
             "supply_cap": economy.get("supply_cap"),
             "supply_free": economy.get("supply_left"),
             "army_power": combat.get("our_army_power"),
+            # Ready combat units on the field only (attack-gate relevant).
             "combat_composition": deepcopy(
                 _dict(army.get("own_unit_type_counts"))
             ),
+            # Units currently in production queues (not yet living).
+            "training_combat_composition": _training_unit_counts(active_queues),
             "completed_counts": completed,
         },
         "production": {
@@ -554,6 +557,9 @@ def mask_observation(
                 "race": own.get("race"),
                 "combat_composition": deepcopy(
                     combat_composition
+                ),
+                "training_combat_composition": deepcopy(
+                    _dict(own.get("training_combat_composition"))
                 ),
             },
             "military_readiness": {
@@ -1029,17 +1035,39 @@ def _execution_history_lines(execution: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def _training_unit_counts(active_queues: Any) -> Dict[str, int]:
+    """Parse ``Training UNIT`` queue keys into unit-name counts (no workers)."""
+    workerish = {"SCV", "PROBE", "DRONE", "MULE"}
+    out: Dict[str, int] = {}
+    for key, count in _dict(active_queues).items():
+        text = str(key)
+        if not text.startswith("Training "):
+            continue
+        name = text[len("Training ") :].strip()
+        if not name or name in workerish:
+            continue
+        try:
+            amount = int(count)
+        except (TypeError, ValueError):
+            continue
+        if amount > 0:
+            out[name] = out.get(name, 0) + amount
+    return out
+
+
 def _own_forces_summary_line(
     own: Dict[str, Any],
     army_control: Dict[str, Any],
 ) -> str:
-    """Prefer Army Groups for composition when groups exist."""
-    groups = _list(army_control.get("groups"))
-    if groups:
-        return f"army_supply={_value(own.get('army_supply'))}"
+    """Show living vs in-training combat units as separate fields."""
+    del army_control
+    living = _counts(own.get("combat_composition"))
+    training = _counts(own.get("training_combat_composition"))
     return (
         f"army_supply={_value(own.get('army_supply'))}; "
-        f"own_combat_unit_composition={_counts(own.get('combat_composition'))}"
+        f"living_combat_unit_composition={living}; "
+        f"training_combat_unit_composition={training} "
+        f"(living = on-field ready combat units; training = still in queues)"
     )
 
 
@@ -1174,7 +1202,12 @@ def _render_macro(view: Dict[str, Any]) -> str:
         f"upgrades_in_progress={_items(_list(technology.get('upgrades_in_progress')))}",
         "",
         "[Strategic Situation]",
-        f"army_supply={_value(own.get('army_supply'))}; own_combat_unit_composition={_counts(own.get('combat_composition'))}",
+        (
+            f"army_supply={_value(own.get('army_supply'))}; "
+            f"living_combat_unit_composition={_counts(own.get('combat_composition'))}; "
+            f"training_combat_unit_composition={_counts(own.get('training_combat_composition'))} "
+            f"(living = on-field ready combat units; training = still in queues)"
+        ),
         "",
         "[Map Control And Base Resources]",
         f"own_base_count={_value(map_control.get('own_base_count'))}; "
@@ -1212,12 +1245,10 @@ def _render_combat(view: Dict[str, Any]) -> str:
             f"army_supply={_value(own.get('army_supply'))}; "
             f"supply_used={_value(own.get('supply_used'))}; "
             f"supply_capacity={_value(own.get('supply_cap'))}; "
-            f"supply_available={_value(own.get('supply_free'))}"
-            + (
-                ""
-                if _list(army.get("groups"))
-                else f"; own_combat_unit_composition={_counts(own.get('combat_composition'))}"
-            )
+            f"supply_available={_value(own.get('supply_free'))}; "
+            f"living_combat_unit_composition={_counts(own.get('combat_composition'))}; "
+            f"training_combat_unit_composition={_counts(own.get('training_combat_composition'))} "
+            f"(living = on-field ready combat units; training = still in queues)"
         ),
         "",
         "[Enemy Intelligence]",

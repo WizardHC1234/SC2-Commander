@@ -606,5 +606,53 @@ class ArmyToolValidationTests(unittest.TestCase):
         self.assertEqual(ids, ["group_0", "group_1"])
 
 
+class TriggerHintTests(unittest.TestCase):
+    def test_format_and_list_satisfied(self):
+        from commander.wake_events import (
+            build_trigger_hint,
+            format_wake_condition,
+            list_satisfied_wake_conditions,
+        )
+
+        self.assertEqual(
+            format_wake_condition(
+                {"type": "unit_count_at_least", "unit": "Marine", "count": 45}
+            ),
+            "unit_count_at_least(Marine>=45)",
+        )
+        event = {
+            "logic": "any",
+            "conditions": [
+                {"type": "unit_count_at_least", "unit": "Marine", "count": 45},
+                {"type": "unit_count_at_least", "unit": "SIEGETANK", "count": 10},
+                {"type": "game_time_at_least", "seconds": 600},
+            ],
+        }
+        snap = build_wake_snapshot(
+            time_seconds=500.0,
+            own_unit_type_counts={"Marine": 50, "SIEGETANK": 4},
+        )
+        fired = list_satisfied_wake_conditions(event, snap)
+        self.assertEqual(fired, ["unit_count_at_least(Marine>=45)"])
+        hint = build_trigger_hint(
+            reason="wake_event",
+            event=event,
+            fired_conditions=fired,
+        )
+        self.assertIn("woken_by=unit_count_at_least(Marine>=45)", hint)
+        self.assertIn("armed_logic=any", hint)
+        self.assertIn("[Runtime Decision Trigger]", hint)
+
+    def test_deadline_fuse_label(self):
+        from commander.wake_events import build_trigger_hint
+
+        hint = build_trigger_hint(
+            reason="wake_fallback_timeout",
+            event=fallback_wake_event(100.0),
+            fired_conditions=["runtime_deadline_fuse"],
+        )
+        self.assertIn("woken_by=runtime_deadline_fuse", hint)
+
+
 if __name__ == "__main__":
     unittest.main()

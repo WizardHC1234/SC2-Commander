@@ -151,7 +151,7 @@ Builds:
         )
         parser.add_argument(
             "--force-strategy",
-            help="Force a strategy folder under skills/<race>/ (e.g. mid_tank).",
+            help="Force a strategy folder under skills/<race>/ (e.g. tank).",
             default="",
         )
 

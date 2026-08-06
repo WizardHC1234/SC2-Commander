@@ -9,7 +9,8 @@
       "max_tokens": null,
       "is_reasoning": false,
       "enable_identity": false,
-      "identity_prompt": ""
+      "identity_prompt": "",
+      "tool_mode": "json"
     },
     "example-local-openai-compatible": {
       "api_url": "http://127.0.0.1:8000/v1",
@@ -20,7 +21,8 @@
       "max_tokens": null,
       "is_reasoning": false,
       "enable_identity": false,
-      "identity_prompt": ""
+      "identity_prompt": "",
+      "tool_mode": "json"
     }
   }
 }

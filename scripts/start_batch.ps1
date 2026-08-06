@@ -8,7 +8,7 @@ param(
     [string]$ENEMY_BUILD = "macro",
 
     [string]$BOT_RACE = "terran",
-    [string]$FORCE_STRATEGY = "mid_tank",
+    [string]$FORCE_STRATEGY = "tank",
     [string]$BOT_INSTRUCT = "",
 
     [string]$COMMANDER_MODEL = "qwen3-32b",

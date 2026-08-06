@@ -6,7 +6,7 @@
 2. 整表替换；scout 不调 = 取消
 3. 保留自动化；保留 `strategy.md`
 4. 决策间隔 20s
-5. Demo：Kairos + mid_tank + 内置 AI
+5. Demo：Kairos + tank + 内置 AI
 6. **目录按 Commander 重设计**，不沿用旧多 Agent 布局；**不单独拆 army 子包**
 
 ## 当前包布局

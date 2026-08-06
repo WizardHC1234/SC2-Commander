@@ -1,9 +1,10 @@
-"""Run the strategy-driven SC2 agent against the built-in game AI.
+"""Run the strategy-driven SC2 Commander against the built-in game AI.
 
 Edit the ``DEFAULT_*`` values below for convenient local experiments, or pass
 explicit CLI arguments. ``--force-strategy <name>`` selects
-``SKILL/<race>/<name>/strategy.md``; use ``--force-strategy none`` to let the
-Strategy Coordinator select or generate a strategy at game start.
+``skills/<race>/<name>/strategy.md`` (e.g. ``tank``, ``marine``,
+``battlecruiser``). Use ``--force-strategy none`` to skip a forced folder
+(Commander still needs a resolvable strategy at game start).
 """
 from __future__ import annotations
 
@@ -66,7 +67,7 @@ DEFAULT_ENEMY_DIFFICULTY = "mediumhard"
 DEFAULT_ENEMY_BUILD = "macro"
 
 DEFAULT_COMMANDER_MODEL = "qwen3-32b"
-DEFAULT_FORCE_STRATEGY = "mid_tank"
+DEFAULT_FORCE_STRATEGY = "tank"
 
 # --- 其它 ---
 DEFAULT_SKIP_VERSION_UPDATE = False  # True：跳过 version.txt 更新（批量并发时防 IO 锁）
@@ -97,14 +98,15 @@ def _resolve_force_strategy(explicit: Optional[str]) -> Optional[str]:
 
     * ``explicit is None`` — 未在 CLI/调用方指定，使用 ``DEFAULT_FORCE_STRATEGY``
     * ``''`` / ``'none'`` — 显式取消强制
-    * 其它非空字符串 — 策略文件夹名
+    * 其它非空字符串 — 策略文件夹名（旧别名会映射到现目录）
     """
     if explicit is None:
         explicit = DEFAULT_FORCE_STRATEGY
     s = str(explicit or "").strip()
     if not s or s.lower() == "none":
         return None
-    return s
+    key = s.lower()
+    return _STRATEGY_FOLDER_ALIASES.get(key, s)
 
 
 def _safe_match_part(value: str, *, max_len: int = 32) -> str:
@@ -173,10 +175,20 @@ _MAP_CODE = {
     "zen": "ZEN",
 }
 
+_STRATEGY_FOLDER_ALIASES = {
+    "early_marine": "marine",
+    "mid_tank": "tank",
+    "late_battlecruiser": "battlecruiser",
+}
+
 _STRATEGY_CODE = {
-    "early_marine": "em",
-    "mid_tank": "mt",
-    "late_battlecruiser": "lbc",
+    "marine": "m",
+    "tank": "t",
+    "battlecruiser": "b",
+    # Legacy multi-agent folder names (still accepted via aliases).
+    "early_marine": "m",
+    "mid_tank": "t",
+    "late_battlecruiser": "b",
 }
 
 

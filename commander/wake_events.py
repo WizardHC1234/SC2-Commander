@@ -456,17 +456,82 @@ def compact_wake_event(event: Optional[Dict[str, Any]]) -> str:
         return "{}"
 
 
+def format_wake_condition(cond: Any) -> str:
+    """One-line label for a wake predicate (for trigger hints / logs)."""
+    if not isinstance(cond, dict):
+        return "invalid_condition"
+    ctype = str(cond.get("type") or "").strip()
+    ctype = PREDICATE_TYPE_ALIASES.get(ctype, ctype)
+    if ctype in UNIT_COUNT_TYPES:
+        unit = str(cond.get("unit") or "?").strip() or "?"
+        count = cond.get("count")
+        op = ">=" if ctype == "unit_count_at_least" else "<"
+        return f"{ctype}({unit}{op}{count})"
+    if ctype in TIME_TYPES:
+        return f"{ctype}(seconds={cond.get('seconds')})"
+    if ctype in SUPPLY_TYPES:
+        return f"{ctype}(count={cond.get('count')})"
+    if ctype in OBJECTIVE_TYPES:
+        return f"{ctype}(status={cond.get('status')})"
+    if ctype in DESTINATION_TYPES or ctype in BOOL_FLAG_TYPES:
+        return ctype
+    if ctype in MOVEMENT_MODE_TYPES:
+        modes = cond.get("modes")
+        return f"{ctype}(modes={modes})"
+    if ctype in ARMY_GROUP_COUNT_TYPES:
+        return f"{ctype}(count={cond.get('count')})"
+    if ctype in SCOUT_TYPES:
+        if ctype == "scout_result_is":
+            return f"{ctype}(result={cond.get('result')})"
+        return ctype
+    return ctype or "unknown_condition"
+
+
+def list_satisfied_wake_conditions(
+    event: Optional[Dict[str, Any]],
+    snapshot: Dict[str, Any],
+) -> List[str]:
+    """Labels of conditions that are true under the current snapshot."""
+    if not event or not isinstance(event, dict):
+        return []
+    conditions = event.get("conditions") or []
+    if not isinstance(conditions, list):
+        return []
+    out: List[str] = []
+    for cond in conditions:
+        if _evaluate_condition(cond, snapshot):
+            out.append(format_wake_condition(cond))
+    return out
+
+
 def build_trigger_hint(
     *,
     reason: str,
     event: Optional[Dict[str, Any]] = None,
+    fired_conditions: Optional[Sequence[str]] = None,
 ) -> str:
+    """Explain why this Commander cycle was scheduled.
+
+    ``fired_conditions`` should be the predicates that are true at fire time
+    (or a synthetic label such as ``runtime_deadline_fuse``).
+    """
     lines = [
         "[Runtime Decision Trigger]",
         f"reason={reason}",
     ]
+    fired = [str(item).strip() for item in (fired_conditions or []) if str(item).strip()]
+    if fired:
+        lines.append(f"woken_by={'; '.join(fired)}")
+    elif reason == "wake_fallback_timeout":
+        lines.append("woken_by=runtime_deadline_fuse")
     if event:
-        lines.append(f"event={compact_wake_event(event)}")
+        logic = str(event.get("logic") or "any").strip().lower() or "any"
+        lines.append(f"armed_logic={logic}")
+        lines.append(f"armed_event={compact_wake_event(event)}")
+    lines.append(
+        "Use woken_by as the completed checkpoint that caused this wake; "
+        "reassess from the current observation and strategy."
+    )
     return "\n".join(lines)
 
 

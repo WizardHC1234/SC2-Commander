@@ -34,6 +34,12 @@ class DefaultMicroMethods:
             total_power.add_power(group.power)
 
         for group in combat.own_groups:
+            # LLM / explicit ReGroup: destination has priority over cohesion
+            # and local fights (same level as retreat).
+            if move_type == MoveType.ReGroup:
+                combat.move_to(group, target, move_type)
+                continue
+
             if not combat.rules.regroup or combat.regroup_threshold <= 0:
                 # Skip all regroup logic
                 if move_type == MoveType.PanicRetreat:

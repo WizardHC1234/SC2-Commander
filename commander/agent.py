@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from llm.caller import call_openai_detailed, load_agent_pool
@@ -39,11 +40,7 @@ _NATIVE_TOOL_CHOICE_ERRORS = (
     "tool_choice",
     "tool choice",
     "does not support tools",
-    "does not support function",
     "tools is not supported",
-    "function calling is not enabled",
-    "tool use is not supported",
-    "unsupported.*tool",
 )
 
 # After a model proves native tools are unavailable, keep using JSON for the
@@ -52,19 +49,20 @@ _json_fallback_models: Set[str] = set()
 
 
 def _resolve_preferred_tool_mode(model_key: str) -> str:
-    """Prefer native tools= API; JSON only when forced or already known broken.
+    """Prefer JSON tool_calls in content; native tools= only when opted in.
 
-    Config ``tool_mode: "json"`` still forces JSON (escape hatch). Otherwise
-    default is native; auto-fallback records the model in
-    ``_json_fallback_models`` after an unsupported-tools error.
+    Default is ``json`` (catalog in prompt; model emits JSON in content).
+    Set config ``tool_mode: "native"`` to use OpenAI ``tools=``. If native
+    fails as unsupported, the model is recorded in ``_json_fallback_models``
+    and later cycles stay on JSON for this process.
     """
     if model_key in _json_fallback_models:
         return "json"
     pool = (load_agent_pool().get("llm_agents_pool") or {}).get(model_key) or {}
-    mode = str(pool.get("tool_mode") or "native").strip().lower()
-    if mode == "json":
-        return "json"
-    return "native"
+    mode = str(pool.get("tool_mode") or "json").strip().lower()
+    if mode == "native":
+        return "native"
+    return "json"
 
 
 def _is_native_tools_unsupported(error: str) -> bool:
@@ -82,6 +80,35 @@ def _is_native_tools_unsupported(error: str) -> bool:
     return False
 
 
+def _usage_as_dict(result: Dict[str, Any]) -> Dict[str, Any]:
+    usage = result.get("usage") or {}
+    if isinstance(usage, dict):
+        return dict(usage)
+    for method_name in ("model_dump", "dict"):
+        method = getattr(usage, method_name, None)
+        if callable(method):
+            try:
+                dumped = method()
+                if isinstance(dumped, dict):
+                    return dumped
+            except Exception:
+                pass
+    return {}
+
+
+def _sum_usage(parts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    totals: Dict[str, int] = {}
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        for key, value in part.items():
+            try:
+                totals[key] = int(totals.get(key, 0)) + int(value)
+            except (TypeError, ValueError):
+                continue
+    return totals
+
+
 def _pack_outcome(
     *,
     tool_calls: List[Dict[str, Any]],
@@ -94,6 +121,11 @@ def _pack_outcome(
     wake_event: Optional[Dict[str, Any]] = None,
     reflection_retries: int = 0,
     reflection_issues: Optional[List[str]] = None,
+    prompt_messages: Optional[List[Dict[str, str]]] = None,
+    messages_transcript: Optional[List[Dict[str, str]]] = None,
+    reflection_rounds: Optional[List[Dict[str, Any]]] = None,
+    usage_parts: Optional[List[Dict[str, Any]]] = None,
+    accepted: bool = True,
 ) -> Dict[str, Any]:
     army_summary = {
         "commands": [
@@ -107,7 +139,24 @@ def _pack_outcome(
         "scan_zone_id": policy.scan_zone_id,
         "scout_zone_id": policy.scout_zone_id,
     }
-    return {
+    content = result.get("content") or ""
+    usage = _usage_as_dict(result)
+    parts = list(usage_parts or [])
+    usage_total = _sum_usage(parts) if parts else usage
+    transcript = list(messages_transcript or prompt_messages or [])
+    # Append the final assistant turn so the transcript is a complete chat.
+    if content or tool_calls:
+        final_assistant = content
+        if not final_assistant and tool_calls:
+            final_assistant = (
+                "(Native tool_calls; see tool_calls / raw_message fields.)"
+            )
+        if not transcript or transcript[-1].get("role") != "assistant":
+            transcript = list(transcript)
+            transcript.append(
+                {"role": "assistant", "content": final_assistant or "(empty)"}
+            )
+    packed: Dict[str, Any] = {
         "tool_calls": tool_calls,
         "tasks": tasks,
         "policy": policy,
@@ -117,11 +166,21 @@ def _pack_outcome(
         "error": error,
         "latency_seconds": result.get("latency_seconds"),
         "finish_reason": result.get("finish_reason"),
-        "content": result.get("content") or "",
+        "content": content,
+        "assistant_content": content,
         "tool_mode": tool_mode,
         "reflection_retries": reflection_retries,
         "reflection_issues": list(reflection_issues or []),
+        "messages": deepcopy(prompt_messages or []),
+        "messages_transcript": deepcopy(transcript),
+        "reflection_rounds": list(reflection_rounds or []),
+        "usage": usage,
+        "usage_total": usage_total,
+        "accepted": bool(accepted),
     }
+    if tool_mode == "native":
+        packed["raw_message"] = result.get("raw_message") or {}
+    return packed
 
 
 def _apply_parsed_calls(
@@ -199,7 +258,7 @@ def run_commander_decision(
             tool_mode="json",
         )
 
-    # Default: native OpenAI tools=. Do NOT send tool_choice="auto" — many
+    # Opt-in native OpenAI tools=. Do NOT send tool_choice="auto" — many
     # vLLM servers reject it unless started with --enable-auto-tool-choice.
     outcome = _run_with_wake_reflection(
         race=race,
@@ -270,10 +329,13 @@ def _run_with_wake_reflection(
         tool_mode=tool_mode,
         action_space=prompt_action_space,
     )
+    prompt_messages = deepcopy(messages)
     tools = build_commander_tools(action_space) if tool_mode == "native" else None
 
     reflection_retries = 0
     reflection_issues: List[str] = []
+    reflection_rounds: List[Dict[str, Any]] = []
+    usage_parts: List[Dict[str, Any]] = []
     last_result: Dict[str, Any] = {}
     last_error = ""
     latency_total = 0.0
@@ -288,6 +350,9 @@ def _run_with_wake_reflection(
         result = call_openai_detailed(messages, **call_kwargs)
         last_result = result
         last_error = result.get("error") or ""
+        usage = _usage_as_dict(result)
+        if usage:
+            usage_parts.append(usage)
         try:
             latency_total += float(result.get("latency_seconds") or 0.0)
         except (TypeError, ValueError):
@@ -333,6 +398,11 @@ def _run_with_wake_reflection(
                 wake_event=wake_event,
                 reflection_retries=reflection_retries,
                 reflection_issues=reflection_issues,
+                prompt_messages=prompt_messages,
+                messages_transcript=messages,
+                reflection_rounds=reflection_rounds,
+                usage_parts=usage_parts,
+                accepted=True,
             )
             packed["latency_seconds"] = latency_total or packed.get(
                 "latency_seconds"
@@ -366,6 +436,11 @@ def _run_with_wake_reflection(
                 wake_event=wake_event if wake_ok else None,
                 reflection_retries=reflection_retries,
                 reflection_issues=blocking,
+                prompt_messages=prompt_messages,
+                messages_transcript=messages,
+                reflection_rounds=reflection_rounds,
+                usage_parts=usage_parts,
+                accepted=False,
             )
             packed["latency_seconds"] = latency_total or packed.get(
                 "latency_seconds"
@@ -377,6 +452,24 @@ def _run_with_wake_reflection(
             previous_tool_calls=tool_calls,
         )
         reflection_issues = list(blocking)
+        assistant_content = (result.get("content") or "").strip()
+        if not assistant_content and tool_calls:
+            assistant_content = (
+                "(Previous response used tool_calls; see rejected list in the "
+                "validation message.)"
+            )
+        reflection_rounds.append(
+            {
+                "round": reflection_retries,
+                "accepted": False,
+                "assistant_content": assistant_content or "(empty)",
+                "tool_calls": deepcopy(tool_calls),
+                "issues": list(blocking),
+                "usage": usage,
+                "finish_reason": result.get("finish_reason") or "",
+                "error": last_error,
+            }
+        )
         reflection_retries += 1
         logger.info(
             "Decision validation failed (%s); requesting model reflection retry #%s",
@@ -385,12 +478,6 @@ def _run_with_wake_reflection(
         )
 
         # Keep a compact transcript of the rejected answer for reflection.
-        assistant_content = (result.get("content") or "").strip()
-        if not assistant_content and tool_calls:
-            assistant_content = (
-                "(Previous response used tool_calls; see rejected list in the "
-                "validation message.)"
-            )
         messages = list(messages)
         messages.append({"role": "assistant", "content": assistant_content or "(empty)"})
         messages.append({"role": "user", "content": feedback})

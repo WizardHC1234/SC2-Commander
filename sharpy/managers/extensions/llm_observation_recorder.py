@@ -123,7 +123,7 @@ class LLMObservationRecorder(ManagerBase):
         self.interval_seconds: float = interval_seconds
         self.output_folder: str = output_folder
         self.enabled: bool = enabled
-        # Strategy Coordinator can record LLM calls before manager ``start()``.
+        # Commander may record LLM calls before manager ``start()``.
         # Keep these present so early autosave does not raise AttributeError.
         self.knowledge = None
         self.ai = None
@@ -1304,6 +1304,15 @@ class LLMObservationRecorder(ManagerBase):
             ),
             "opponent_id": getattr(ai, "opponent_id", None) if ai is not None else None,
             "bot_name": getattr(ai, "name", None) if ai is not None else None,
+            "commander_model_key": (
+                getattr(ai, "commander_model_key", None) if ai is not None else None
+            ),
+            "strategy_id": (
+                getattr(ai, "selected_strategy", None) if ai is not None else None
+            ),
+            "strategy_hash": (
+                getattr(ai, "strategy_hash", None) if ai is not None else None
+            ),
             "game_duration_seconds": time_seconds,
             "game_duration_formatted": (
                 getattr(ai, "time_formatted", "00:00") if ai is not None else "00:00"

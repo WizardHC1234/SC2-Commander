@@ -91,9 +91,8 @@ class CombatControlAct(ActBase):
 
     async def execute(self) -> bool:
         self._update_production_rallies()
-        # Refresh reconnaissance lifecycle before the Army Planner builds its
-        # observation. This makes a death/interruption visible in the same
-        # decision cycle instead of one cycle later.
+        # Refresh reconnaissance lifecycle before army observation / control
+        # so a death/interruption is visible in the same decision cycle.
         self._refresh_scout_status()
         policy = self.policy_provider.get_policy(self)
         scan_zone = policy.scan_zone_id
@@ -681,9 +680,12 @@ class CombatControlAct(ActBase):
     ) -> Optional[MicroRules]:
         if self.micro_rules is None:
             return None
+        # LLM regroup must keep destination priority; Sharpy's cohesion
+        # regroup would divert groups toward nearby fights / other packs.
         self.micro_rules.regroup = (
             command.movement_mode not in RETREAT_MODES
             and command.movement_mode != "search_and_destroy"
+            and command.movement_mode != "regroup"
         )
         self.micro_rules.regroup_percentage = 0.75
         self.micro_rules.own_group_distance = 7
