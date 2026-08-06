@@ -16,8 +16,9 @@ Examples::
     python tools/batch_stats.py --list-matches --detail
     python tools/batch_stats.py --json-out batch_summary.json
 
-Default overview merges rows that share strategy + model + difficulty + enemy
-build across batch folders. Use ``--per-batch`` to keep one line per folder.
+Default overview merges rows that share strategy + model + opponent race +
+difficulty + enemy build across batch folders. Use ``--per-batch`` to keep one
+line per folder.
 """
 from __future__ import annotations
 
@@ -36,7 +37,15 @@ WIN_RESULTS = {"victory", "win"}
 # Interrupted / force-quit is treated as a loss for win-rate reporting.
 LOSS_RESULTS = {"defeat", "loss", "interrupted"}
 TIE_RESULTS = {"tie", "draw"}
-GROUP_BY_CHOICES = ("batch", "difficulty", "strategy", "enemy", "map", "matchup")
+GROUP_BY_CHOICES = (
+    "batch",
+    "difficulty",
+    "strategy",
+    "enemy",
+    "race",
+    "map",
+    "matchup",
+)
 
 
 _MODEL_SHORT = {
@@ -61,6 +70,7 @@ class MatchRow:
     enemy: str = ""
     difficulty: str = ""
     enemy_build: str = ""
+    enemy_race: str = ""
     coordinator_model: str = ""
     macro_model: str = ""
     translator_model: str = ""
@@ -227,16 +237,43 @@ def win_rate(wins: int, losses: int, ties: int = 0) -> Optional[float]:
     return wins / decided
 
 
-def parse_enemy_fields(enemy: str) -> tuple[str, str, str]:
-    """Split ``AI terran / veryeasy / macro`` into (label, difficulty, build)."""
+_RACE_ALIASES = {
+    "t": "terran",
+    "terran": "terran",
+    "p": "protoss",
+    "protoss": "protoss",
+    "z": "zerg",
+    "zerg": "zerg",
+    "r": "random",
+    "random": "random",
+}
+
+
+def parse_enemy_fields(enemy: str) -> tuple[str, str, str, str]:
+    """Split ``AI terran / veryeasy / macro`` into label/diff/build/race."""
     text = str(enemy or "").strip()
     if not text:
-        return "", "", ""
+        return "", "", "", ""
     parts = [p.strip() for p in text.split("/") if p.strip()]
     # parts[0] often like "AI terran"
     difficulty = parts[1] if len(parts) >= 2 else ""
     enemy_build = parts[2] if len(parts) >= 3 else ""
-    return text, difficulty, enemy_build
+    race = ""
+    if parts:
+        tokens = re.split(r"[\s_\-]+", parts[0].lower())
+        for token in reversed(tokens):
+            if token in _RACE_ALIASES:
+                race = _RACE_ALIASES[token]
+                break
+    return text, difficulty, enemy_build, race
+
+
+def race_from_matchup(matchup: str) -> str:
+    """Map ``TvP`` / ``TvZ`` style labels to enemy race."""
+    text = str(matchup or "").strip()
+    if len(text) >= 3 and text[1].lower() == "v":
+        return _RACE_ALIASES.get(text[2].lower(), "")
+    return ""
 
 
 def _majority(values: list[str]) -> str:
@@ -336,7 +373,9 @@ def parse_match(match_dir: Path, batch_name: str) -> MatchRow:
     info = parse_match_info(info_path)
     json_path = find_record_json(match_dir)
     match_id = info.get("match_id") or match_dir.name
-    enemy, difficulty, enemy_build = parse_enemy_fields(info.get("enemy", ""))
+    enemy, difficulty, enemy_build, enemy_race = parse_enemy_fields(
+        info.get("enemy", "")
+    )
     coordinator_model, macro_model, translator_model, army_model = _models_from_info(
         info
     )
@@ -355,6 +394,7 @@ def parse_match(match_dir: Path, batch_name: str) -> MatchRow:
             enemy=enemy,
             difficulty=difficulty,
             enemy_build=enemy_build,
+            enemy_race=enemy_race or "?",
             coordinator_model=coordinator_model,
             macro_model=macro_model,
             translator_model=translator_model,
@@ -378,6 +418,7 @@ def parse_match(match_dir: Path, batch_name: str) -> MatchRow:
             enemy=enemy,
             difficulty=difficulty,
             enemy_build=enemy_build,
+            enemy_race=enemy_race or "?",
             coordinator_model=coordinator_model,
             macro_model=macro_model,
             translator_model=translator_model,
@@ -390,7 +431,8 @@ def parse_match(match_dir: Path, batch_name: str) -> MatchRow:
         or str(meta.get("strategy") or meta.get("force_strategy") or "")
         or "?"
     )
-    if not difficulty or not enemy_build:
+    matchup = str(meta.get("matchup") or "?")
+    if not difficulty or not enemy_build or not enemy_race:
         opponent = str(meta.get("opponent_id") or "")
         # e.g. universal_llm.terran-ai.terran.veryeasy.macro
         parts = [p for p in opponent.split(".") if p]
@@ -400,19 +442,28 @@ def parse_match(match_dir: Path, batch_name: str) -> MatchRow:
             enemy_build = parts[-1]
         if not enemy and opponent:
             enemy = opponent
+        if not enemy_race:
+            for token in reversed(parts):
+                mapped = _RACE_ALIASES.get(token.lower())
+                if mapped:
+                    enemy_race = mapped
+                    break
+    if not enemy_race:
+        enemy_race = race_from_matchup(matchup) or "?"
     return MatchRow(
         match_id=match_id,
         batch=batch_name,
         result=str(meta.get("result") or "Unknown"),
         duration=str(meta.get("game_duration_formatted") or "?"),
         map_name=str(meta.get("map_name") or info.get("map") or "?"),
-        matchup=str(meta.get("matchup") or "?"),
+        matchup=matchup,
         strategy=strategy,
         json_path=str(json_path),
         info_path=str(info_path) if info_path.is_file() else "",
         enemy=enemy,
         difficulty=difficulty,
         enemy_build=enemy_build,
+        enemy_race=enemy_race,
         coordinator_model=coordinator_model,
         macro_model=macro_model,
         translator_model=translator_model,
@@ -487,6 +538,8 @@ def group_key(row: MatchRow, group_by: str) -> str:
         return row.strategy or "?"
     if group_by == "enemy":
         return row.enemy or "?"
+    if group_by == "race":
+        return row.enemy_race or "?"
     if group_by == "map":
         return row.map_name or "?"
     if group_by == "matchup":
@@ -616,11 +669,11 @@ def _batch_column_label(group_rows: list[MatchRow]) -> str:
 def print_batch_overview(
     rows: list[MatchRow], *, per_batch: bool = False
 ) -> None:
-    """Table sorted by strategy / model / difficulty.
+    """Table sorted by strategy / model / race / difficulty.
 
-    By default, rows that share strategy + model + difficulty + enemy build
-    are merged across batch folders (W/L/T summed). Pass ``per_batch=True``
-    to keep one line per batch folder.
+    By default, rows that share strategy + model + opponent race + difficulty +
+    enemy build are merged across batch folders (W/L/T summed). Pass
+    ``per_batch=True`` to keep one line per batch folder.
 
     Loose single-match folders under ``game_records/`` are excluded from the
     main table and printed in a separate section.
@@ -636,16 +689,17 @@ def print_batch_overview(
             key = (
                 (row.strategy or "?").strip() or "?",
                 row.model_key,
+                (row.enemy_race or "?").strip() or "?",
                 (row.difficulty or "?").strip() or "?",
                 (row.enemy_build or "?").strip() or "?",
             )
         buckets[key].append(row)
 
-    # strategy | model | diff first, then batch label.
-    strat_w, model_w, diff_w, build_w, batch_w = 22, 22, 11, 8, 20
+    # strategy | model | race | diff | build | batch
+    strat_w, model_w, race_w, diff_w, build_w, batch_w = 18, 12, 8, 11, 8, 18
     header = (
-        f"{'strategy':<{strat_w}} {'model':<{model_w}} {'diff':<{diff_w}} "
-        f"{'build':<{build_w}} {'batch':<{batch_w}} "
+        f"{'strategy':<{strat_w}} {'model':<{model_w}} {'race':<{race_w}} "
+        f"{'diff':<{diff_w}} {'build':<{build_w}} {'batch':<{batch_w}} "
         f"{'n':>3} {'W':>3} {'L':>3} {'T':>3} {'win%':>6}"
     )
     print(header)
@@ -655,7 +709,7 @@ def print_batch_overview(
         print("(no batch folders)")
     else:
         records: list[
-            tuple[str, str, str, str, str, int, int, int, int, Optional[float]]
+            tuple[str, str, str, str, str, str, int, int, int, int, Optional[float]]
         ] = []
         for group_rows in buckets.values():
             total, wins, losses, ties, _unknown, rate = _count_results(group_rows)
@@ -663,6 +717,7 @@ def print_batch_overview(
                 (
                     _majority([r.strategy for r in group_rows]),
                     _majority([r.model_key for r in group_rows]),
+                    _majority([r.enemy_race for r in group_rows]),
                     _majority([r.difficulty for r in group_rows]),
                     _majority([r.enemy_build for r in group_rows]),
                     _batch_column_label(group_rows),
@@ -677,22 +732,39 @@ def print_batch_overview(
             key=lambda r: (
                 r[0].lower(),
                 r[1].lower(),
-                _difficulty_sort_key(r[2]),
-                r[3].lower(),
+                r[2].lower(),
+                _difficulty_sort_key(r[3]),
                 r[4].lower(),
+                r[5].lower(),
             )
         )
 
         prev_strategy = None
         prev_model = None
-        for strategy, model, difficulty, enemy_build, batch, total, wins, losses, ties, rate in records:
+        prev_race = None
+        for (
+            strategy,
+            model,
+            enemy_race,
+            difficulty,
+            enemy_build,
+            batch,
+            total,
+            wins,
+            losses,
+            ties,
+            rate,
+        ) in records:
             if prev_strategy is not None and (
-                strategy != prev_strategy or model != prev_model
+                strategy != prev_strategy
+                or model != prev_model
+                or enemy_race != prev_race
             ):
                 print()
             print(
                 f"{_clip(strategy, strat_w):<{strat_w}} "
                 f"{_clip(model, model_w):<{model_w}} "
+                f"{_clip(enemy_race, race_w):<{race_w}} "
                 f"{_clip(difficulty, diff_w):<{diff_w}} "
                 f"{_clip(enemy_build, build_w):<{build_w}} "
                 f"{_clip(batch, batch_w):<{batch_w}} "
@@ -701,6 +773,7 @@ def print_batch_overview(
             )
             prev_strategy = strategy
             prev_model = model
+            prev_race = enemy_race
 
     print("-" * len(header))
     print()
@@ -709,24 +782,26 @@ def print_batch_overview(
     if ungrouped_rows:
         print(f"Single matches (ungrouped): {len(ungrouped_rows)}")
         print(
-            f"{'match_id':<36} {'diff':<11} {'build':<8} "
-            f"{'strategy':<22} {'result':<8} {'model'}"
+            f"{'match_id':<36} {'race':<8} {'diff':<11} {'build':<8} "
+            f"{'strategy':<18} {'result':<8} {'model'}"
         )
-        print("-" * 100)
+        print("-" * 110)
         for row in sorted(
             ungrouped_rows,
             key=lambda r: (
                 (r.strategy or "").lower(),
                 r.model_key.lower(),
+                (r.enemy_race or "").lower(),
                 _difficulty_sort_key(r.difficulty),
                 r.match_id.lower(),
             ),
         ):
             print(
                 f"{_clip(row.match_id, 36):<36} "
+                f"{_clip(row.enemy_race or '-', 8):<8} "
                 f"{_clip(row.difficulty or '-', 11):<11} "
                 f"{_clip(row.enemy_build or '-', 8):<8} "
-                f"{_clip(row.strategy or '-', 22):<22} "
+                f"{_clip(row.strategy or '-', 18):<18} "
                 f"{_clip(row.result or '-', 8):<8} "
                 f"{row.model_key}"
             )

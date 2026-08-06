@@ -1,7 +1,7 @@
 ﻿{
   "registered_strategies": [
-    "early_marine",
-    "mid_tank",
-    "late_battlecruiser"
+    "marine",
+    "tank",
+    "battlecruiser"
   ]
 }

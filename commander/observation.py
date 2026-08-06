@@ -86,10 +86,10 @@ def _game_time_line(
     return "; ".join(parts)
 
 
-def _normalise_mid_execution(raw: Any, now: float) -> Dict[str, Any]:
+def _normalise_macro_execution(raw: Any, now: float) -> Dict[str, Any]:
     state = _dict(raw)
     tasks = [_dict(task) for task in _list(state.get("active_macro_tasks"))]
-    issues = list(_list(state.get("last_translation_issues")))
+    issues = list(_list(state.get("last_issues")))
     task_statuses = []
     for task in tasks:
         task_status = str(
@@ -124,13 +124,11 @@ def _normalise_mid_execution(raw: Any, now: float) -> Dict[str, Any]:
         "last_update_seconds_ago": _age(
             now, state.get("last_update_game_time")
         ),
-        "last_translation_issues": list(
-            _list(state.get("last_translation_issues"))
-        ),
+        "last_issues": issues,
     }
 
 
-def _normalise_army_execution(raw: Any, now: float) -> Dict[str, Any]:
+def _normalise_combat_execution(raw: Any, now: float) -> Dict[str, Any]:
     state = _dict(raw)
     policy = deepcopy(_dict(state.get("last_policy")))
     issues = list(_list(state.get("last_command_issues")))
@@ -162,14 +160,51 @@ def _normalise_execution_history(raw: Any) -> Dict[str, Any]:
         )
     except (TypeError, ValueError):
         window_start = 0.0
+    macro_events = _list(history.get("macro"))
+    combat_events = _list(history.get("combat"))
     return {
         "window_start_game_time_seconds": round(window_start, 1),
-        "mid": deepcopy(
-            [item for item in _list(history.get("mid")) if isinstance(item, dict)]
+        "macro": deepcopy(
+            [item for item in macro_events if isinstance(item, dict)]
         ),
-        "army": deepcopy(
-            [item for item in _list(history.get("army")) if isinstance(item, dict)]
+        "combat": deepcopy(
+            [item for item in combat_events if isinstance(item, dict)]
         ),
+    }
+
+
+def _normalise_previous_decision(raw: Any) -> Optional[Dict[str, Any]]:
+    state = _dict(raw)
+    if not state:
+        return None
+    macro_commands = [
+        _dict(item)
+        for item in _list(state.get("macro_commands"))
+        if isinstance(item, dict) and item.get("name")
+    ]
+    army_commands = [
+        _dict(item)
+        for item in _list(state.get("army_commands"))
+        if isinstance(item, dict) and item.get("group_id")
+    ]
+    if not macro_commands and not army_commands and not state.get("wake_event"):
+        return None
+    try:
+        game_time = float(state.get("game_time_seconds"))
+    except (TypeError, ValueError):
+        game_time = None
+    return {
+        "game_time_seconds": (
+            round(game_time, 1) if game_time is not None else None
+        ),
+        "macro_commands": macro_commands,
+        "army_commands": army_commands,
+        "scan_zone_id": state.get("scan_zone_id"),
+        "scout_zone_id": state.get("scout_zone_id"),
+        "wake_event": deepcopy(_dict(state.get("wake_event"))) or None,
+        "issues": [
+            str(item) for item in _list(state.get("issues")) if str(item).strip()
+        ],
     }
 
 
@@ -177,8 +212,9 @@ def build_full_observation(
     legacy_snapshot: Dict[str, Any],
     *,
     army_state: Optional[Dict[str, Any]] = None,
-    mid_execution: Optional[Dict[str, Any]] = None,
-    army_execution: Optional[Dict[str, Any]] = None,
+    macro_execution: Optional[Dict[str, Any]] = None,
+    combat_execution: Optional[Dict[str, Any]] = None,
+    previous_decision: Optional[Dict[str, Any]] = None,
     execution_history: Optional[Dict[str, Any]] = None,
     game_loop: Optional[int] = None,
     game_time_limit_seconds: Optional[float] = None,
@@ -393,9 +429,10 @@ def build_full_observation(
             },
         },
         "execution": {
-            "mid": _normalise_mid_execution(mid_execution, now),
-            "army": _normalise_army_execution(army_execution, now),
-            "since_last_top_decision": _normalise_execution_history(
+            "macro": _normalise_macro_execution(macro_execution, now),
+            "combat": _normalise_combat_execution(combat_execution, now),
+            "previous_decision": _normalise_previous_decision(previous_decision),
+            "since_last_decision": _normalise_execution_history(
                 execution_history
             ),
         },
@@ -461,17 +498,24 @@ def mask_observation(
 ) -> Dict[str, Any]:
     """Return a deep-copied role view without reading live game state."""
     full = _dict(full_observation)
+    # Accept legacy view_type aliases from the multi-agent era.
+    if view_type == "top":
+        view_type = "full"
+    elif view_type == "mid":
+        view_type = "macro"
+    elif view_type == "army":
+        view_type = "combat"
     common = {
         "schema_version": full.get("schema_version", SCHEMA_VERSION),
         "snapshot_id": full.get("snapshot_id"),
         "view_type": view_type,
     }
-    if view_type == "top":
+    if view_type == "full":
         view = deepcopy(full)
-        view["view_type"] = "top"
+        view["view_type"] = "full"
         return view
 
-    if view_type == "mid":
+    if view_type == "macro":
         view = {
             **common,
             "time": deepcopy(_dict(full.get("time"))),
@@ -482,14 +526,14 @@ def mask_observation(
             "enemy": deepcopy(_dict(full.get("enemy"))),
             "map_control": deepcopy(_dict(full.get("map_control"))),
             "execution": {
-                "mid": deepcopy(
-                    _dict(_dict(full.get("execution")).get("mid"))
+                "macro": deepcopy(
+                    _dict(_dict(full.get("execution")).get("macro"))
                 )
             },
         }
         return view
 
-    if view_type == "army":
+    if view_type == "combat":
         own = _dict(full.get("own_forces"))
         production = _dict(full.get("production"))
         combat_composition = _dict(own.get("combat_composition"))
@@ -526,8 +570,8 @@ def mask_observation(
             "army_control": deepcopy(_dict(full.get("army_control"))),
             "capabilities": deepcopy(_dict(full.get("capabilities"))),
             "execution": {
-                "army": deepcopy(
-                    _dict(_dict(full.get("execution")).get("army"))
+                "combat": deepcopy(
+                    _dict(_dict(full.get("execution")).get("combat"))
                 )
             },
         }
@@ -538,11 +582,17 @@ def mask_observation(
 
 def render_observation(view: Dict[str, Any], view_type: str) -> str:
     if view_type == "top":
-        return _render_top(view)
-    if view_type == "mid":
-        return _render_mid(view)
-    if view_type == "army":
-        return _render_army(view)
+        view_type = "full"
+    elif view_type == "mid":
+        view_type = "macro"
+    elif view_type == "army":
+        view_type = "combat"
+    if view_type == "full":
+        return _render_full(view)
+    if view_type == "macro":
+        return _render_macro(view)
+    if view_type == "combat":
+        return _render_combat(view)
     raise ValueError(f"unknown observation view_type: {view_type!r}")
 
 
@@ -606,19 +656,23 @@ def _production_lines(production: Dict[str, Any]) -> List[str]:
 
 
 def _combat_line(combat: Dict[str, Any]) -> str:
+    global_own = combat.get("our_army_power")
+    controlled_own = combat.get("controlled_own_army_power")
     parts = [
         f"global_army_advantage={_value(combat.get('army_advantage'))}",
         f"global_income_advantage={_value(combat.get('income_advantage'))}",
         f"global_predicted_combat_outcome={_value(combat.get('advantage_predicted'))}",
-        f"global_own_army_power={_value(combat.get('our_army_power'))}",
+        f"global_own_army_power={_value(global_own)}",
         f"global_enemy_army_power={_value(combat.get('enemy_army_power'))}",
     ]
-    if combat.get("controlled_own_army_power") is not None:
-        parts.extend(
-            [
-                f"own_army_power={_value(combat.get('controlled_own_army_power'))}",
-                f"visible_enemy_army_power={_value(combat.get('visible_enemy_army_power'))}",
-            ]
+    # Skip controlled own power when it matches global (common duplicate).
+    if controlled_own is not None and abs(
+        _numeric(controlled_own) - _numeric(global_own)
+    ) > 1e-6:
+        parts.append(f"controlled_own_army_power={_value(controlled_own)}")
+    if combat.get("visible_enemy_army_power") is not None:
+        parts.append(
+            f"visible_enemy_army_power={_value(combat.get('visible_enemy_army_power'))}"
         )
     parts.extend(
         [
@@ -792,30 +846,36 @@ def _scan_lines(
     ]
 
 
-def _mid_execution_lines(
+def _macro_execution_lines(
     execution: Dict[str, Any],
     *,
     include_last_tasks: bool = True,
 ) -> List[str]:
-    mid = _dict(execution.get("mid"))
+    macro = _dict(execution.get("macro"))
     actions = []
-    for task in _list(mid.get("active_macro_tasks")):
+    for task in _list(macro.get("active_macro_tasks")):
         task = _dict(task)
+        to_count = task.get("to_count", "?")
+        current = task.get("current_count")
+        if current is None:
+            progress = f"?/{to_count}"
+        else:
+            progress = f"{current}/{to_count}"
         text = (
             f"action={task.get('action', '?')}, "
-            f"target_count={task.get('to_count', '?')}"
+            f"progress={progress}"
         )
         text += f", status={task.get('status', 'active_unsatisfied')}"
         if task.get("disabled"):
             text += f" disabled({task.get('error', 'unknown')})"
         actions.append(text)
     return [
-        "[Macro Planner Execution]",
-        f"execution_status={_value(mid.get('status'))}",
-        *([f"last_tasks={_items(_list(mid.get('last_tasks')))}"] if include_last_tasks else []),
+        "[Macro Execution]",
+        f"execution_status={_value(macro.get('status'))}",
+        *([f"last_tasks={_items(_list(macro.get('last_tasks')))}"] if include_last_tasks else []),
         f"active_macro_tasks={_items(actions)}",
-        f"seconds_since_last_mid_agent_update={_value(mid.get('last_update_seconds_ago'))}",
-        f"last_translation_issues={_items(_list(mid.get('last_translation_issues')))}",
+        f"seconds_since_last_macro_update={_value(macro.get('last_update_seconds_ago'))}",
+        f"last_issues={_items(_list(macro.get('last_issues')))}",
     ]
 
 
@@ -837,50 +897,121 @@ def _policy_text(policy: Dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
-def _army_execution_lines(
+def _combat_execution_lines(
     execution: Dict[str, Any],
     *,
     include_current_policy: bool = True,
+    omit_idle: bool = False,
 ) -> List[str]:
-    army = _dict(execution.get("army"))
-    policy = _dict(army.get("last_policy"))
+    combat_exec = _dict(execution.get("combat"))
+    status = str(combat_exec.get("status") or "idle")
+    issues = _list(combat_exec.get("last_command_issues"))
+    policy = _dict(combat_exec.get("last_policy"))
+    if (
+        omit_idle
+        and status in {"idle", ""}
+        and not issues
+        and not policy
+        and combat_exec.get("policy_age_seconds") is None
+    ):
+        # Live group commands already cover army orders; idle block is noise.
+        return []
     return [
-        "[Army Execution]",
-        f"execution_status={_value(army.get('status'))}",
+        "[Combat Execution]",
+        f"execution_status={_value(combat_exec.get('status'))}",
         *([f"current_policy={_policy_text(policy) if policy else 'none'}"] if include_current_policy else []),
-        f"seconds_since_current_policy_applied={_value(army.get('policy_age_seconds'))}",
-        f"last_command_issues={_items(_list(army.get('last_command_issues')))}",
+        f"seconds_since_current_policy_applied={_value(combat_exec.get('policy_age_seconds'))}",
+        f"last_command_issues={_items(issues)}",
+    ]
+
+
+def _previous_decision_lines(execution: Dict[str, Any]) -> List[str]:
+    """Render the last Commander tool-call decision (commands only)."""
+    previous = _dict(execution.get("previous_decision"))
+    if not previous:
+        return []
+    macro_bits = []
+    for item in _list(previous.get("macro_commands")):
+        item = _dict(item)
+        name = item.get("name")
+        if not name:
+            continue
+        if item.get("to_count") is None:
+            macro_bits.append(str(name))
+        else:
+            macro_bits.append(f"{name}->{item.get('to_count')}")
+    army_bits = []
+    for item in _list(previous.get("army_commands")):
+        item = _dict(item)
+        army_bits.append(
+            f"{item.get('group_id', '?')}:"
+            f"{item.get('movement_mode', '?')}->"
+            f"{item.get('destination_zone_id', '?')}"
+        )
+    wake = _dict(previous.get("wake_event"))
+    wake_text = "none"
+    if wake:
+        conditions = []
+        for cond in _list(wake.get("conditions")):
+            cond = _dict(cond)
+            ctype = cond.get("type") or "?"
+            extras = []
+            for key in ("unit", "count", "status", "zone", "seconds"):
+                if cond.get(key) is not None:
+                    extras.append(f"{key}={cond.get(key)}")
+            conditions.append(
+                ctype if not extras else f"{ctype}({', '.join(extras)})"
+            )
+        wake_text = (
+            f"logic={wake.get('logic') or 'any'}; "
+            f"conditions={_items(conditions)}"
+        )
+    return [
+        "[Previous Decision]",
+        f"game_time_seconds={_value(previous.get('game_time_seconds'))}",
+        f"macro_commands={_items(macro_bits)}",
+        f"army_commands={_items(army_bits)}",
+        f"scan_zone_id={_value(previous.get('scan_zone_id'))}",
+        f"scout_zone_id={_value(previous.get('scout_zone_id'))}",
+        f"wake_event={wake_text}",
+        f"issues={_items(_list(previous.get('issues')))}",
     ]
 
 
 def _execution_history_lines(execution: Dict[str, Any]) -> List[str]:
-    history = _dict(execution.get("since_last_top_decision"))
-    mid_records = [_dict(item) for item in _list(history.get("mid"))]
-    army_records = [_dict(item) for item in _list(history.get("army"))]
+    # Prefer the explicit previous Commander decision commands when present.
+    previous_lines = _previous_decision_lines(execution)
+    if previous_lines:
+        return previous_lines
+    history = _dict(execution.get("since_last_decision"))
+    macro_records = [_dict(item) for item in _list(history.get("macro"))]
+    combat_records = [_dict(item) for item in _list(history.get("combat"))]
+    if not macro_records and not combat_records:
+        return []
     lines = [
-        "[Macro Planner Decisions Since Previous Coordination Decision]",
+        "[Macro Decisions Since Previous Decision]",
         (
             "window_start_game_time_seconds="
             f"{_value(history.get('window_start_game_time_seconds'))}; "
-            f"decision_count={len(mid_records)}"
+            f"decision_count={len(macro_records)}"
         ),
     ]
-    for index, event in enumerate(mid_records, start=1):
+    for index, event in enumerate(macro_records, start=1):
         lines.append(
             f"decision_{index}: game_time_seconds={_value(event.get('game_time_seconds'))}; "
             f"status={_value(event.get('status'))}; "
             f"tasks={_items(_list(event.get('tasks')))}; "
             f"issues={_items(_list(event.get('issues')))}"
         )
-    if not mid_records:
+    if not macro_records:
         lines.append("none")
 
     lines.extend([
         "",
-        "[Army Planner Decisions Since Previous Coordination Decision]",
-        f"decision_count={len(army_records)}",
+        "[Combat Decisions Since Previous Decision]",
+        f"decision_count={len(combat_records)}",
     ])
-    for index, event in enumerate(army_records, start=1):
+    for index, event in enumerate(combat_records, start=1):
         policy = {
             "commands": _list(event.get("commands")),
             "scan_zone_id": event.get("scan_zone_id"),
@@ -893,12 +1024,34 @@ def _execution_history_lines(execution: Dict[str, Any]) -> List[str]:
             f"policy={_policy_text(policy)}; "
             f"issues={_items(_list(event.get('issues')))}"
         )
-    if not army_records:
+    if not combat_records:
         lines.append("none")
     return lines
 
 
-def _render_top(view: Dict[str, Any]) -> str:
+def _own_forces_summary_line(
+    own: Dict[str, Any],
+    army_control: Dict[str, Any],
+) -> str:
+    """Prefer Army Groups for composition when groups exist."""
+    groups = _list(army_control.get("groups"))
+    if groups:
+        return f"army_supply={_value(own.get('army_supply'))}"
+    return (
+        f"army_supply={_value(own.get('army_supply'))}; "
+        f"own_combat_unit_composition={_counts(own.get('combat_composition'))}"
+    )
+
+
+def _append_section(lines: List[str], section_lines: List[str]) -> None:
+    if not section_lines:
+        return
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.extend(section_lines)
+
+
+def _render_full(view: Dict[str, Any]) -> str:
     time = _dict(view.get("time"))
     economy = _dict(view.get("economy"))
     own = _dict(view.get("own_forces"))
@@ -911,7 +1064,7 @@ def _render_top(view: Dict[str, Any]) -> str:
     execution = _dict(view.get("execution"))
     map_control = _dict(view.get("map_control"))
     combat = _dict(view.get("combat"))
-    lines = [
+    lines: List[str] = [
         "[Game]",
         _game_time_line(
             time,
@@ -936,7 +1089,7 @@ def _render_top(view: Dict[str, Any]) -> str:
         f"upgrades_in_progress={_items(_list(technology.get('upgrades_in_progress')))}",
         "",
         "[Own Forces]",
-        f"army_supply={_value(own.get('army_supply'))}; own_combat_unit_composition={_counts(own.get('combat_composition'))}",
+        _own_forces_summary_line(own, army),
         "",
         "[Enemy Intelligence]",
         *_enemy_lines(enemy, include_base_count=False),
@@ -952,15 +1105,20 @@ def _render_top(view: Dict[str, Any]) -> str:
         "",
         "[Army Zones]",
         *_zone_lines(army),
-        "",
-        *_scan_lines(capabilities, include_worker_count=False),
-        "",
-        *_mid_execution_lines(execution, include_last_tasks=False),
-        "",
-        *_army_execution_lines(execution, include_current_policy=False),
-        "",
-        *_execution_history_lines(execution),
     ]
+    _append_section(
+        lines, _scan_lines(capabilities, include_worker_count=False)
+    )
+    _append_section(
+        lines, _macro_execution_lines(execution, include_last_tasks=False)
+    )
+    _append_section(
+        lines,
+        _combat_execution_lines(
+            execution, include_current_policy=False, omit_idle=True
+        ),
+    )
+    _append_section(lines, _execution_history_lines(execution))
     return "\n".join(lines)
 
 
@@ -994,7 +1152,7 @@ def _base_resource_lines(map_control: Dict[str, Any]) -> List[str]:
         + (" | ".join(gas_records) if gas_records else "none"),
     ]
 
-def _render_mid(view: Dict[str, Any]) -> str:
+def _render_macro(view: Dict[str, Any]) -> str:
     time = _dict(view.get("time"))
     economy = _dict(view.get("economy"))
     own = _dict(view.get("own_forces"))
@@ -1028,18 +1186,18 @@ def _render_mid(view: Dict[str, Any]) -> str:
         "[Enemy Intelligence]",
         *_enemy_lines(enemy, include_base_count=False),
         "",
-        *_mid_execution_lines(_dict(view.get("execution")), include_last_tasks=False),
+        *_macro_execution_lines(_dict(view.get("execution")), include_last_tasks=False),
     ]
     return "\n".join(lines)
 
 
-def _render_army(view: Dict[str, Any]) -> str:
+def _render_combat(view: Dict[str, Any]) -> str:
     time = _dict(view.get("time"))
     own = _dict(view.get("own_forces"))
     readiness = _dict(view.get("military_readiness"))
     technology = _dict(readiness.get("technology"))
     army = _dict(view.get("army_control"))
-    lines = [
+    lines: List[str] = [
         "[Game]",
         _game_time_line(
             time,
@@ -1050,9 +1208,17 @@ def _render_army(view: Dict[str, Any]) -> str:
         ),
         "",
         "[Military]",
-        f"army_supply={_value(own.get('army_supply'))}; supply_used={_value(own.get('supply_used'))}; "
-        f"supply_capacity={_value(own.get('supply_cap'))}; supply_available={_value(own.get('supply_free'))}; "
-        f"own_combat_unit_composition={_counts(own.get('combat_composition'))}",
+        (
+            f"army_supply={_value(own.get('army_supply'))}; "
+            f"supply_used={_value(own.get('supply_used'))}; "
+            f"supply_capacity={_value(own.get('supply_cap'))}; "
+            f"supply_available={_value(own.get('supply_free'))}"
+            + (
+                ""
+                if _list(army.get("groups"))
+                else f"; own_combat_unit_composition={_counts(own.get('combat_composition'))}"
+            )
+        ),
         "",
         "[Enemy Intelligence]",
         *_enemy_lines(_dict(view.get("enemy"))),
@@ -1061,7 +1227,6 @@ def _render_army(view: Dict[str, Any]) -> str:
         _combat_line(_dict(view.get("combat"))),
         "",
         "[Military Readiness]",
-        f"completed_units_and_structures={_counts(readiness.get('completed_units_and_structures'))}",
         f"units_and_structures_under_construction={_counts(readiness.get('under_construction'))}",
         f"completed_upgrades={_items(_list(technology.get('completed_upgrades')))}; upgrades_in_progress={_items(_list(technology.get('upgrades_in_progress')))}",
         "",
@@ -1073,9 +1238,17 @@ def _render_army(view: Dict[str, Any]) -> str:
         "",
         "[Army Zones]",
         *_zone_lines(army),
-        "",
-        *_scan_lines(_dict(view.get("capabilities"))),
-        "",
-        *_army_execution_lines(_dict(view.get("execution")), include_current_policy=False),
     ]
+    _append_section(
+        lines,
+        _scan_lines(_dict(view.get("capabilities")), include_worker_count=False),
+    )
+    _append_section(
+        lines,
+        _combat_execution_lines(
+            _dict(view.get("execution")),
+            include_current_policy=False,
+            omit_idle=True,
+        ),
+    )
     return "\n".join(lines)

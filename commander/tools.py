@@ -10,16 +10,19 @@ from commander.combat_policy import (
     ArmyControlPolicy,
     ArmyGroupCommand,
 )
+from commander.wake_events import normalize_wake_event
 
-# Must match Action.py entries with type == "army".
+# Must match Action.py entries with type == "army" / "meta".
 ARMY_TOOL_NAMES = frozenset({"move_group", "scanner_sweep", "scout"})
+META_TOOL_NAMES = frozenset({"set_wake_event"})
+NON_MACRO_TOOL_NAMES = ARMY_TOOL_NAMES | META_TOOL_NAMES
 
 
 def _macro_keys(action_space: Dict[str, str]) -> Dict[str, str]:
     return {
         name: description
         for name, description in action_space.items()
-        if name not in ARMY_TOOL_NAMES
+        if name not in NON_MACRO_TOOL_NAMES
     }
 
 
@@ -164,9 +167,119 @@ def build_army_tools(action_space: Optional[Dict[str, str]] = None) -> List[Dict
     ]
 
 
+def build_meta_tools(action_space: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Meta tools for decision scheduling (wake events)."""
+    space = action_space or {}
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "set_wake_event",
+                "description": space.get(
+                    "set_wake_event",
+                    (
+                        "Required each cycle: set one composite wake condition for "
+                        "the next Commander decision (logic all|any over whitelist "
+                        "predicates). Omit only if you accept the now+60 fallback."
+                    ),
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "logic": {
+                            "type": "string",
+                            "enum": ["all", "any"],
+                            "description": (
+                                "Combine conditions with AND (all) or OR (any)."
+                            ),
+                        },
+                        "conditions": {
+                            "type": "array",
+                            "minItems": 1,
+                            "description": (
+                                "Whitelist predicates: unit_count_at_least / unit_count_less_than "
+                                "{unit,count}; objective_status_became "
+                                "{status}; destination_reached; scan_ready; "
+                                "cleanup_hint_present; game_time_at_least {seconds}; "
+                                "supply_left_at_most {count}. Do not use "
+                                "scout_result_is, scout_just_finished, "
+                                "movement_mode_in, movement_mode_not_in, "
+                                "army_group_count_at_least, "
+                                "army_group_count_less_than, or "
+                                "objective_status_is."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "description": "Predicate type name.",
+                                    },
+                                    "unit": {
+                                        "type": "string",
+                                        "description": (
+                                            "Unit type name for unit_count_* "
+                                            "(e.g. Marine)."
+                                        ),
+                                    },
+                                    "count": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "description": (
+                                            "Threshold for count-based predicates."
+                                        ),
+                                    },
+                                    "modes": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": (
+                                            "Movement modes for movement_mode_*."
+                                        ),
+                                    },
+                                    "status": {
+                                        "type": "string",
+                                        "description": (
+                                            "Objective status for "
+                                            "objective_status_became "
+                                            "(e.g. confirmed_clear)."
+                                        ),
+                                    },
+                                    "result": {
+                                        "type": "string",
+                                        "description": (
+                                            "Scout result for scout_result_is: "
+                                            "completed, killed_en_route, or "
+                                            "interrupted (reached aliases completed)."
+                                        ),
+                                    },
+                                    "seconds": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "description": (
+                                            "Absolute game time for game_time_at_least."
+                                        ),
+                                    },
+                                },
+                                "required": ["type"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["logic", "conditions"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    ]
+
+
 def build_commander_tools(action_space: Dict[str, str]) -> List[Dict[str, Any]]:
-    """Flat tool list from unified Action registry (macro + army control)."""
-    return build_macro_tools(action_space) + build_army_tools(action_space)
+    """Flat tool list from unified Action registry (macro + army + meta)."""
+    return (
+        build_macro_tools(action_space)
+        + build_army_tools(action_space)
+        + build_meta_tools(action_space)
+    )
 
 
 def normalize_tool_calls(raw_tool_calls: Any) -> List[Dict[str, Any]]:
@@ -266,12 +379,64 @@ def parse_tool_calls_from_content(text: str) -> List[Dict[str, Any]]:
     return normalized
 
 
+def army_group_ids_from_observation(
+    full_observation: Optional[Dict[str, Any]],
+) -> List[str]:
+    """Extract current army_groups ids from the canonical full observation."""
+    if not isinstance(full_observation, dict):
+        return []
+    army = full_observation.get("army_control")
+    if not isinstance(army, dict):
+        return []
+    ids: List[str] = []
+    for group in army.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        group_id = str(group.get("group_id") or "").strip()
+        if group_id:
+            ids.append(group_id)
+    return ids
+
+
+def validate_army_tools_for_cycle(
+    policy: ArmyControlPolicy,
+    *,
+    required_group_ids: Sequence[str],
+) -> List[str]:
+    """Blocking army issues: every observed group must receive move_group."""
+    required = [str(gid).strip() for gid in required_group_ids if str(gid).strip()]
+    if not required:
+        return []
+    commanded = {
+        str(command.group_id).strip()
+        for command in (policy.commands or [])
+        if getattr(command, "group_id", None)
+    }
+    missing = [gid for gid in required if gid not in commanded]
+    if not missing:
+        return []
+    if len(missing) == len(required):
+        return [
+            "army_move_group:missing — army_groups is non-empty so emit exactly "
+            f"one move_group per group_id ({', '.join(required)}); typically "
+            "regroup to a safe staging zone while production continues"
+        ]
+    return [
+        "army_move_group:incomplete — missing move_group for "
+        f"{', '.join(missing)} (required: {', '.join(required)})"
+    ]
+
+
 def apply_tool_calls(
     tool_calls: Sequence[Dict[str, Any]],
     *,
     legal_action_keys: Set[str],
-) -> Tuple[List[Dict[str, Any]], ArmyControlPolicy, List[str]]:
-    """Full-replace apply: macro tasks + army policy. Returns (tasks, policy, issues)."""
+) -> Tuple[List[Dict[str, Any]], ArmyControlPolicy, List[str], Optional[Dict[str, Any]]]:
+    """Full-replace apply: macro tasks + army policy + optional wake event.
+
+    Returns ``(tasks, policy, issues, wake_event)``. ``wake_event`` is None when
+    ``set_wake_event`` was omitted or fully invalid (caller may apply fallback).
+    """
     issues: List[str] = []
     macro_by_key: Dict[str, int] = {}
     group_commands: Dict[str, ArmyGroupCommand] = {}
@@ -279,6 +444,8 @@ def apply_tool_calls(
     scout_zone_id: Optional[str] = None
     saw_scan = False
     saw_scout = False
+    wake_event: Optional[Dict[str, Any]] = None
+    saw_wake = False
 
     for call in tool_calls:
         name = call.get("name") or ""
@@ -331,7 +498,18 @@ def apply_tool_calls(
             saw_scout = True
             continue
 
+        if name == "set_wake_event":
+            saw_wake = True
+            event, wake_issues = normalize_wake_event(args)
+            issues.extend(wake_issues)
+            if event is not None:
+                wake_event = event
+            continue
+
         issues.append(f"unknown_tool:{name}")
+
+    if not saw_wake:
+        issues.append("wake_event:missing")
 
     # Keep LLM tool-call order as resource priority (dict insertion order).
     tasks = [
@@ -344,7 +522,7 @@ def apply_tool_calls(
         scan_zone_id=scan_zone_id if saw_scan else None,
         scout_zone_id=scout_zone_id if saw_scout else None,
     )
-    return tasks, policy, issues
+    return tasks, policy, issues, wake_event
 
 
 def _parse_move_group(args: Dict[str, Any]) -> ArmyGroupCommand:

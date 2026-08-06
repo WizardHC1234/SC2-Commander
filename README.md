@@ -4,8 +4,8 @@
 
 ## 功能摘要
 
-- 单 Agent，默认每 **60s** 决策一次（可改）
-- 可执行命令均为 tool（训练/建造/研究/扩张/调兵/扫描/探图）
+- 单 Agent，**事件驱动决策**（开局 bootstrap + 模型 `set_wake_event`；漏写则 now+60 弱保底）
+- 可执行命令均为 tool（训练/建造/研究/扩张/调兵/扫描/探图/唤醒条件）
 - 每轮**整表替换**活跃目标；tool 顺序即资源优先级
 - Demo：Kairos Junction + `mid_tank` + 内置 AI
 - 内置人族策略：`early_marine`、`mid_tank`、`late_battlecruiser`
@@ -50,8 +50,7 @@ Copy-Item llm\config.example.json llm\config.json
       "api_url": "http://127.0.0.1:8000/v1",
       "api_key": "EMPTY",
       "model_name": "qwen3-32b",
-      "temperature": 0.5,
-      "tool_mode": "json"
+      "temperature": 0.5
     }
   }
 }
@@ -60,19 +59,23 @@ Copy-Item llm\config.example.json llm\config.json
 说明：
 
 - 启动时用 `--commander-model <key>`，key 必须与 `llm_agents_pool` 里的条目名一致
-- 本地 vLLM 若未开 auto tool choice，在对应条目加 `"tool_mode": "json"`（用回复正文里的 JSON tool_calls）
-- 支持原生 OpenAI `tool_calls` 的服务可不设 `tool_mode`
+- **默认走原生 OpenAI `tools=` / `tool_calls`**（描述来自 Action.py）
+- 若服务端不支持 tools，运行时自动回退到 JSON tool_mode（把工具名+描述写入 prompt，模型在正文里吐 JSON）；同一进程内后续决策会记住该回退
+- 仅在需要强制跳过 native 时才设 `"tool_mode": "json"`（一般不需要）
 
-### 决策间隔
+### 决策调度
 
-在 [`commander/bot.py`](commander/bot.py) 中修改：
+决策不再固定 60s 轮询。每轮模型必须调用 `set_wake_event` 声明下次唤醒条件；漏写或非法条件时，运行时自动挂 `game_time_at_least=now+60` 弱保底。另：**无论模型是否写了唤醒条件，运行时都会武装 `now+60` 截止保险丝**，避免条件长期不满足时睡死。
+
+相关常量在 [`commander/bot.py`](commander/bot.py)：
 
 ```python
 class CommanderBot(KnowledgeBot):
-    DECISION_INTERVAL: float = 60.0  # 秒；当前默认 60
+    OBS_RECORD_INTERVAL: float = 60.0  # 仅观测落盘，不触发 LLM
+    WAKE_COOLDOWN: float = 2.0         # 两次决策最小间隔
 ```
 
-改完后需重新启动对局才会生效。
+谓词白名单与求值见 [`commander/wake_events.py`](commander/wake_events.py)。`FALLBACK_DELAY_SECONDS = 60` 控制截止保险丝。
 
 ### 对局默认值
 

@@ -59,6 +59,8 @@ class CombatControlAct(ActBase):
         self._search_zone_assigned_at: Dict[str, float] = {}
         self._last_scan_policy_identity: Optional[int] = None
         self._last_scout_policy_identity: Optional[int] = None
+        self._last_scan_zone_request: Optional[str] = None
+        self._last_scout_zone_request: Optional[str] = None
         self._scout_requested_zone_id: Optional[str] = None
         self._scout_tag: Optional[int] = None
         self._scout_target_zone_id: Optional[str] = None
@@ -77,7 +79,7 @@ class CombatControlAct(ActBase):
         # The unified Observation builder discovers the live Army collector
         # through the bot. This avoids maintaining a second Army snapshot.
         self.ai.llm_army_control_act = self
-        self.ai.llm_army_execution_state = {}
+        self.ai.llm_combat_execution_state = {}
         self.gather_manager = self.knowledge.get_required_manager(
             IGatherPointSolver
         )
@@ -94,13 +96,14 @@ class CombatControlAct(ActBase):
         # decision cycle instead of one cycle later.
         self._refresh_scout_status()
         policy = self.policy_provider.get_policy(self)
-        policy_identity = id(policy)
-        if policy_identity != self._last_scan_policy_identity:
-            self.ai.llm_scan_zone_id = policy.scan_zone_id
-            self._last_scan_policy_identity = policy_identity
-        if policy_identity != self._last_scout_policy_identity:
-            self._set_scout_request(policy.scout_zone_id)
-            self._last_scout_policy_identity = policy_identity
+        scan_zone = policy.scan_zone_id
+        scout_zone = policy.scout_zone_id
+        if scan_zone != getattr(self, "_last_scan_zone_request", object()):
+            self.ai.llm_scan_zone_id = scan_zone
+            self._last_scan_zone_request = scan_zone
+        if scout_zone != getattr(self, "_last_scout_zone_request", object()):
+            self._set_scout_request(scout_zone)
+            self._last_scout_zone_request = scout_zone
         requested_scan_zone = getattr(self.ai, "llm_scan_zone_id", None)
         previous_scan_time = self._scan_control.last_scan
         await self._scan_control.execute()
@@ -112,20 +115,23 @@ class CombatControlAct(ActBase):
             )
         self._execute_scout_control()
         # Refresh groups every frame so newly produced units become group_1
-        # before we apply (and possibly augment) the last LLM policy.
+        # before we apply (and sync) the last LLM policy.
         self._update_groups(self._select_main_army_units())
-        policy = self._augment_policy_for_new_groups(policy)
+        policy = self._sync_policy_with_groups(policy)
         self._execute_policy(policy)
         return False
 
-    def _augment_policy_for_new_groups(
+    def _sync_policy_with_groups(
         self, policy: ArmyControlPolicy
     ) -> ArmyControlPolicy:
-        """Fill missing group commands from the main-force order.
+        """Keep every live group commanded between LLM decisions.
 
-        Between LLM decisions, newly produced units form reinforcement
-        (group_1) while the cached policy often only commands group_0.
-        Inherit destination/mode so reinforcements join the same objective.
+        Cached LLM policies go stale when reinforcement (group_1) disappears
+        and later reappears: the old group_1 order (often regroup-at-home)
+        remains in the policy and would strand newly produced units away from
+        an already-committed main-force offensive. Every frame, drop commands
+        for groups that no longer exist and make non-main groups follow the
+        main force's current objective/mode.
         """
         if not self._current_groups or not policy.commands:
             return policy
@@ -134,27 +140,54 @@ class CombatControlAct(ActBase):
         main_id = self._main_group_id or self.MAIN_GROUP_ID
         source = by_id.get(main_id)
         if source is None:
-            # Fall back to the only/first command when main is not listed.
             source = next(iter(policy.commands), None)
         if source is None:
             return policy
 
-        added: List[ArmyGroupCommand] = []
-        for group_id in self._current_groups:
-            if group_id in by_id:
-                continue
-            added.append(
-                ArmyGroupCommand(
-                    group_id=group_id,
+        synced: List[ArmyGroupCommand] = []
+        # Always keep the live main-force order first when present.
+        if main_id in self._current_groups:
+            main_command = by_id.get(main_id, source)
+            if main_command.group_id != main_id:
+                main_command = ArmyGroupCommand(
+                    group_id=main_id,
                     destination_zone_id=source.destination_zone_id,
                     movement_mode=source.movement_mode,
                     move_type=MOVE_TYPE_BY_MOVEMENT_MODE[source.movement_mode],
                 )
+            synced.append(main_command)
+            follow = main_command
+        else:
+            follow = source
+
+        for group_id in sorted(
+            self._current_groups,
+            key=lambda value: int(value.removeprefix("group_")),
+        ):
+            if group_id == main_id:
+                continue
+            # Reinforcements always chase the main objective between decisions.
+            synced.append(
+                ArmyGroupCommand(
+                    group_id=group_id,
+                    destination_zone_id=follow.destination_zone_id,
+                    movement_mode=follow.movement_mode,
+                    move_type=MOVE_TYPE_BY_MOVEMENT_MODE[follow.movement_mode],
+                )
             )
-        if not added:
+
+        if (
+            len(synced) == len(policy.commands)
+            and all(
+                a.group_id == b.group_id
+                and a.destination_zone_id == b.destination_zone_id
+                and a.movement_mode == b.movement_mode
+                for a, b in zip(synced, policy.commands)
+            )
+        ):
             return policy
         return ArmyControlPolicy(
-            commands=list(policy.commands) + added,
+            commands=synced,
             scan_zone_id=policy.scan_zone_id,
             scout_zone_id=policy.scout_zone_id,
         )
@@ -235,7 +268,7 @@ class CombatControlAct(ActBase):
 
         self.roles.refresh_task(scout)
         if scout.distance_to(target) <= 6:
-            self._record_scout_result(zone_id, "reached")
+            self._record_scout_result(zone_id, "completed")
             self._release_scout()
             self._scout_requested_zone_id = None
             return

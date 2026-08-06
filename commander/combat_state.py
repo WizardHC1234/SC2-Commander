@@ -302,7 +302,7 @@ def _record_army_control_interaction(
                 "observation_text": observation,
                 "observation_full": observation_full,
                 "observation_view": observation_view,
-                "observation_view_type": "army",
+                "observation_view_type": "combat",
                 "army_control_agent_policy": {
                     "messages_sent": [dict(message) for message in messages],
                     "raw_response": response,
@@ -319,7 +319,7 @@ def _record_army_control_interaction(
         logger.warning("Unable to record Army Control interaction: %s", exc)
 
 
-def _persist_army_execution(
+def _persist_combat_execution(
     act: Any,
     policy: ArmyControlPolicy,
     issues: list,
@@ -332,7 +332,7 @@ def _persist_army_execution(
     ai = getattr(act, "ai", None)
     if ai is None:
         return
-    previous = dict(getattr(ai, "llm_army_execution_state", {}) or {})
+    previous = dict(getattr(ai, "llm_combat_execution_state", {}) or {})
     if applied or not previous.get("last_policy"):
         previous["last_policy"] = _policy_to_jsonable(policy)
         previous["policy_applied_game_time"] = now
@@ -340,15 +340,17 @@ def _persist_army_execution(
         str(issue) for issue in issues if str(issue).strip()
     ]
     previous["status"] = status
-    ai.llm_army_execution_state = previous
+    ai.llm_combat_execution_state = previous
 
-    append_event = getattr(ai, "_append_top_execution_event", None)
+    append_event = getattr(ai, "_append_execution_event", None)
+    if append_event is None:
+        append_event = getattr(ai, "_append_top_execution_event", None)
     if callable(append_event):
         policy_data = _policy_to_jsonable(policy)
         if not isinstance(policy_data, dict):
             policy_data = {}
         append_event(
-            "army",
+            "combat",
             {
                 "game_time_seconds": round(float(now), 1),
                 "status": status,
@@ -1005,7 +1007,7 @@ class BlockingLLMArmyControlProvider:
             if not callable(capture):
                 raise RuntimeError("unified Observation API unavailable")
             observation, observation_full, observation_view = capture(
-                "army", army_state=state
+                "combat", army_state=state
             )
         except Exception as exc:
             # Do not rebuild the removed legacy global + Army observation.
@@ -1103,7 +1105,7 @@ class BlockingLLMArmyControlProvider:
                 )
             if str(exc) not in failure_issues:
                 failure_issues.append(str(exc))
-            _persist_army_execution(
+            _persist_combat_execution(
                 act, policy, failure_issues, now,
                 applied=not reused_last_valid,
                 status="fallback_active",
@@ -1130,7 +1132,7 @@ class BlockingLLMArmyControlProvider:
         self.last_valid_policy = policy
         self.last_observation_state = _state_snapshot(state)
         self.next_decision_time = now + self.decision_interval_seconds
-        _persist_army_execution(
+        _persist_combat_execution(
             act, policy, issues, now,
             applied=True,
             status="executing_with_repairs" if issues else "executing",

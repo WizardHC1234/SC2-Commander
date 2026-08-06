@@ -22,7 +22,7 @@ import os
 import threading
 import weakref
 from datetime import datetime
-from typing import Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 from sc2.data import Race, Result
 from sc2.ids.ability_id import AbilityId
@@ -257,14 +257,14 @@ class LLMObservationRecorder(ManagerBase):
 
         try:
             snapshot = self.build_full_observation()
-            view = self.mask_observation(snapshot, "top")
-            text_obs = self.render_observation(view, "top")
+            view = self.mask_observation(snapshot, "full")
+            text_obs = self.render_observation(view, "full")
             self.record_history.append(
                 {
                     "game_time_seconds": round(self.ai.time, 2),
                     "observation_full": snapshot,
                     "observation_view": view,
-                    "observation_view_type": "top",
+                    "observation_view_type": "full",
                     "text_observation": text_obs,
                 }
             )
@@ -363,16 +363,11 @@ class LLMObservationRecorder(ManagerBase):
                 output_path = self._resolve_output_path()
                 metadata = self._build_metadata(effective_result)
                 metadata["save_reason"] = reason
+                payload: Dict[str, Any] = {"metadata": metadata}
+                if self.record_history:
+                    payload["records"] = self.record_history
                 if self.llm_interactions:
-                    payload = {
-                        "metadata": metadata,
-                        "interactions": self.llm_interactions,
-                    }
-                else:
-                    payload = {
-                        "metadata": metadata,
-                        "records": self.record_history,
-                    }
+                    payload["interactions"] = self.llm_interactions
 
                 with self._open_text_write(output_path) as handle:
                     json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -451,19 +446,17 @@ class LLMObservationRecorder(ManagerBase):
         if army_state is None:
             army_state = self._collect_registered_army_state()
 
-        mid_execution = self._collect_mid_execution_state()
-        army_execution = getattr(
-            self.ai, "llm_army_execution_state", None
+        macro_execution = self._collect_macro_execution_state()
+        combat_execution = getattr(
+            self.ai, "llm_combat_execution_state", None
         )
-        execution_history = getattr(
-            self.ai, "llm_execution_since_last_top_decision", None
-        )
+        previous_decision = getattr(self.ai, "llm_previous_decision", None)
         return build_full_observation(
             legacy_snapshot,
             army_state=army_state,
-            mid_execution=mid_execution,
-            army_execution=army_execution,
-            execution_history=execution_history,
+            macro_execution=macro_execution,
+            combat_execution=combat_execution,
+            previous_decision=previous_decision,
             game_loop=self._current_game_loop(),
             game_time_limit_seconds=getattr(
                 self.ai, "game_time_limit_seconds", None
@@ -519,9 +512,9 @@ class LLMObservationRecorder(ManagerBase):
             )
             return {}
 
-    def _collect_mid_execution_state(self) -> Dict:
+    def _collect_macro_execution_state(self) -> Dict:
         state = dict(
-            getattr(self.ai, "llm_mid_execution_state", {}) or {}
+            getattr(self.ai, "llm_macro_execution_state", {}) or {}
         )
         serialise = getattr(self.ai, "_serialise_active_tasks", None)
         if callable(serialise):

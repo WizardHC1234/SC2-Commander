@@ -7,8 +7,9 @@ authoritative plan.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, List, Optional, Sequence
+
+from commander.tools import NON_MACRO_TOOL_NAMES
 
 # ---------------------------------------------------------------------------
 # Macro branch (from SC2_Agent.macro_planner)
@@ -18,13 +19,23 @@ _MACRO_EXECUTION_MODEL = """\
 Macro execution model:
 * Each macro tool sets one absolute declarative target. The runtime executes all active macro tools concurrently; one blocked goal does not block later goals.
 * Tool-call order is absolute resource priority and is preserved by the runtime (no reordering): urgent bottlenecks and short-term needs come before long-term goals.
-* An absolute target remains active until the requested total is reached (including under-construction)."""
+* An absolute target remains active until the requested total is reached (including under-construction).
+* Because goals run concurrently, waiting on one unfinished building, add-on, research, or temporary resource shortage must never cause you to drop other still-valid production, worker, expand, or tech targets from the tool list.
+
+Decision scheduling:
+* Decisions are event-driven, not on a fixed timer. After each decision you must call set_wake_event once to declare when the Commander should wake next.
+* set_wake_event takes logic=all|any and a non-empty conditions list of whitelist predicates: unit_count_at_least / unit_count_less_than (unit,count), objective_status_became (status; true only after status changes to the target since this wake was armed), destination_reached, scan_ready, cleanup_hint_present, game_time_at_least (seconds), supply_left_at_most (count). Do not use scout_result_is, scout_just_finished, movement_mode_in, movement_mode_not_in, army_group_count_at_least, army_group_count_less_than, or objective_status_is.
+* Wake conditions must be achievable from this cycle's tool_calls and current observation. Do not wake on unit_count_at_least for a unit you are not training this cycle (example failure: no train_marine tool but wake on Marine>=20). If the next checkpoint is an attack-gate unit count, include the matching train_* macro tool in the same cycle.
+* While infrastructure is still missing (Barracks/Factories/add-ons not ready), prefer supply_left_at_most, objective_status_became / destination_reached, or an explicit game_time_at_least a short time ahead — not an unreachable combat-unit gate.
+* Align the wake condition with the next strategy reassessment. Prefer concrete reachable game-state predicates that can flip without another Commander decision (unit_count with matching train_*, supply_left_at_most, objective_status_became, destination_reached, scan_ready, game_time_at_least). objective_status_became / destination_reached refer only to army destination evidence (for example confirmed_clear or enemy_present), never to building or research completion. The runtime also arms an independent now+60 deadline fuse so the Commander cannot sleep forever.
+* Omitting set_wake_event or emitting only invalid predicates causes a weak runtime fallback of game_time_at_least=now+60; treat that as a safety net, not the intended pattern.
+* If a wake condition is unreachable from this cycle's tools (for example unit_count without the matching train_*), the runtime rejects it and asks you to reflect and re-emit a complete corrected tool_calls set."""
 
 _MACRO_DECISION_ORDER = """\
 Macro decision order:
 1. Reconcile the current observation, the full strategy, and previous macro tools. The strategy is authoritative for macro goals. Independently preserve every still-valid strategy objective.
 2. Compare every explicit worker, structure, add-on, upgrade and unit target with exact completed and pending evidence. Preserve exact scale: 1 Factory does not satisfy a target of 2, and a Factory does not prove a Factory Tech Lab exists. Treat an approximate numeric target as the stated number by default; saturation and resource signals may change priority but must not silently replace it. Absence from completed, under-construction, queue or technology evidence means zero. Remove satisfied or obsolete goals, retain still-needed ones.
-3. Emit the complete set of all still-valid macro tools, not only the next immediate actions. The runtime replaces the previous macro list with this cycle's macro tools; omitting a valid goal cancels it. Include dependent combat-unit targets together with missing producers, add-ons and technology. Begin any strategy-required unit production whose own producer and prerequisites are already available instead of waiting for unrelated later infrastructure. A temporary resource shortage must never be used to omit a still-valid unit-production goal.
+3. Emit the complete set of all still-valid macro tools, not only the next immediate actions. The runtime replaces the previous macro list with this cycle's macro tools; omitting a valid goal cancels it. Include dependent combat-unit targets together with missing producers, add-ons and technology. Begin any strategy-required unit production whose own producer and prerequisites are already available instead of waiting for unrelated later infrastructure. The runtime executes tools concurrently, and a blocked tool waits without blocking later tools, so an incomplete prerequisite or temporary resource shortage must never be used to omit its unit-production goal. Do not shrink the list to only the current bottleneck (for example only Fusion Core) while strategy-required Starports, Factories, tanks, thors, workers, gas, or other already-unlocked train_* targets remain valid. Distinguish attack gates from production ceilings: a strategy attack threshold (e.g. begin attacking at 20 Marines) is only the condition to start the planned offensive, not the final absolute train_*.to_count; when the strategy also requires continuous production or a much higher ultimate unit count (e.g. toward 180 Marines / fill supply), raise and retain train_* to_count to that ongoing goal after the gate is met — never freeze production at the gate number, and never drop train_* merely because the attack has started.
 4. Use the strategy's Resource Costs together with current minerals, gas, supply, income, completed and pending production, and active queues to order the retained tools. Affordable prerequisites and production bottlenecks come before dependent units, but temporarily unaffordable valid goals remain in the list. When a large bank and free supply coexist with sparse or idle queues, first restore missing strategy-required production capacity, then sustain or raise strategy-permitted core-unit targets within 200 supply. Do not invent an unrelated composition merely to spend resources.
 5. Reassess expansion from active_mining_base_count, remaining base resources, current and projected income, bank, available neutral expansion sites, pending construction and defensibility. Mineral depletion is a signal to reassess rather than a rule that forces or forbids expansion. expand.to_count is the desired absolute number of active mineral-bearing bases, not merely raw town-hall structures, and must exceed the current count unless already pending.
 6. One macro tool per action with one positive integer absolute to_count; merge duplicates. Use to_count=1 for research and the resulting structure count for morphs.
@@ -64,15 +75,15 @@ Army decision rules:
 - Act as a strategy executor. Treat required conditions that cannot be confirmed from the observation as unsatisfied.
 - Use only the supplied observation and treat masked information as unknown. Completed and under-construction units, structures, and technology are prerequisite evidence only for gates; do not invent missing combat power.
 - Observation exposes one persistent main_force and, when needed, one temporary reinforcement group. Main-force membership does not split because its formation spreads; newly produced or surviving non-main units remain reinforcement until they physically rejoin it. fragmented=yes means that no connected component contains at least 80% of the group's combat power.
-- Treat main_force as the single operational force. Whenever reinforcement is present, still command main_force in the same cycle; never command only reinforcement. Unless an immediate local threat requires retreat, direct reinforcement to converge on it: regroup toward the main force's current safe zone before an offensive, or move toward the same current objective after the offensive begins. Do not give reinforcement an independent attack, harass, or search route.
+- Treat main_force as the single operational force. Whenever reinforcement is present, still command main_force in the same cycle; never command only reinforcement. Unless an immediate local threat requires retreat, direct reinforcement to converge on it: regroup toward the main force's current safe zone before an offensive, or move toward the same current objective after the offensive begins. Do not give reinforcement an independent attack, harass, or search route; reunited units merge into main_force automatically.
 - Base every decision on the current observation. A previous offensive or regroup order is historical context, not permission to repeat it when the situation changed.
-- When the strategy requires a concentrated force, use the current spatial distribution and local threats to decide whether groups should gather, reinforce a progressing force, continue the current objective, or recover.
-- Evaluate strategy attack-composition readiness from the combined combat units across all current army_groups, excluding units still in production. If that combined force would meet the strategy gate only by ignoring separated reinforcement, treat the army as not yet attack-ready and merge first.
-- Before initiating a planned offensive, explicitly compare each numeric attack-gate component with completed living units in the reasoning; every component must be satisfied. Nearly ready or a favorable estimated advantage is insufficient. Once a valid offensive begins, use current progress and the strategy recovery conditions rather than automatically reapplying the opening gate after each loss.
+- When the strategy requires a concentrated force, use the current spatial distribution and local threats to decide whether groups should gather, reinforce a progressing force, continue the current objective, or recover. Do not infer readiness or progress from an old command alone.
+- Evaluate strategy attack-composition readiness from the combined combat units across all current army_groups, excluding units still in production. If that combined force would meet the strategy gate only by ignoring separated reinforcement or detached combat units, treat the army as not yet attack-ready and merge first.
+- Before initiating a planned offensive, explicitly compare each numeric attack-gate component with completed living units in the reasoning; every component must be satisfied, and being nearly ready or having a favorable estimated advantage is insufficient. The strategy Ultimate Goal is a production ceiling, not the attack gate — do not delay the planned attack until the ultimate count is reached once the Main Attack Gate is met on the concentrated force. Once a valid offensive begins, use current progress and the strategy recovery conditions rather than automatically reapplying the opening gate after each loss.
 - Unmet attack gates mean do not start the planned offensive yet. They do not mean skipping army tools: when army_groups is non-empty, still issue move_group each cycle—typically regroup to a safe staging zone—so the force concentrates while production continues.
-- Do not recall a forward group solely because newly produced reinforcements form another group. Keep it advancing only while current evidence shows that it can make progress.
+- Do not recall a forward group solely because newly produced reinforcements form another group. Keep it advancing only while current evidence shows that it can make progress, and use current strategy conditions to decide whether other groups should reinforce, gather, or recover.
 - Do not select an unsafe enemy zone as an ordinary regroup point. Use push or assault for an active enemy objective; use regroup only for a currently safe own or neutral gather zone.
-- Clear local advantage at the active enemy objective is evidence that the forward group can still make progress; maintain its pressure while reinforcements travel.
+- Clear local advantage at the active enemy objective is evidence that the forward group can still make progress; maintain its pressure while reinforcements travel forward.
 - current_destination_reached and current_objective_status summarize evidence for each group's existing destination. confirmed_clear means the destination is currently visible with no enemy presence; that alone is not a map-wide cleanup cue.
 - Do not begin search_and_destroy from missing vision or "no enemy is visible" alone. Begin or continue search_and_destroy only when a [Runtime Search-And-Destroy Hint] block is present in the observation; follow its required_action for that cycle (typically every combat group in search_and_destroy from its nearest zone). Once that mode has started under a hint, keep combat groups in search_and_destroy rather than returning to push/assault on empty former enemy zones.
 - Choose Scanner Sweep and SCV reconnaissance from the full strategy and current observation.
@@ -100,8 +111,52 @@ def _strategy_block(race: str, strategy_description: str) -> str:
     )
 
 
+def _format_tool_catalog(action_space: Dict[str, str]) -> str:
+    """Render Action.py name+description lines for JSON tool_mode prompts."""
+    if not action_space:
+        return "(none)"
+    lines = []
+    for name in sorted(action_space):
+        description = (action_space.get(name) or "").strip() or f"Set absolute target for {name}"
+        # Keep one tool per line; collapse internal newlines from long army/meta text.
+        description = " ".join(description.split())
+        lines.append(f"- {name}: {description}")
+    return "\n".join(lines)
+
+
 def _json_output_format(action_space: Dict[str, str]) -> str:
-    keys = ", ".join(sorted(action_space.keys()))
+    space = action_space or {}
+    macro = {
+        name: desc
+        for name, desc in space.items()
+        if name not in NON_MACRO_TOOL_NAMES
+    }
+    army_meta = {
+        name: desc
+        for name, desc in space.items()
+        if name in NON_MACRO_TOOL_NAMES
+    }
+    # Fallbacks if the caller only passed macro keys.
+    if "move_group" not in army_meta:
+        army_meta = {
+            "move_group": (
+                "Command one army_group to a destination zone with a movement mode. "
+                "Call exactly once per group_id in army_groups; omit when empty."
+            ),
+            "scanner_sweep": (
+                "Request one Scanner Sweep on a zone (50 Orbital energy). "
+                "Omit to request no scan."
+            ),
+            "scout": (
+                "Request or refresh one SCV zone scout. Omit to cancel. "
+                "If a scout is already active, repeat the same zone."
+            ),
+            "set_wake_event": (
+                "Set the composite wake condition for the next Commander decision."
+            ),
+        }
+    macro_catalog = _format_tool_catalog(macro)
+    army_catalog = _format_tool_catalog(army_meta)
     return f"""
 Output format (required):
 1. First write one concise reasoning paragraph outside JSON. Explain which strategy gates are met or unmet, which macro targets you retain/raise/drop, and why the army/scout/scan tools (if any) are chosen. Do not use bullets in that paragraph.
@@ -110,32 +165,37 @@ Output format (required):
 
 The reasoning paragraph is required. A response that begins with "{{" or contains only JSON is invalid.
 
-Legal macro tool names (arguments always {{"to_count": <positive int>}}):
-{keys}
+Legal macro tools (arguments always {{"to_count": <positive int>}}; use the description when choosing tools):
+{macro_catalog}
 
-Army tools (copy ids from the observation; full parameter rules are on the tools):
+Army / meta tools (copy ids from the observation; use the description when choosing tools):
+{army_catalog}
+Argument shapes:
 - move_group: {{"group_id":"group_0","destination_zone_id":"zone_5","movement_mode":"assault"}}
   One call per army_groups entry; skip when army_groups is empty.
   movement_mode: regroup|push|assault|harass|defensive_retreat|panic_retreat|search_and_destroy
 - scanner_sweep: {{"zone_id":"zone_5"}} (omit = no scan)
 - scout: {{"zone_id":"zone_3"}} (omit = cancel; if scout already active, repeat same zone)
+- set_wake_event (required): {{"logic":"any","conditions":[{{"type":"unit_count_at_least","unit":"Marine","count":20}}]}}
+  Exactly one composite wake event per cycle for the next decision. Do not use scout_result_is, scout_just_finished, movement_mode_in, movement_mode_not_in, army_group_count_at_least, army_group_count_less_than, or objective_status_is. unit_count wakes require matching train tools in the same cycle. objective_status_became is only for army destination status changes, not for unfinished buildings or research.
 
 Completeness:
-- Macro tools in tool_calls must be the full still-valid set from the strategy, not a minimal opening snippet. Example failure: only train_scv to 16 and expand to 2 when the strategy still requires Barracks, Factories, add-ons, research, Marine and Tank absolute targets, and worker count near the strategy goal.
+- Macro tools in tool_calls must be the full still-valid set from the strategy, not a minimal opening snippet and not only the current bottleneck building. Writing a plan in prose does not replace omitted tools. Example failure: only train_scv to 16 and expand to 2 when the strategy still requires Barracks, Factories, add-ons, research, Marine and Tank absolute targets, and worker count near the strategy goal. Another failure: only build_fusion_core while strategy-required factories, starports, tanks, or other unlocked train targets are omitted.
 - Include army move_group tools whenever army_groups is non-empty, including before the attack gate is met (prefer regroup to a safe staging zone while waiting). Omitting army tools is not the default way to wait for production.
 - Include scout when the strategy's opening or information needs require it and it is not already resolved.
+- Always include set_wake_event for the next reassessment moment; keep it reachable from this cycle's tools.
 
 Example (illustrative, not a template to copy blindly):
-We still need the two-base Marine-Tank core. Workers are below the strategy goal, the second base is pending, Barracks/Factories/add-ons and Combat Shield remain required, and no army group exists yet so only an opening scout is needed.
+We still need the two-base Marine-Tank core. Workers are below the strategy goal, the second base is pending, Barracks/Factories/add-ons and Combat Shield remain required, and no army group exists yet so only an opening scout is needed. Wake on a short game-time checkpoint while infrastructure builds — not on Marine count before train_marine is issued, and not on scout finish.
 
-{{"tool_calls":[{{"name":"train_scv","arguments":{{"to_count":44}}}},{{"name":"expand","arguments":{{"to_count":2}}}},{{"name":"build_barracks","arguments":{{"to_count":3}}}},{{"name":"build_factory","arguments":{{"to_count":2}}}},{{"name":"build_barracks_reactor","arguments":{{"to_count":2}}}},{{"name":"build_barracks_techlab","arguments":{{"to_count":1}}}},{{"name":"build_factory_techlab","arguments":{{"to_count":2}}}},{{"name":"research_shieldwall","arguments":{{"to_count":1}}}},{{"name":"train_marine","arguments":{{"to_count":45}}}},{{"name":"train_siege_tank","arguments":{{"to_count":10}}}},{{"name":"build_gas","arguments":{{"to_count":4}}}},{{"name":"scout","arguments":{{"zone_id":"zone_1"}}}}]}}
+{{"tool_calls":[{{"name":"train_scv","arguments":{{"to_count":44}}}},{{"name":"expand","arguments":{{"to_count":2}}}},{{"name":"build_barracks","arguments":{{"to_count":3}}}},{{"name":"build_factory","arguments":{{"to_count":2}}}},{{"name":"build_barracks_reactor","arguments":{{"to_count":2}}}},{{"name":"build_barracks_techlab","arguments":{{"to_count":1}}}},{{"name":"build_factory_techlab","arguments":{{"to_count":2}}}},{{"name":"research_shieldwall","arguments":{{"to_count":1}}}},{{"name":"train_marine","arguments":{{"to_count":45}}}},{{"name":"train_siege_tank","arguments":{{"to_count":10}}}},{{"name":"build_gas","arguments":{{"to_count":4}}}},{{"name":"scout","arguments":{{"zone_id":"zone_1"}}}},{{"name":"set_wake_event","arguments":{{"logic":"any","conditions":[{{"type":"game_time_at_least","seconds":90}}]}}}}]}}
 """
 
 
 def _native_output_format() -> str:
     return """
 Output format:
-Use the provided tools. Call every still-valid macro tool and every required army tool in this cycle. Omitting a previously active macro tool cancels it. Omitting scout cancels the active scout. Omitting scanner_sweep requests no scan.
+Use the provided tools (each tool includes its Action.py description). Call every still-valid macro tool and every required army tool in this cycle. Always call set_wake_event once with the next wake condition. Omitting a previously active macro tool cancels it. Omitting scout cancels the active scout. Omitting scanner_sweep requests no scan. Omitting set_wake_event triggers a weak now+60 fallback.
 """
 
 
@@ -150,21 +210,15 @@ def build_commander_messages(
     tool_mode: str = "native",
     action_space: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, str]]:
-    """Build chat messages with a cache-friendly layout.
+    """Build chat messages.
 
-    System is match-static (rules + strategy + output format). User puts slower-
-    changing previous orders before the volatile observation / runtime hint so
-    providers that prefix-cache share a longer stable prefix across cycles when
-    previous targets are unchanged.
+    System is match-static (rules + strategy + output format). The previous
+    Commander tool commands live inside the observation under
+    ``[Previous Decision]``; ``previous_macro_tasks`` /
+    ``previous_army_summary`` are kept for call-site compatibility.
     """
     race_cap = race.capitalize()
     strategy_block = _strategy_block(race, strategy_description)
-    previous_macro_json = json.dumps(
-        list(previous_macro_tasks), ensure_ascii=False, indent=2
-    )
-    previous_army_json = json.dumps(
-        previous_army_summary or {}, ensure_ascii=False, indent=2
-    )
     hint = (runtime_hint or "").strip()
 
     # Keep system free of per-cycle fields (time, observation, hints).
@@ -179,14 +233,20 @@ def build_commander_messages(
     )
     if tool_mode == "json":
         system_msg += _json_output_format(action_space or {})
-        user_tail = "Produce the required reasoning paragraph and the complete tool_calls JSON for this cycle."
+        user_tail = (
+            "Produce the required reasoning paragraph and the complete tool_calls "
+            "JSON for this cycle, including set_wake_event."
+        )
     else:
         system_msg += _native_output_format()
-        user_tail = "Call every still-valid macro tool and every required army tool for this cycle."
+        user_tail = (
+            "Call every still-valid macro tool, every required army tool, and "
+            "set_wake_event for this cycle."
+        )
 
+    # Previous decision commands are embedded in the observation text under
+    # [Previous Decision]; keep the user turn observation-first.
     user_parts = [
-        f"[Previous Macro Targets]\n{previous_macro_json}",
-        f"[Previous Army Orders]\n{previous_army_json}",
         f"[Current Observation]\n{(observation_text or '').rstrip()}",
     ]
     if hint:

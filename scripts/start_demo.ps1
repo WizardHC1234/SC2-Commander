@@ -13,13 +13,14 @@ if (-not $env:SC2PATH -or -not (Test-Path -LiteralPath $env:SC2PATH)) {
 }
 
 $MAP_NAME = "KairosJunctionLE"
-# $ENEMY_RACE = "terran"
-$ENEMY_RACE = "protoss"
+$ENEMY_RACE = "terran"
+# $ENEMY_RACE = "protoss"
 $ENEMY_DIFFICULTY = "hard"
 $ENEMY_BUILD = "macro"
 $BOT_RACE = "terran"
-$FORCE_STRATEGY = "mid_tank"
-$COMMANDER_MODEL = "qwen3-32b"
+$FORCE_STRATEGY = "battlecruiser"
+# $COMMANDER_MODEL = "qwen3-32b"
+$COMMANDER_MODEL = "deepseek-v4-flash"
 
 $configPath = Join-Path $repoRoot "llm\config.json"
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
