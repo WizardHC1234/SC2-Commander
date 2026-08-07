@@ -40,7 +40,10 @@ _ACTION_REGISTRY: Dict[str, Dict] = {
         "action_func": lambda *args, **kw: ActUnit(UnitTypeId.MARINE, UnitTypeId.BARRACKS, *args, **kw),
     },
     "train_marauder": {
-        "description": "Train Marauder from Barracks (requires TechLab)",
+        "description": (
+            "Absolute Marauder count from Barracks with Tech Lab "
+            "(emit build_barracks_techlab; Reactor Barracks cannot train Marauders)"
+        ),
         "type": "unit",
         "action_func": lambda *args, **kw: ActUnit(UnitTypeId.MARAUDER, UnitTypeId.BARRACKS, *args, **kw),
     },
@@ -80,7 +83,10 @@ _ACTION_REGISTRY: Dict[str, Dict] = {
         "action_func": lambda *args, **kw: ActUnit(UnitTypeId.CYCLONE, UnitTypeId.FACTORY, *args, **kw),
     },
     "train_siege_tank": {
-        "description": "Train Siege Tank from Factory (requires TechLab)",
+        "description": (
+            "Absolute Siege Tank count from Factory with Tech Lab "
+            "(emit build_factory_techlab; Reactor Factory cannot train Tanks)"
+        ),
         "type": "unit",
         "action_func": lambda *args, **kw: ActUnit(UnitTypeId.SIEGETANK, UnitTypeId.FACTORY, *args, **kw),
     },
@@ -115,7 +121,10 @@ _ACTION_REGISTRY: Dict[str, Dict] = {
         "action_func": lambda *args, **kw: ActUnit(UnitTypeId.BANSHEE, UnitTypeId.STARPORT, *args, **kw),
     },
     "train_battlecruiser": {
-        "description": "Train Battlecruiser from Starport (requires TechLab and Fusion Core)",
+        "description": (
+            "Absolute Battlecruiser count from Starport with Tech Lab and Fusion Core "
+            "(emit build_starport_techlab and build_fusion_core)"
+        ),
         "type": "unit",
         "action_func": lambda *args, **kw: ActUnit(UnitTypeId.BATTLECRUISER, UnitTypeId.STARPORT, *args, **kw),
     },
@@ -128,17 +137,26 @@ _ACTION_REGISTRY: Dict[str, Dict] = {
         "action_func": lambda *args, **kw: GridBuilding(UnitTypeId.SUPPLYDEPOT, *args, **kw),
     },
     "build_barracks": {
-        "description": "Build Barracks",
+        "description": (
+            "Absolute Barracks count. Hosts at most one addon each; "
+            "raise this when Tech Lab + Reactor targets need more free Barracks"
+        ),
         "type": "building",
         "action_func": lambda *args, **kw: GridBuilding(UnitTypeId.BARRACKS, *args, **kw),
     },
     "build_factory": {
-        "description": "Build Factory",
+        "description": (
+            "Absolute Factory count. Hosts at most one addon each; "
+            "raise this when Factory Tech Lab / Reactor targets need more free Factories"
+        ),
         "type": "building",
         "action_func": lambda *args, **kw: GridBuilding(UnitTypeId.FACTORY, *args, **kw),
     },
     "build_starport": {
-        "description": "Build Starport",
+        "description": (
+            "Absolute Starport count. Hosts at most one addon each; "
+            "raise this when Starport Tech Lab / Reactor targets need more free Starports"
+        ),
         "type": "building",
         "action_func": lambda *args, **kw: GridBuilding(UnitTypeId.STARPORT, *args, **kw),
     },
@@ -203,32 +221,53 @@ _ACTION_REGISTRY: Dict[str, Dict] = {
     # 3. 附属建筑 (Build Addons)
     # ==========================
     "build_barracks_techlab": {
-        "description": "Build TechLab on Barracks",
+        "description": (
+            "Absolute Barracks Tech Lab count. Needs one completed Barracks with no addon "
+            "per Tech Lab; does not build Barracks—raise build_barracks if no free slot"
+        ),
         "type": "building",
         "action_func": lambda *args, **kw: BuildAddon(UnitTypeId.BARRACKSTECHLAB, UnitTypeId.BARRACKS, *args, **kw),
     },
     "build_barracks_reactor": {
-        "description": "Build Reactor on Barracks",
+        "description": (
+            "Absolute Barracks Reactor count. Needs one completed Barracks with no addon "
+            "per Reactor; Tech Lab and Reactor cannot share a Barracks—raise build_barracks "
+            "when slots are full (e.g. 1 Tech Lab + 2 Reactors needs 3 Barracks)"
+        ),
         "type": "building",
         "action_func": lambda *args, **kw: BuildAddon(UnitTypeId.BARRACKSREACTOR, UnitTypeId.BARRACKS, *args, **kw),
     },
     "build_factory_techlab": {
-        "description": "Build TechLab on Factory",
+        "description": (
+            "Absolute Factory Tech Lab count. Needs one completed Factory with no addon "
+            "per Tech Lab; does not build Factories—raise build_factory if no free slot"
+        ),
         "type": "building",
         "action_func": lambda *args, **kw: BuildAddon(UnitTypeId.FACTORYTECHLAB, UnitTypeId.FACTORY, *args, **kw),
     },
     "build_factory_reactor": {
-        "description": "Build Reactor on Factory",
+        "description": (
+            "Absolute Factory Reactor count. Needs one completed Factory with no addon "
+            "per Reactor; Tech Lab and Reactor cannot share a Factory—raise build_factory "
+            "when slots are full"
+        ),
         "type": "building",
         "action_func": lambda *args, **kw: BuildAddon(UnitTypeId.FACTORYREACTOR, UnitTypeId.FACTORY, *args, **kw),
     },
     "build_starport_techlab": {
-        "description": "Build TechLab on Starport",
+        "description": (
+            "Absolute Starport Tech Lab count. Needs one completed Starport with no addon "
+            "per Tech Lab; does not build Starports—raise build_starport if no free slot"
+        ),
         "type": "building",
         "action_func": lambda *args, **kw: BuildAddon(UnitTypeId.STARPORTTECHLAB, UnitTypeId.STARPORT, *args, **kw),
     },
     "build_starport_reactor": {
-        "description": "Build Reactor on Starport",
+        "description": (
+            "Absolute Starport Reactor count. Needs one completed Starport with no addon "
+            "per Reactor; Tech Lab and Reactor cannot share a Starport—raise build_starport "
+            "when slots are full"
+        ),
         "type": "building",
         "action_func": lambda *args, **kw: BuildAddon(UnitTypeId.STARPORTREACTOR, UnitTypeId.STARPORT, *args, **kw),
     },

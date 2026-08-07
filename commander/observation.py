@@ -540,6 +540,148 @@ _TRAIN_TECHLAB_REQUIREMENTS = {
     "train_battlecruiser": ("STARPORT", "build_starport_techlab"),
 }
 
+# Structure aliases counted from production completed / under_construction.
+_STRUCTURE_ALIASES: Dict[str, tuple] = {
+    "townhall": (
+        "COMMANDCENTER",
+        "ORBITALCOMMAND",
+        "PLANETARYFORTRESS",
+        "COMMANDCENTERFLYING",
+        "ORBITALCOMMANDFLYING",
+    ),
+    "supply": (
+        "SUPPLYDEPOT",
+        "SUPPLYDEPOTLOWERED",
+        "SUPPLYDEPOTDROP",
+    ),
+    "barracks": ("BARRACKS", "BARRACKSFLYING"),
+    "factory": ("FACTORY", "FACTORYFLYING"),
+    "starport": ("STARPORT", "STARPORTFLYING"),
+    "armory": ("ARMORY",),
+    "fusioncore": ("FUSIONCORE",),
+    "engineeringbay": ("ENGINEERINGBAY",),
+    "ghostacademy": ("GHOSTACADEMY",),
+    "barrackstechlab": ("BARRACKSTECHLAB", "TECHLAB"),
+    "factorytechlab": ("FACTORYTECHLAB", "TECHLAB"),
+    "starporttechlab": ("STARPORTTECHLAB", "TECHLAB"),
+}
+
+# Hard building prerequisites for common Terran macros (ready OR pending).
+# Value is (alias_key, blocker_tag) — blocker_tag appears in blocked=no_<tag>.
+_MACRO_STRUCTURE_PREREQS: Dict[str, tuple] = {
+    "train_scv": ("townhall", "townhall"),
+    "train_marine": ("barracks", "barracks"),
+    "train_marauder": ("barracks", "barracks"),
+    "train_reaper": ("barracks", "barracks"),
+    "train_ghost": ("barracks", "barracks"),
+    "train_hellion": ("factory", "factory"),
+    "train_hellbat": ("factory", "factory"),
+    "train_widow_mine": ("factory", "factory"),
+    "train_cyclone": ("factory", "factory"),
+    "train_siege_tank": ("factory", "factory"),
+    "train_thor": ("factory", "factory"),
+    "train_viking": ("starport", "starport"),
+    "train_medivac": ("starport", "starport"),
+    "train_liberator": ("starport", "starport"),
+    "train_raven": ("starport", "starport"),
+    "train_banshee": ("starport", "starport"),
+    "train_battlecruiser": ("starport", "starport"),
+    "build_barracks": ("supply", "supply_depot"),
+    "build_factory": ("barracks", "barracks"),
+    "build_starport": ("factory", "factory"),
+    "build_engineering_bay": ("supply", "supply_depot"),
+    "build_armory": ("factory", "factory"),
+    "build_fusion_core": ("starport", "starport"),
+    "build_ghost_academy": ("barracks", "barracks"),
+    "build_gas": ("townhall", "townhall"),
+    "build_barracks_techlab": ("barracks", "barracks"),
+    "build_barracks_reactor": ("barracks", "barracks"),
+    "build_factory_techlab": ("factory", "factory"),
+    "build_factory_reactor": ("factory", "factory"),
+    "build_starport_techlab": ("starport", "starport"),
+    "build_starport_reactor": ("starport", "starport"),
+    "morph_orbital_command": ("barracks", "barracks"),
+    "research_shieldwall": ("barrackstechlab", "barracks_techlab"),
+    "research_stimpack": ("barrackstechlab", "barracks_techlab"),
+    "research_concussive_shells": ("barrackstechlab", "barracks_techlab"),
+    "research_yamato_cannon": ("fusioncore", "fusion_core"),
+}
+
+# Extra tech-building gates beyond the producer itself.
+_TRAIN_TECH_BUILDING_REQUIREMENTS = {
+    "train_thor": ("armory", "armory"),
+    "train_battlecruiser": ("fusioncore", "fusion_core"),
+    "train_ghost": ("ghostacademy", "ghost_academy"),
+}
+
+# build_*_techlab / build_*_reactor soft-failure diagnostics.
+# (producer_key, addon_kind, producer_alias, pending_addon_keys)
+_ADDON_BUILD_SPECS: Dict[str, tuple] = {
+    "build_barracks_techlab": (
+        "BARRACKS",
+        "techlab",
+        "barracks",
+        ("BARRACKSTECHLAB", "TECHLAB"),
+    ),
+    "build_barracks_reactor": (
+        "BARRACKS",
+        "reactor",
+        "barracks",
+        ("BARRACKSREACTOR", "REACTOR"),
+    ),
+    "build_factory_techlab": (
+        "FACTORY",
+        "techlab",
+        "factory",
+        ("FACTORYTECHLAB", "TECHLAB"),
+    ),
+    "build_factory_reactor": (
+        "FACTORY",
+        "reactor",
+        "factory",
+        ("FACTORYREACTOR", "REACTOR"),
+    ),
+    "build_starport_techlab": (
+        "STARPORT",
+        "techlab",
+        "starport",
+        ("STARPORTTECHLAB", "TECHLAB"),
+    ),
+    "build_starport_reactor": (
+        "STARPORT",
+        "reactor",
+        "starport",
+        ("STARPORTREACTOR", "REACTOR"),
+    ),
+}
+
+
+def _structure_counts(
+    production: Dict[str, Any], alias_key: str
+) -> tuple:
+    """Return (completed, pending) counts for a structure alias group."""
+    names = _STRUCTURE_ALIASES.get(alias_key, ())
+    completed_map = _dict(production.get("completed"))
+    pending_map = _dict(production.get("under_construction"))
+    # Flying/morphing producers still count as pending capacity for gates.
+    en_route = _dict(production.get("workers_en_route"))
+    completed = 0
+    pending = 0
+    for name in names:
+        try:
+            completed += int(completed_map.get(name) or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            pending += int(pending_map.get(name) or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            pending += int(en_route.get(name) or 0)
+        except (TypeError, ValueError):
+            pass
+    return completed, pending
+
 
 def _production_lines(production: Dict[str, Any]) -> List[str]:
     lines = [
@@ -566,6 +708,7 @@ def _train_techlab_block_reason(
     action: Any,
     production: Dict[str, Any],
 ) -> Optional[str]:
+    """Hard miss only: no techlab and none building. Pending is waiting, not failure."""
     req = _TRAIN_TECHLAB_REQUIREMENTS.get(str(action or ""))
     if not req:
         return None
@@ -591,8 +734,104 @@ def _train_techlab_block_reason(
         except (TypeError, ValueError):
             pass
     if pending > 0:
-        return "blocked=techlab_pending"
-    return f"blocked=no_{producer}_techlab"
+        return None
+    return f"blocked=no_{producer.lower()}_techlab"
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _addon_soft_block_reason(
+    action: Any,
+    production: Dict[str, Any],
+    *,
+    to_count: Any = None,
+    current_count: Any = None,
+) -> Optional[str]:
+    """Soft fail: addon target unmet and no free producer slot (and none pending)."""
+    spec = _ADDON_BUILD_SPECS.get(str(action or ""))
+    if not spec:
+        return None
+    producer, addon_kind, producer_tag, pending_keys = spec
+    stats = _dict(_dict(production.get("producer_addons")).get(producer))
+    no_addon = _int_or_none(stats.get("no_addon")) or 0
+    with_techlab = _int_or_none(stats.get("with_techlab")) or 0
+    with_reactor = _int_or_none(stats.get("with_reactor")) or 0
+
+    target = _int_or_none(to_count)
+    current = _int_or_none(current_count)
+    if current is None:
+        current = with_reactor if addon_kind == "reactor" else with_techlab
+    if target is None or current >= target:
+        return None
+
+    under = _dict(production.get("under_construction"))
+    pending_addon = 0
+    for key in pending_keys:
+        pending_addon += _int_or_none(under.get(key)) or 0
+    if pending_addon > 0:
+        return None  # addon already building — waiting, not failure
+
+    _completed_producers, pending_producers = _structure_counts(
+        production, producer_tag
+    )
+    if pending_producers > 0:
+        return None  # new producer incoming — may free an addon slot
+
+    if no_addon > 0:
+        return None  # free slot exists; BuildAddon can still attempt
+
+    # All ready producers already have addons; need another producer building.
+    return f"blocked=need_more_{producer_tag}"
+
+
+def _macro_prereq_block_reason(
+    action: Any,
+    production: Dict[str, Any],
+    *,
+    to_count: Any = None,
+    current_count: Any = None,
+) -> Optional[str]:
+    """Obs-only block labels. Hard miss first, then addon soft-fail."""
+    name = str(action or "")
+    if not name:
+        return None
+
+    prereq = _MACRO_STRUCTURE_PREREQS.get(name)
+    if prereq:
+        alias_key, tag = prereq
+        completed, pending = _structure_counts(production, alias_key)
+        if completed <= 0 and pending <= 0:
+            return f"blocked=no_{tag}"
+        # Producer still building / en route: waiting, not a failed execution.
+        if completed <= 0:
+            return None
+
+    tech_building = _TRAIN_TECH_BUILDING_REQUIREMENTS.get(name)
+    if tech_building:
+        alias_key, tag = tech_building
+        completed, pending = _structure_counts(production, alias_key)
+        if completed <= 0 and pending <= 0:
+            return f"blocked=no_{tag}"
+        if completed <= 0:
+            return None
+
+    hard_techlab = _train_techlab_block_reason(name, production)
+    if hard_techlab:
+        return hard_techlab
+
+    return _addon_soft_block_reason(
+        name,
+        production,
+        to_count=to_count,
+        current_count=current_count,
+    )
 
 
 def _planned_research_actions(execution: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -650,16 +889,32 @@ def _macro_execution_lines(
         to_count = task.get("to_count", "?")
         current = task.get("current_count")
         progress = f"?/{to_count}" if current is None else f"{current}/{to_count}"
+        status = str(task.get("status") or "active_unsatisfied")
         text = (
             f"action={task.get('action', '?')}, "
             f"progress={progress}, "
-            f"status={task.get('status', 'active_unsatisfied')}"
+            f"status={status}"
         )
-        block = _train_techlab_block_reason(task.get("action"), production)
-        if block:
-            text += f", {block}"
+        # Annotate only when the task is still trying and cannot execute
+        # because a hard prerequisite is missing (not while waiting on pending).
+        if status in {"active_unsatisfied", "failed"}:
+            try:
+                done = current is not None and int(current) >= int(to_count)
+            except (TypeError, ValueError):
+                done = False
+            if not done:
+                block = _macro_prereq_block_reason(
+                    task.get("action"),
+                    production,
+                    to_count=to_count,
+                    current_count=current,
+                )
+                if block:
+                    text += f", {block}"
         if task.get("disabled"):
             text += f", disabled({task.get('error', 'unknown')})"
+        elif task.get("error") and status == "failed":
+            text += f", error({task.get('error')})"
         actions.append(text)
     return [
         "[Macro Execution]",
