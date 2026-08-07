@@ -742,7 +742,7 @@ def format_map_topology(topology: Dict[str, Any]) -> str:
     topo_zones = [_dict(zone) for zone in _list(topology.get("zones"))]
     primary_route = _list(topology.get("primary_route"))
 
-    lines: List[str] = ["[4] Map Topology"]
+    lines: List[str] = ["[8] Map Topology"]
     if primary_route:
         lines.append(f"primary_route={_items(primary_route)}")
     if topo_zones:

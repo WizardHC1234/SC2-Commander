@@ -18,7 +18,7 @@ $ENEMY_RACE = "terran"
 $ENEMY_DIFFICULTY = "hard"
 $ENEMY_BUILD = "macro"
 $BOT_RACE = "terran"
-$FORCE_STRATEGY = "marine"
+$FORCE_STRATEGY = "tank"
 $COMMANDER_MODEL = "qwen3-32b"
 # $COMMANDER_MODEL = "deepseek-v4-flash"
 

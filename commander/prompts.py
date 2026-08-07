@@ -1,17 +1,18 @@
 """Commander prompts for the single-agent SC2-Commander bot.
 
 Strategy.md is the sole authoritative plan. Sections are grouped by domain so
-each fact is stated exactly once:
+each fact is stated exactly once. System message order puts match-invariant
+sections first (longer API prompt-cache prefix), then strategy-specific ones:
 
 [0] Role                 — who you are, what the runtime owns
 [1] StarCraft II fundamentals — strategy-agnostic game facts
 [2] Decision doctrine    — evidence, gates vs ceilings, completeness, main force
-[3] Strategy             — the current strategy.md (authoritative)
-[4] Map Topology        — static zone graph data block (when present)
-[5] Macro tools          — contract + catalog
-[6] Army tools           — zones, move_group modes, retreat_ratio, scan/scout
-[7] set_wake_event       — wake scheduling, stated once
-[8] Output format        — reasoning + JSON schema + final check
+[3] Output format        — reasoning + JSON schema + final check
+[4] set_wake_event       — wake scheduling, stated once
+[5] Army tools           — zones, move_group modes, retreat_ratio, scan/scout
+[6] Macro tools          — contract + catalog
+[7] Strategy             — the current strategy.md (authoritative)
+[8] Map Topology         — static zone graph data block (when present)
 """
 
 from __future__ import annotations
@@ -82,31 +83,14 @@ Main force and reinforcement:
 """
 
 # =============================================================================
-# 5. Macro tools
-# =============================================================================
-
-_MACRO_CONTRACT = """\
-[5] Macro tools
-
-Contract:
-- Each macro tool sets one absolute declarative target (including under-construction). The runtime executes all active macro tools concurrently; one blocked goal does not block later goals.
-- Tool-call order is absolute resource priority and is preserved by the runtime (no reordering): urgent bottlenecks and short-term needs come before long-term goals.
-- One macro tool per action with one positive integer absolute to_count; merge duplicates. build_* to_count is the absolute desired count of that structure/add-on (e.g. two Starports that both need Tech Labs → build_starport to_count=2 and build_starport_techlab to_count=2) — not “one more” and not a parent-building index. Use to_count=1 for research and the resulting structure count for morphs.
-- expand.to_count is the desired absolute number of active mineral-bearing bases, not merely raw town-hall structures, and must exceed the current count unless already pending. Reassess expansion from active_mining_base_count, remaining base resources, current and projected income, bank, available neutral expansion sites, pending construction and defensibility; mineral depletion is a signal to reassess rather than a rule that forces or forbids expansion.
-- Never use macro tools for combat, movement, scans or SCV scouting — those are army tools. Keep supply structures ahead of demand: getting supply-blocked stalls all training, so build_supply_depot remains a valid macro tool whenever current or projected supply would constrain production. Its to_count is the absolute number of Supply Depot structures, never a supply-capacity value.
-
-Catalog (arguments always {"to_count": <positive int>}):
-"""
-
-# =============================================================================
-# 6. Army tools
+# 5. Army tools
 # =============================================================================
 
 _ARMY_ZONES = """\
-[6] Army tools
+[5] Army tools
 
 Zones:
-- Use zone_id as an identifier; copy group_id and zone_id values from the observation. Use [4] Map Topology neighbors and primary_route to understand map connections; never infer adjacency from zone numbers. primary_route is the default ground attack route.
+- Use zone_id as an identifier; copy group_id and zone_id values from the observation. Use [8] Map Topology neighbors and primary_route to understand map connections; never infer adjacency from zone numbers. primary_route is the default ground attack route.
 - neighbors means the zones connect directly by ground without passing through another zone; the number in parentheses is the ground path distance. Example: "neighbors=zone_1(28.5); zone_2(45.1)" means this zone is directly connected to zone_1 (distance 28.5) and zone_2 (distance 45.1). Use only the zone_id part (e.g. zone_1) as tool parameters. Use neighbors to plan staging, retreat, and multi-hop assaults instead of guessing from zone numbers.
 - [Zone State Table] is dynamic. The columns= line defines the | separated field order; row_count is the number of following zone rows. own_contents excludes controlled combat units already represented in army_groups; never add zone contents to a group's composition.
 - vision_state reports current visibility. visible_enemy_contents is visible now; last_seen_enemy_contents is remembered under fog; enemy_information_age_seconds reports its age or no_enemy_record. A fogged or partially_visible zone with no visible enemies is not confirmed empty.
@@ -121,7 +105,7 @@ move_group:
   - defensive_retreat: move to an own zone while still shooting back; the army keeps firing as it withdraws.
   - panic_retreat: move to an own zone with escape as the priority; it does not stop to fight.
   - hold: move to the zone's defensive point and stay there; units shoot enemies that come in range but never chase and never attack structures. Siege tanks stay sieged when enemies are near. Use it to guard an own zone or a taken position without advancing.
-  - contain: move to the entrance just OUTSIDE the target (usually enemy) zone and stay there, engaging only what comes out. Use it to blockade or siege-wait at an enemy base without committing to an assault; pick the target zone using [4] Map Topology neighbors.
+  - contain: move to the entrance just OUTSIDE the target (usually enemy) zone and stay there, engaging only what comes out. Use it to blockade or siege-wait at an enemy base without committing to an assault; pick the target zone using [8] Map Topology neighbors.
   - search_and_destroy: the Commander sweeps for targets itself. All idle combat units from every army_group are sent together; visible enemy structures are attacked first, otherwise the army automatically rotates through expansion zones. This cycle's other move_group modes are ignored while a search_and_destroy command is active.
 - move_group.retreat_ratio (optional, 0.3-1.5, default 0.6): survival gate for assault/push/harass/contain. While such a command is active and the local battle around the group turns worse than this ratio, the runtime pulls the group back to the nearest safe own zone, holds there, and automatically resumes the original command once the local ratio recovers to about retreat_ratio + 0.4 (a group stuck in trouble for over a minute also resumes, so a stale retreat never locks the army). Lower values fight closer to the death, higher values disengage early. An explicit hold/regroup/retreat order is never interrupted by this gate. Overrides are reported under [Combat Execution] (source=auto_retreat, override, detail).
 
@@ -150,11 +134,11 @@ scanner_sweep / scout (at most one call each per cycle; omit scanner_sweep = no 
 """
 
 # =============================================================================
-# 7. set_wake_event
+# 4. set_wake_event
 # =============================================================================
 
 _WAKE_EVENT = """\
-[7] set_wake_event (required, exactly one per cycle)
+[4] set_wake_event (required, exactly one per cycle)
 
 - Decisions are event-driven, not on a fixed timer. After each decision you must call set_wake_event once to declare when the Commander should wake next.
 - Arguments: logic=all|any and a non-empty conditions list of whitelist predicates: unit_count_at_least / unit_count_less_than (unit,count), structure_count_at_least (unit,count), upgrade_completed (upgrade), objective_status_became (status; true only after status changes to the target since this wake was armed), destination_reached, scan_ready, cleanup_hint_present, game_time_at_least (seconds), supply_left_at_most (count). Do not use scout_result_is, scout_just_finished, movement_mode_in, movement_mode_not_in, army_group_count_at_least, army_group_count_less_than, or objective_status_is.
@@ -167,7 +151,24 @@ _WAKE_EVENT = """\
 """
 
 # =============================================================================
-# 8. Output format + message assembly
+# 6. Macro tools
+# =============================================================================
+
+_MACRO_CONTRACT = """\
+[6] Macro tools
+
+Contract:
+- Each macro tool sets one absolute declarative target (including under-construction). The runtime executes all active macro tools concurrently; one blocked goal does not block later goals. Completeness and list-vs-order rules: [2].
+- Tool-call order is absolute resource priority and is preserved by the runtime (no reordering): urgent bottlenecks and short-term needs come before long-term goals.
+- One macro tool per action with one positive integer absolute to_count; merge duplicates. build_* to_count is the absolute desired count of that structure/add-on (e.g. two Starports that both need Tech Labs → build_starport to_count=2 and build_starport_techlab to_count=2) — not “one more” and not a parent-building index. Use to_count=1 for research and the resulting structure count for morphs.
+- expand.to_count is the desired absolute number of active mineral-bearing bases, not merely raw town-hall structures, and must exceed the current count unless already pending. Reassess expansion from active_mining_base_count, remaining base resources, current and projected income, bank, available neutral expansion sites, pending construction and defensibility; mineral depletion is a signal to reassess rather than a rule that forces or forbids expansion.
+- Never use macro tools for combat, movement, scans or SCV scouting — those are army tools ([5]). Keep supply structures ahead of demand: getting supply-blocked stalls all training, so build_supply_depot remains a valid macro tool whenever current or projected supply would constrain production. Its to_count is the absolute number of Supply Depot structures, never a supply-capacity value.
+
+Catalog (arguments always {"to_count": <positive int>}):
+"""
+
+# =============================================================================
+# 3. Output format + message assembly
 # =============================================================================
 
 
@@ -192,35 +193,29 @@ def _format_tool_catalog(action_space: Dict[str, str]) -> str:
 
 
 def _json_output_format(action_space: Dict[str, str]) -> str:
-    space = action_space or {}
-    macro = {
-        name: desc
-        for name, desc in space.items()
-        if name not in NON_MACRO_TOOL_NAMES
-    }
-    macro_catalog = _format_tool_catalog(macro)
-    return f"""
-[8] Output format (required)
+    del action_space  # schema is fixed; catalog lives in [6]
+    return """
+[3] Output format (required)
 
 1. First write one concise reasoning paragraph outside JSON. Explain which strategy gates are met or unmet, which macro targets you retain/raise/drop, and why the army/scout/scan tools (if any) are chosen. Do not use bullets in that paragraph.
 2. Leave one blank line, then output ONE JSON object with this exact schema and no markdown fences:
-{{"tool_calls":[{{"name":"<tool_name>","arguments":{{...}}}}, ...]}}
+{"tool_calls":[{"name":"<tool_name>","arguments":{...}}, ...]}
 
-The reasoning paragraph is required. A response that begins with "{{" or contains only JSON is invalid.
+The reasoning paragraph is required. A response that begins with "{" or contains only JSON is invalid.
 
-Macro tool arguments are always {{"to_count": <positive int>}}; the catalog is in [5].
+Macro tool arguments are always {"to_count": <positive int>}; the catalog is in [6].
 
 Argument shapes for army / meta tools:
-- move_group: {{"group_id":"group_0","destination_zone_id":"zone_5","movement_mode":"assault"}}
+- move_group: {"group_id":"group_0","destination_zone_id":"zone_5","movement_mode":"assault"}
   movement_mode: regroup|push|assault|harass|hold|contain|defensive_retreat|panic_retreat|search_and_destroy
-  Optional: "retreat_ratio":0.6 (0.3-1.5; auto-retreat gate for assault/push/harass/contain, see [6])
-- scanner_sweep: {{"zone_id":"zone_5"}} (omit = no scan)
-- scout: {{"zone_id":"zone_3"}} (omit = cancel; if scout already active, repeat same zone)
-- set_wake_event (required): {{"logic":"any","conditions":[{{"type":"unit_count_at_least","unit":"Marine","count":20}}]}} — predicate whitelist and reachability rules in [7].
+  Optional: "retreat_ratio":0.6 (0.3-1.5; auto-retreat gate for assault/push/harass/contain, see [5])
+- scanner_sweep: {"zone_id":"zone_5"} (omit = no scan)
+- scout: {"zone_id":"zone_3"} (omit = cancel; if scout already active, repeat same zone)
+- set_wake_event (required): {"logic":"any","conditions":[{"type":"unit_count_at_least","unit":"Marine","count":20}]} — predicate whitelist and reachability rules in [4].
 
 Final check before finishing:
 - Macro tools are the full still-valid set from the strategy (see [2] Completeness), not a minimal opening snippet and not frozen at attack-gate counts.
-- One move_group per army_groups entry (including before gates are met), plus scanner_sweep / scout only when justified (see [6]), plus exactly one reachable set_wake_event (see [7]).
+- One move_group per army_groups entry (including before gates are met), plus scanner_sweep / scout only when justified (see [5]), plus exactly one reachable set_wake_event (see [4]).
 - Every army tool follows the strategy, uses an existing group and zone, respects unconfirmed conditions, and remains justified by the current observation rather than only by a previous command.
 """
 
@@ -236,9 +231,9 @@ def build_commander_messages(
 ) -> List[Dict[str, str]]:
     """Build chat messages.
 
-    System is match-static (role + fundamentals + doctrine + strategy + map
-    topology + tool contracts + output format). Previous Commander commands
-    live in the observation under ``[Previous Decision]``.
+    System order (cache-friendly): [0]–[5] match-invariant, then [6] macro
+    catalog, [7] strategy, [8] map topology. Previous Commander commands live
+    in the observation under ``[Previous Decision]``.
     """
     race_cap = race.capitalize()
     strategy_block = _strategy_block(race, strategy_description)
@@ -249,11 +244,10 @@ def build_commander_messages(
         f"{_ROLE_INTRO}"
         f"\n{_SC2_GAME_RULES}"
         f"\n{_DECISION_DOCTRINE}"
-        f"\n[3] Strategy\n{strategy_block}\n"
+        f"{_json_output_format(action_space or {})}"
+        f"\n{_WAKE_EVENT}"
+        f"\n{_ARMY_ZONES}"
     )
-    topology_block = (map_topology_text or "").strip()
-    if topology_block:
-        system_msg += f"\n{topology_block}\n"
     system_msg += f"\n{_MACRO_CONTRACT}"
     space = action_space or {}
     macro = {
@@ -262,9 +256,13 @@ def build_commander_messages(
         if name not in NON_MACRO_TOOL_NAMES
     }
     system_msg += _format_tool_catalog(macro) + "\n"
-    system_msg += f"\n{_ARMY_ZONES}"
-    system_msg += f"\n{_WAKE_EVENT}"
-    system_msg += _json_output_format(action_space or {})
+    system_msg += f"\n[7] Strategy\n{strategy_block}\n"
+    topology_block = (map_topology_text or "").strip()
+    if topology_block:
+        if not topology_block.lstrip().startswith("["):
+            system_msg += f"\n[8] Map Topology\n{topology_block}\n"
+        else:
+            system_msg += f"\n{topology_block}\n"
     user_tail = (
         "Produce the required reasoning paragraph and the complete tool_calls "
         "JSON for this cycle, including set_wake_event."
