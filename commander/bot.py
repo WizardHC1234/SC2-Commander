@@ -21,6 +21,8 @@ from commander.macro_exec import (
     ForceFinishEnemyOnGG,
 )
 from commander.strategy import parse_strategy_document
+from commander.tool_selection import select_tools_for_strategy
+from commander.tools import NON_MACRO_TOOL_NAMES
 from commander.retreat_policy import DEFAULT_RETREAT_RATIO
 from commander.wake_events import (
     FALLBACK_DELAY_SECONDS,
@@ -110,7 +112,10 @@ class CommanderBot(KnowledgeBot):
 
         self._get_action_fn: Optional[Callable] = None
         self._get_action_space_fn: Optional[Callable] = None
+        self._full_action_space: Optional[Dict[str, str]] = None
         self._action_space_cache: Optional[Dict[str, str]] = None
+        self._strategy_raw: str = ""
+        self._tool_selection: Optional[Dict[str, Any]] = None
 
         self.enemy_said_gg: bool = False
         self.enemy_gg_message: str = ""
@@ -144,9 +149,11 @@ class CommanderBot(KnowledgeBot):
             logger.warning("Action module %s not found.", module_path)
             self._get_action_fn = None
             self._get_action_space_fn = None
-        self._action_space_cache = (
-            self._get_action_space_fn() if self._get_action_space_fn else {}
-        )
+        full = self._get_action_space_fn() if self._get_action_space_fn else {}
+        self._full_action_space = dict(full)
+        # Until strategy tool selection runs, expose nothing risky: keep full
+        # only as a temporary fallback; selection replaces this in on_start.
+        self._action_space_cache = dict(full)
 
     def _apply_forced_strategy(self, name: str) -> None:
         key = str(name or "").strip()
@@ -156,6 +163,7 @@ class CommanderBot(KnowledgeBot):
         if not os.path.isdir(target_dir):
             raise FileNotFoundError(f"strategy folder not found: {target_dir}")
 
+        raw = ""
         detail = ""
         if os.path.isfile(md_path):
             with open(md_path, "r", encoding="utf-8") as handle:
@@ -165,6 +173,7 @@ class CommanderBot(KnowledgeBot):
 
         self.selected_strategy = folder
         self.strategy_description = detail
+        self._strategy_raw = raw.strip() or detail
         self.strategy_hash = hashlib.sha256(
             detail.encode("utf-8")
         ).hexdigest()[:16]
@@ -184,6 +193,90 @@ class CommanderBot(KnowledgeBot):
                 "strategy_description": detail,
             }
         )
+
+    def _select_strategy_tools(self) -> None:
+        """Once per match: Resource Costs → required tools, LLM may only add."""
+        full = dict(self._full_action_space or self._action_space_cache or {})
+        if not full:
+            logger.warning("tool selection skipped: empty action space")
+            return
+        strategy_text = self._strategy_raw or self.strategy_description
+        outcome = select_tools_for_strategy(
+            strategy_text=strategy_text,
+            full_action_space=full,
+            model_key=self._resolved_model_key(),
+            use_llm=True,
+        )
+        self._tool_selection = outcome
+        selected = outcome.get("action_space") or {}
+        if selected:
+            self._action_space_cache = dict(selected)
+        selected_names = list(outcome.get("selected_tools") or sorted(selected))
+        summary = (
+            "tool_selection selected=%d/%d required=%d added=%d unmatched=%s err=%s"
+            % (
+                int(outcome.get("selected_tool_count") or 0),
+                int(outcome.get("full_tool_count") or 0),
+                len(outcome.get("required_tools") or []),
+                len(outcome.get("added_tools") or []),
+                ",".join(outcome.get("unmatched_labels") or []) or "-",
+                outcome.get("llm_error") or "ok",
+            )
+        )
+        # Always log: early on_start knowledge.print is easy to miss in the UI.
+        logger.info("[Commander] %s", summary)
+        logger.info("[Commander]   selected_tools=%s", ",".join(selected_names))
+        self._emit("%s", summary)
+        self._emit("  selected_tools=%s", ",".join(selected_names))
+        if outcome.get("added_tools"):
+            self._emit(
+                "  added_tools=%s", ",".join(outcome.get("added_tools") or [])
+            )
+        self._append_tool_selection_match_info(outcome, selected_names)
+        self._record_llm_interaction(
+            {
+                "game_time": 0.0,
+                "trigger_reason": "strategy_tool_selection",
+                "strategy_id": self.selected_strategy,
+                "strategy_hash": self.strategy_hash,
+                "selected_tools": selected_names,
+                "required_tools": list(outcome.get("required_tools") or []),
+                "added_tools": list(outcome.get("added_tools") or []),
+                "unmatched_labels": list(outcome.get("unmatched_labels") or []),
+                "full_tool_count": outcome.get("full_tool_count"),
+                "selected_tool_count": outcome.get("selected_tool_count"),
+                "llm_error": outcome.get("llm_error") or "",
+                "llm_content": outcome.get("llm_content") or "",
+                "latency_seconds": outcome.get("llm_latency_seconds"),
+                "messages": outcome.get("messages") or [],
+            }
+        )
+
+    def _append_tool_selection_match_info(
+        self, outcome: Dict[str, Any], selected_names: List[str]
+    ) -> None:
+        if not self.record_dir:
+            return
+        path = os.path.join(self.record_dir, "match_info.txt")
+        army = [n for n in selected_names if n in NON_MACRO_TOOL_NAMES]
+        macro = [n for n in selected_names if n not in NON_MACRO_TOOL_NAMES]
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write("\n")
+                handle.write(
+                    f"tool_selection:     {outcome.get('selected_tool_count')}/"
+                    f"{outcome.get('full_tool_count')} "
+                    f"(required={len(outcome.get('required_tools') or [])}, "
+                    f"added={len(outcome.get('added_tools') or [])}, "
+                    f"err={outcome.get('llm_error') or 'ok'})\n"
+                )
+                handle.write("army_tools:         " + ", ".join(army) + "\n")
+                handle.write("macro_tools:        " + ", ".join(macro) + "\n")
+                added = list(outcome.get("added_tools") or [])
+                if added:
+                    handle.write("added_tools:        " + ", ".join(added) + "\n")
+        except Exception as exc:
+            logger.warning("failed to append tool selection to match_info: %s", exc)
 
     def _load_dynamic_tactics(self) -> BuildOrder:
         if not self.selected_strategy:
@@ -225,6 +318,8 @@ class CommanderBot(KnowledgeBot):
         self.llm_observation_recorder.interval_seconds = self.OBS_RECORD_INTERVAL
         if self.record_dir:
             self.llm_observation_recorder.output_folder = self.record_dir
+        # After Sharpy start so [Commander] lines show in the match log/UI.
+        self._select_strategy_tools()
 
     async def pre_step_execute(self):
         self._process_current_chat_messages()
@@ -329,6 +424,8 @@ class CommanderBot(KnowledgeBot):
             supply_used=int(getattr(self, "supply_used", 0) or 0),
             supply_cap=int(getattr(self, "supply_cap", 0) or 0),
             own_unit_type_counts=army_state.get("own_unit_type_counts") or {},
+            own_structure_counts=self._wake_structure_counts(),
+            completed_upgrades=self._wake_completed_upgrades(),
             army_groups=army_state.get("army_groups") or [],
             available_zones=army_state.get("available_zones") or [],
             scan_ready=int(army_state.get("scan_ready") or 0) > 0,
@@ -336,6 +433,41 @@ class CommanderBot(KnowledgeBot):
             in cleanup_hint,
             baseline_objective_status=self._wake_baseline_objective_status,
         )
+
+    def _wake_structure_counts(self) -> Dict[str, int]:
+        """Ready own structures only (cheap wake sampling)."""
+        counts: Dict[str, int] = {}
+        try:
+            structures = list(getattr(self, "structures", None) or [])
+        except Exception:
+            return counts
+        for unit in structures:
+            try:
+                if not getattr(unit, "is_ready", False):
+                    continue
+                name = getattr(getattr(unit, "type_id", None), "name", None)
+                if not name:
+                    continue
+                counts[str(name)] = counts.get(str(name), 0) + 1
+            except Exception:
+                continue
+        return counts
+
+    def _wake_completed_upgrades(self) -> List[str]:
+        """Completed upgrade names for wake sampling."""
+        out: List[str] = []
+        try:
+            upgrades = getattr(getattr(self, "state", None), "upgrades", None) or []
+        except Exception:
+            return out
+        for upgrade in upgrades:
+            try:
+                name = getattr(upgrade, "name", None) or str(upgrade)
+            except Exception:
+                continue
+            if name:
+                out.append(str(name))
+        return out
 
     def _get_map_topology_text(self) -> str:
         """Static map topology for the system prompt; computed once per match."""

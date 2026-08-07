@@ -45,6 +45,8 @@ DISABLED_WAKE_TYPES = frozenset(
 BOOL_FLAG_TYPES = frozenset({"scan_ready", "cleanup_hint_present"})
 TIME_TYPES = frozenset({"game_time_at_least"})
 SUPPLY_TYPES = frozenset({"supply_left_at_most"})
+STRUCTURE_COUNT_TYPES = frozenset({"structure_count_at_least"})
+UPGRADE_TYPES = frozenset({"upgrade_completed"})
 
 # Legacy abbreviated names still accepted and rewritten on normalize.
 PREDICATE_TYPE_ALIASES = {
@@ -54,6 +56,9 @@ PREDICATE_TYPE_ALIASES = {
     "supply_left_lte": "supply_left_at_most",
     "army_group_count_gte": "army_group_count_at_least",
     "army_group_count_lt": "army_group_count_less_than",
+    "structure_count_gte": "structure_count_at_least",
+    "building_count_at_least": "structure_count_at_least",
+    "upgrade_researched": "upgrade_completed",
 }
 
 ALLOWED_CONDITION_TYPES = (
@@ -66,10 +71,58 @@ ALLOWED_CONDITION_TYPES = (
     | BOOL_FLAG_TYPES
     | TIME_TYPES
     | SUPPLY_TYPES
+    | STRUCTURE_COUNT_TYPES
+    | UPGRADE_TYPES
 )
+
+# Map SC2 UpgradeId names / common display names / research_* stems onto one
+# canonical token (the research tool stem without the research_ prefix).
+_UPGRADE_NAME_ALIASES = {
+    # Combat Shield
+    "shieldwall": "shieldwall",
+    "combatshield": "shieldwall",
+    "combatshields": "shieldwall",
+    # Stim
+    "stimpack": "stimpack",
+    "stim": "stimpack",
+    # Concussive Shells
+    "concussiveshells": "concussiveshells",
+    "punishergrenades": "concussiveshells",
+    # Infernal Pre-Igniter
+    "infernalpreigniter": "infernalpreigniter",
+    "highcapacitybarrels": "infernalpreigniter",
+    # Drilling Claws
+    "drillingclaws": "drillingclaws",
+    "drillclaws": "drillingclaws",
+    # Mag-Field Accelerator
+    "magfieldaccelerator": "magfieldaccelerator",
+    "magfieldlaunchers": "magfieldaccelerator",
+    # Liberator range
+    "liberatorrange": "liberatorrange",
+    "liberatoraagrangeupgrade": "liberatorrange",
+    "advancedballistics": "liberatorrange",
+    # Neosteel
+    "neosteelarmor": "neosteelarmor",
+    "terranbuildingarmor": "neosteelarmor",
+    # Yamato
+    "yamatocannon": "yamatocannon",
+    "battlecruiserenablespecializations": "yamatocannon",
+    "weaponrefit": "yamatocannon",
+    # Hi-Sec
+    "hisecautotracking": "hisecautotracking",
+}
 
 FALLBACK_DELAY_SECONDS = 60.0
 MAX_WAKE_REFLECTION_RETRIES = 1
+
+
+def _norm_token(text: Any) -> str:
+    return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
+
+
+def _norm_upgrade_token(text: Any) -> str:
+    token = _norm_token(text)
+    return _UPGRADE_NAME_ALIASES.get(token, token)
 
 
 def _disabled_wake_reason(ctype: str) -> str:
@@ -138,6 +191,113 @@ def _needed_train_keys(unit: str, macro_action_keys: Sequence[str]) -> List[str]
     return matches
 
 
+def _build_stems_from_macro(macro_action_keys: Sequence[str]) -> set:
+    stems = set()
+    for key in macro_action_keys:
+        if not isinstance(key, str):
+            continue
+        if key == "expand":
+            stems.update({"commandcenter", "orbitalcommand", "planetaryfortress"})
+            continue
+        if key == "build_gas":
+            stems.update({"gas", "refinery", "extractor", "assimilator"})
+            continue
+        if key.startswith("build_"):
+            stems.add(key[len("build_") :].replace("_", "").lower())
+    return stems
+
+
+def _structure_has_build_tool(structure: str, build_stems: set) -> bool:
+    raw = _norm_token(structure)
+    if not raw:
+        return False
+    # Common aliases between SC2 type names and build_* stems.
+    aliases = {
+        "supplydepotlowered": "supplydepot",
+        "refineryrich": "refinery",
+        "barrackstechlab": "barrackstechlab",
+        "factorytechlab": "factorytechlab",
+        "starporttechlab": "starporttechlab",
+        "barracksreactor": "barracksreactor",
+        "factoryreactor": "factoryreactor",
+        "starportreactor": "starportreactor",
+        "techlab": "techlab",
+        "reactor": "reactor",
+    }
+    raw = aliases.get(raw, raw)
+    if raw in build_stems:
+        return True
+    return any(raw.startswith(stem) or stem.startswith(raw) for stem in build_stems)
+
+
+def _needed_build_keys(structure: str, macro_action_keys: Sequence[str]) -> List[str]:
+    token = _norm_token(structure)
+    aliases = {
+        "supplydepotlowered": "supplydepot",
+        "refinery": "gas",
+        "extractor": "gas",
+        "assimilator": "gas",
+        "commandcenter": "expand",
+        "orbitalcommand": "expand",
+        "planetaryfortress": "expand",
+    }
+    token = aliases.get(token, token)
+    matches: List[str] = []
+    for key in macro_action_keys:
+        if not isinstance(key, str):
+            continue
+        if key == "expand" and token in {
+            "expand",
+            "commandcenter",
+            "orbitalcommand",
+            "planetaryfortress",
+        }:
+            matches.append(key)
+            continue
+        if key == "build_gas" and token in {"gas", "refinery", "extractor", "assimilator"}:
+            matches.append(key)
+            continue
+        if not key.startswith("build_"):
+            continue
+        stem = key[len("build_") :].replace("_", "").lower()
+        if not stem:
+            continue
+        if token == stem or token.startswith(stem) or stem.startswith(token):
+            matches.append(key)
+    return matches
+
+
+def _research_stems_from_macro(macro_action_keys: Sequence[str]) -> set:
+    return {
+        _norm_upgrade_token(key[len("research_") :])
+        for key in macro_action_keys
+        if isinstance(key, str) and key.startswith("research_")
+    }
+
+
+def _upgrade_has_research_tool(upgrade: str, research_stems: set) -> bool:
+    raw = _norm_upgrade_token(upgrade)
+    if not raw:
+        return False
+    if raw in research_stems:
+        return True
+    return any(raw.startswith(stem) or stem.startswith(raw) for stem in research_stems)
+
+
+def _needed_research_keys(upgrade: str, macro_action_keys: Sequence[str]) -> List[str]:
+    token = _norm_upgrade_token(upgrade)
+    matches: List[str] = []
+    for key in macro_action_keys:
+        if not isinstance(key, str) or not key.startswith("research_"):
+            continue
+        stem = _norm_upgrade_token(key[len("research_") :])
+        if not stem:
+            continue
+        if token == stem or token.startswith(stem) or stem.startswith(token):
+            matches.append(key)
+    return matches
+
+
 def validate_wake_for_cycle(
     wake_event: Optional[Dict[str, Any]],
     *,
@@ -151,6 +311,8 @@ def validate_wake_for_cycle(
     macro_list = [str(key) for key in macro_actions if key]
     macro_set = set(macro_list)
     train_stems = _train_stems_from_macro(macro_list)
+    build_stems = _build_stems_from_macro(macro_list)
+    research_stems = _research_stems_from_macro(macro_list)
     suggest_keys = [
         str(key)
         for key in (legal_macro_keys if legal_macro_keys is not None else macro_list)
@@ -166,7 +328,8 @@ def validate_wake_for_cycle(
                 "scout_just_finished, movement_mode_in, movement_mode_not_in, "
                 "army_group_count_at_least, army_group_count_less_than, or "
                 "objective_status_is; prefer unit_count_at_least / "
-                "unit_count_less_than / supply_left_at_most / "
+                "unit_count_less_than / structure_count_at_least / "
+                "upgrade_completed / supply_left_at_most / "
                 "objective_status_became / destination_reached / scan_ready / "
                 "cleanup_hint_present / game_time_at_least"
             )
@@ -185,23 +348,56 @@ def validate_wake_for_cycle(
         if not isinstance(cond, dict):
             continue
         ctype = str(cond.get("type") or "")
-        if ctype not in UNIT_COUNT_TYPES:
+        if ctype in UNIT_COUNT_TYPES:
+            unit = str(cond.get("unit") or "").strip()
+            if _unit_has_train_tool(unit, train_stems):
+                continue
+            needed = _needed_train_keys(unit, suggest_keys)
+            if needed:
+                blocking.append(
+                    f"wake_unreachable:{ctype}:{unit or '?'} — include "
+                    f"{'|'.join(needed)} in this cycle's tool_calls before waking "
+                    f"on that unit count (or wake on infrastructure/time instead)"
+                )
+            else:
+                blocking.append(
+                    f"wake_unreachable:{ctype}:{unit or '?'} — no matching train_* "
+                    "action in the legal macro set"
+                )
             continue
-        unit = str(cond.get("unit") or "").strip()
-        if _unit_has_train_tool(unit, train_stems):
+        if ctype in STRUCTURE_COUNT_TYPES:
+            unit = str(cond.get("unit") or "").strip()
+            if _structure_has_build_tool(unit, build_stems):
+                continue
+            needed = _needed_build_keys(unit, suggest_keys)
+            if needed:
+                blocking.append(
+                    f"wake_unreachable:{ctype}:{unit or '?'} — include "
+                    f"{'|'.join(needed)} in this cycle's tool_calls before waking "
+                    f"on that structure count"
+                )
+            else:
+                blocking.append(
+                    f"wake_unreachable:{ctype}:{unit or '?'} — no matching build_* "
+                    "action in the legal macro set"
+                )
             continue
-        needed = _needed_train_keys(unit, suggest_keys)
-        if needed:
-            blocking.append(
-                f"wake_unreachable:{ctype}:{unit or '?'} — include "
-                f"{'|'.join(needed)} in this cycle's tool_calls before waking "
-                f"on that unit count (or wake on infrastructure/time instead)"
-            )
-        else:
-            blocking.append(
-                f"wake_unreachable:{ctype}:{unit or '?'} — no matching train_* "
-                "action in the legal macro set"
-            )
+        if ctype in UPGRADE_TYPES:
+            upgrade = str(cond.get("upgrade") or "").strip()
+            if _upgrade_has_research_tool(upgrade, research_stems):
+                continue
+            needed = _needed_research_keys(upgrade, suggest_keys)
+            if needed:
+                blocking.append(
+                    f"wake_unreachable:{ctype}:{upgrade or '?'} — include "
+                    f"{'|'.join(needed)} in this cycle's tool_calls before waking "
+                    f"on that upgrade"
+                )
+            else:
+                blocking.append(
+                    f"wake_unreachable:{ctype}:{upgrade or '?'} — no matching "
+                    "research_* action in the legal macro set"
+                )
     # Scout predicates should already be stripped; surface if somehow present.
     for cond in conditions:
         if not isinstance(cond, dict):
@@ -245,16 +441,22 @@ def format_wake_reflection_feedback(
             "- If you wake on unit_count_at_least or unit_count_less_than for a "
             "unit, include the matching train tool in the same tool_calls "
             "(example failure: Marine at_least 45 without train_marine).",
+            "- If you wake on structure_count_at_least, include the matching "
+            "build_* (or expand / build_gas) in the same tool_calls.",
+            "- If you wake on upgrade_completed, include the matching research_* "
+            "in the same tool_calls.",
             "- Do not use scout_result_is, scout_just_finished, movement_mode_in, "
             "movement_mode_not_in, army_group_count_at_least, "
             "army_group_count_less_than, or objective_status_is as wake "
             "conditions (use objective_status_became when you need an "
             "objective-status edge).",
-            "- While infrastructure is still missing, prefer game_time_at_least a "
-            "short time ahead, supply_left_at_most, or other currently achievable "
-            "predicates — not an attack-gate unit count you are not producing yet. "
-            "objective_status_became is only for army destination statuses "
-            "(confirmed_clear, enemy_present, ...), never for buildings/research.",
+            "- While infrastructure is still missing, prefer "
+            "structure_count_at_least / upgrade_completed when you are building "
+            "or researching those targets, supply_left_at_most, or "
+            "game_time_at_least a short time ahead — not an attack-gate unit "
+            "count you are not producing yet. objective_status_became is only "
+            "for army destination statuses (confirmed_clear, enemy_present, "
+            "...), never for buildings/research.",
             "- Keep all still-valid macro and army tools; do not shrink to only "
             "set_wake_event.",
             "",
@@ -374,6 +576,24 @@ def _normalize_condition(
             return None, [f"{prefix}:negative_count"]
         return {"type": ctype, "count": count}, issues
 
+    if ctype in STRUCTURE_COUNT_TYPES:
+        unit = str(item.get("unit") or item.get("structure") or "").strip()
+        if not unit:
+            return None, [f"{prefix}:missing_unit"]
+        try:
+            count = int(item.get("count"))
+        except (TypeError, ValueError):
+            return None, [f"{prefix}:bad_count"]
+        if count < 0:
+            return None, [f"{prefix}:negative_count"]
+        return {"type": ctype, "unit": unit, "count": count}, issues
+
+    if ctype in UPGRADE_TYPES:
+        upgrade = str(item.get("upgrade") or item.get("name") or "").strip()
+        if not upgrade:
+            return None, [f"{prefix}:missing_upgrade"]
+        return {"type": ctype, "upgrade": upgrade}, issues
+
     return None, [f"{prefix}:unsupported"]
 
 
@@ -416,6 +636,11 @@ def format_wake_condition(cond: Any) -> str:
         count = cond.get("count")
         op = ">=" if ctype == "unit_count_at_least" else "<"
         return f"{ctype}({unit}{op}{count})"
+    if ctype in STRUCTURE_COUNT_TYPES:
+        unit = str(cond.get("unit") or "?").strip() or "?"
+        return f"{ctype}({unit}>={cond.get('count')})"
+    if ctype in UPGRADE_TYPES:
+        return f"{ctype}({cond.get('upgrade') or '?'})"
     if ctype in TIME_TYPES:
         return f"{ctype}(seconds={cond.get('seconds')})"
     if ctype in SUPPLY_TYPES:
@@ -481,6 +706,8 @@ def build_wake_snapshot(
     supply_used: int = 0,
     supply_cap: int = 0,
     own_unit_type_counts: Optional[Dict[str, int]] = None,
+    own_structure_counts: Optional[Dict[str, int]] = None,
+    completed_upgrades: Optional[Sequence[str]] = None,
     army_groups: Optional[Sequence[Dict[str, Any]]] = None,
     available_zones: Optional[Sequence[Dict[str, Any]]] = None,
     scan_ready: bool = False,
@@ -497,6 +724,10 @@ def build_wake_snapshot(
         "supply_used": int(supply_used),
         "supply_cap": int(supply_cap),
         "own_unit_type_counts": dict(own_unit_type_counts or {}),
+        "own_structure_counts": dict(own_structure_counts or {}),
+        "completed_upgrades": [
+            str(item) for item in (completed_upgrades or []) if str(item).strip()
+        ],
         "objective_status": objective_status,
         "destination_reached": destination_reached,
         "scan_ready": bool(scan_ready),
@@ -542,16 +773,48 @@ def _main_objective(
     return "en_route_unconfirmed", destination_reached
 
 
+_STRUCTURE_COUNT_ALIASES = {
+    "supplydepot": ("supplydepot", "supplydepotlowered"),
+    "supplydepotlowered": ("supplydepot", "supplydepotlowered"),
+    "commandcenter": ("commandcenter", "orbitalcommand", "planetaryfortress"),
+    "orbitalcommand": ("orbitalcommand",),
+    "planetaryfortress": ("planetaryfortress",),
+}
+
+
 def _unit_count(counts: Dict[str, int], unit: str) -> int:
-    want = unit.strip().lower()
+    want = _norm_token(unit)
     total = 0
     for name, value in counts.items():
-        if str(name).strip().lower() == want:
+        if _norm_token(name) == want:
             try:
                 total += int(value)
             except (TypeError, ValueError):
                 continue
     return total
+
+
+def _structure_count(counts: Dict[str, int], structure: str) -> int:
+    want = _norm_token(structure)
+    keys = _STRUCTURE_COUNT_ALIASES.get(want, (want,))
+    total = 0
+    for name, value in counts.items():
+        if _norm_token(name) in keys:
+            try:
+                total += int(value)
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+def _upgrade_is_completed(completed: Sequence[str], upgrade: str) -> bool:
+    want = _norm_upgrade_token(upgrade)
+    if not want:
+        return False
+    for name in completed:
+        if _norm_upgrade_token(name) == want:
+            return True
+    return False
 
 
 def _evaluate_condition(cond: Any, snapshot: Dict[str, Any]) -> bool:
@@ -569,6 +832,16 @@ def _evaluate_condition(cond: Any, snapshot: Dict[str, Any]) -> bool:
             snapshot.get("own_unit_type_counts") or {},
             str(cond.get("unit") or ""),
         ) < int(cond.get("count") or 0)
+    if ctype == "structure_count_at_least":
+        return _structure_count(
+            snapshot.get("own_structure_counts") or {},
+            str(cond.get("unit") or ""),
+        ) >= int(cond.get("count") or 0)
+    if ctype == "upgrade_completed":
+        return _upgrade_is_completed(
+            snapshot.get("completed_upgrades") or [],
+            str(cond.get("upgrade") or ""),
+        )
     if ctype == "objective_status_became":
         wanted = str(cond.get("status") or "")
         current = str(snapshot.get("objective_status") or "")

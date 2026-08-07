@@ -29,6 +29,22 @@ def _list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
 
 
+def _norm_upgrade_token(text: Any) -> str:
+    return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
+
+
+def _research_action_matches_upgrade(action: Any, upgrade: Any) -> bool:
+    """Best-effort match of research_* macro keys to displayed upgrade names."""
+    name = str(action or "")
+    if not name.startswith("research_"):
+        return False
+    stem = _norm_upgrade_token(name[len("research_") :])
+    up = _norm_upgrade_token(upgrade)
+    if not stem or not up:
+        return False
+    return stem == up or stem in up or up in stem
+
+
 def _normalise_upgrade_names(values: Iterable[Any]) -> List[str]:
     names = {
         _UPGRADE_DISPLAY_ALIASES.get(str(value), str(value))
@@ -281,6 +297,9 @@ def build_full_observation(
             "under_construction": under_construction,
             "workers_en_route": workers_en_route,
             "active_queues": active_queues,
+            "producer_addons": deepcopy(
+                _dict(legacy_own.get("producer_addons"))
+            ),
         },
         "technology": {
             "completed_upgrades": upgrades,
@@ -509,12 +528,145 @@ def _economy_line(economy: Dict[str, Any]) -> str:
     )
 
 
+# train_* that need a Tech Lab on a specific producer. Used only to annotate
+# Macro Execution blockers for the model — never auto-injects tools.
+_TRAIN_TECHLAB_REQUIREMENTS = {
+    "train_marauder": ("BARRACKS", "build_barracks_techlab"),
+    "train_ghost": ("BARRACKS", "build_barracks_techlab"),
+    "train_siege_tank": ("FACTORY", "build_factory_techlab"),
+    "train_thor": ("FACTORY", "build_factory_techlab"),
+    "train_raven": ("STARPORT", "build_starport_techlab"),
+    "train_banshee": ("STARPORT", "build_starport_techlab"),
+    "train_battlecruiser": ("STARPORT", "build_starport_techlab"),
+}
+
+
 def _production_lines(production: Dict[str, Any]) -> List[str]:
-    return [
+    lines = [
         f"completed_units_and_structures={_counts(production.get('completed'))}",
         f"units_and_structures_under_construction={_counts(production.get('under_construction'))}",
         f"workers_en_route_to_build={_counts(production.get('workers_en_route'))}",
         f"active_production_and_research_queues={_counts(production.get('active_queues'))}",
+    ]
+    addon_bits: List[str] = []
+    for producer, stats in sorted(_dict(production.get("producer_addons")).items()):
+        stats = _dict(stats)
+        addon_bits.append(
+            f"{producer} ready={_value(stats.get('ready'))} "
+            f"techlab={_value(stats.get('with_techlab'))} "
+            f"reactor={_value(stats.get('with_reactor'))} "
+            f"no_addon={_value(stats.get('no_addon'))}"
+        )
+    if addon_bits:
+        lines.append(f"producer_addons={_items(addon_bits)}")
+    return lines
+
+
+def _train_techlab_block_reason(
+    action: Any,
+    production: Dict[str, Any],
+) -> Optional[str]:
+    req = _TRAIN_TECHLAB_REQUIREMENTS.get(str(action or ""))
+    if not req:
+        return None
+    producer, _techlab_tool = req
+    stats = _dict(_dict(production.get("producer_addons")).get(producer))
+    with_techlab = 0
+    try:
+        with_techlab = int(stats.get("with_techlab") or 0)
+    except (TypeError, ValueError):
+        with_techlab = 0
+    if with_techlab > 0:
+        return None
+    pending = 0
+    under = _dict(production.get("under_construction"))
+    pending_keys = {
+        "BARRACKS": ("BARRACKSTECHLAB", "TECHLAB"),
+        "FACTORY": ("FACTORYTECHLAB", "TECHLAB"),
+        "STARPORT": ("STARPORTTECHLAB", "TECHLAB"),
+    }.get(producer, ())
+    for key in pending_keys:
+        try:
+            pending += int(under.get(key) or 0)
+        except (TypeError, ValueError):
+            pass
+    if pending > 0:
+        return "blocked=techlab_pending"
+    return f"blocked=no_{producer}_techlab"
+
+
+def _planned_research_actions(execution: Dict[str, Any]) -> List[Dict[str, Any]]:
+    macro = _dict(execution.get("macro"))
+    planned: List[Dict[str, Any]] = []
+    for task in _list(macro.get("active_macro_tasks")):
+        task = _dict(task)
+        action = str(task.get("action") or "")
+        if not action.startswith("research_"):
+            continue
+        planned.append(task)
+    return planned
+
+
+def _technology_lines(
+    technology: Dict[str, Any],
+    execution: Dict[str, Any],
+) -> List[str]:
+    """Render tech evidence; tag in-progress upgrades vs current research_* plan."""
+    completed = [str(item) for item in _list(technology.get("completed_upgrades"))]
+    in_progress = [
+        str(item) for item in _list(technology.get("upgrades_in_progress"))
+    ]
+    planned = _planned_research_actions(execution)
+
+    progress_bits: List[str] = []
+    for upgrade in in_progress:
+        matches = [
+            str(task.get("action"))
+            for task in planned
+            if _research_action_matches_upgrade(task.get("action"), upgrade)
+        ]
+        if matches:
+            progress_bits.append(f"{upgrade}(plan={matches[0]})")
+        else:
+            progress_bits.append(f"{upgrade}(plan=omitted)")
+
+    return [
+        "[Technology]",
+        f"completed_upgrades={_items(completed)}",
+        f"upgrades_in_progress={_items(progress_bits)}",
+    ]
+
+
+def _macro_execution_lines(
+    execution: Dict[str, Any],
+    production: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    # last_tasks duplicate [Previous Decision] macro_commands; omit them.
+    macro = _dict(execution.get("macro"))
+    production = _dict(production)
+    actions = []
+    for task in _list(macro.get("active_macro_tasks")):
+        task = _dict(task)
+        to_count = task.get("to_count", "?")
+        current = task.get("current_count")
+        progress = f"?/{to_count}" if current is None else f"{current}/{to_count}"
+        text = (
+            f"action={task.get('action', '?')}, "
+            f"progress={progress}, "
+            f"status={task.get('status', 'active_unsatisfied')}"
+        )
+        block = _train_techlab_block_reason(task.get("action"), production)
+        if block:
+            text += f", {block}"
+        if task.get("disabled"):
+            text += f", disabled({task.get('error', 'unknown')})"
+        actions.append(text)
+    return [
+        "[Macro Execution]",
+        f"execution_status={_value(macro.get('status'))}",
+        f"active_macro_tasks={_items(actions)}",
+        f"seconds_since_last_macro_update={_value(macro.get('last_update_seconds_ago'))}",
+        f"last_issues={_items(_list(macro.get('last_issues')))}",
     ]
 
 
@@ -550,10 +702,11 @@ def _combat_line(combat: Dict[str, Any]) -> str:
 
 def _enemy_lines(enemy: Dict[str, Any]) -> List[str]:
     # known_enemy_base_count already appears under [Map Control].
+    # Nearby enemies for decisions live under [Army Groups]; do not repeat a
+    # coarse near-army composition here.
     return [
-        f"known_enemy_composition={_counts(enemy.get('known_composition'))}",
-        f"visible_enemy_composition_near_army={_counts(enemy.get('visible_composition'))}",
-        f"known_enemy_combat_composition={_counts(enemy.get('known_combat_composition'))}",
+        f"known_enemy_units_and_buildings={_counts(enemy.get('known_composition'))}",
+        f"known_enemy_combat_units={_counts(enemy.get('known_combat_composition'))}",
         f"enemy_macro_build={_value(enemy.get('macro_build'))}",
         (
             f"seconds_since_enemy_army_last_seen="
@@ -563,12 +716,12 @@ def _enemy_lines(enemy: Dict[str, Any]) -> List[str]:
 
 
 def _group_lines(army_control: Dict[str, Any]) -> List[str]:
+    """Force state only; command progress is under [Combat Execution]."""
     groups = [_dict(group) for group in _list(army_control.get("groups"))]
     if not groups:
         return ["none"]
     lines = []
     for group in groups:
-        command = _dict(group.get("current_command"))
         lines.append(
             f"group_id={_value(group.get('group_id'))}; role={_value(group.get('role'))}; "
             f"unit_count={_value(group.get('unit_count', 0))}; "
@@ -578,12 +731,7 @@ def _group_lines(army_control: Dict[str, Any]) -> List[str]:
             f"is_fragmented={_value(group.get('is_fragmented'))}; "
             f"nearby_enemy_count={_value(group.get('nearby_enemy_count', 0))}; "
             f"nearby_enemy_army_power={_value(group.get('nearby_enemy_power', 0.0))}; "
-            f"nearby_enemy_composition={_counts(group.get('nearby_enemy_type_counts'))}; "
-            f"current_movement_mode={_value(command.get('movement_mode'))}; "
-            f"current_destination_zone_id={_value(command.get('destination_zone_id'))}; "
-            f"retreat_ratio={_value(command.get('retreat_ratio') if command.get('retreat_ratio') is not None else f'default({DEFAULT_RETREAT_RATIO})')}; "
-            f"search_target_zone_id={_value(group.get('search_target_zone_id'))}; "
-            f"searched_zone_ids={_items(_list(group.get('searched_zone_ids')))}."
+            f"nearby_enemy_composition={_counts(group.get('nearby_enemy_type_counts'))}."
         )
     return lines
 
@@ -696,56 +844,25 @@ def _zone_number(zone_id: Any) -> int:
 
 
 def _scan_lines(capabilities: Dict[str, Any]) -> List[str]:
-    # worker_count already appears under [Economy].
+    """Scanner + SCV scout in one recon block."""
     scan = _dict(capabilities.get("scan"))
     scout = _dict(capabilities.get("scv_scout"))
     return [
-        "[Orbital Scanner Sweep Capability]",
+        "[Recon]",
         (
-            f"orbital_energy_values={_items(_list(scan.get('orbital_energies')))}; "
+            f"scanner: orbital_energy_values={_items(_list(scan.get('orbital_energies')))}; "
             f"available_scanner_sweep_count={_value(scan.get('available_scan_count'))}; "
             f"last_scan_target_zone_id={_value(scan.get('last_target_zone_id'))}; "
             f"last_scan_result={_value(scan.get('last_result'))}; "
             f"seconds_since_last_scan_result={_value(scan.get('last_result_seconds_ago'))}"
         ),
-        "",
-        "[SCV Scout]",
         (
-            f"scv_scout_active={_value(scout.get('active'))}; "
+            f"scv_scout: scv_scout_active={_value(scout.get('active'))}; "
             f"active_scout_target_zone_id={_value(scout.get('active_target_zone_id'))}; "
             f"last_scout_target_zone_id={_value(scout.get('last_target_zone_id'))}; "
             f"last_scout_result={_value(scout.get('last_result'))}; "
             f"seconds_since_last_scout_result={_value(scout.get('last_result_seconds_ago'))}"
         ),
-    ]
-
-
-def _macro_execution_lines(execution: Dict[str, Any]) -> List[str]:
-    # last_tasks duplicate [Previous Decision] macro_commands; omit them.
-    macro = _dict(execution.get("macro"))
-    actions = []
-    for task in _list(macro.get("active_macro_tasks")):
-        task = _dict(task)
-        to_count = task.get("to_count", "?")
-        current = task.get("current_count")
-        if current is None:
-            progress = f"?/{to_count}"
-        else:
-            progress = f"{current}/{to_count}"
-        text = (
-            f"action={task.get('action', '?')}, "
-            f"progress={progress}"
-        )
-        text += f", status={task.get('status', 'active_unsatisfied')}"
-        if task.get("disabled"):
-            text += f" disabled({task.get('error', 'unknown')})"
-        actions.append(text)
-    return [
-        "[Macro Execution]",
-        f"execution_status={_value(macro.get('status'))}",
-        f"active_macro_tasks={_items(actions)}",
-        f"seconds_since_last_macro_update={_value(macro.get('last_update_seconds_ago'))}",
-        f"last_issues={_items(_list(macro.get('last_issues')))}",
     ]
 
 
@@ -761,10 +878,17 @@ def _combat_execution_lines(army_control: Dict[str, Any]) -> List[str]:
         if not command:
             lines.append(f"{_value(group.get('group_id'))}: no_active_command")
             continue
+        retreat = command.get("retreat_ratio")
+        retreat_text = (
+            _value(retreat)
+            if retreat is not None
+            else f"default({DEFAULT_RETREAT_RATIO})"
+        )
         bits = [
             f"{_value(group.get('group_id'))}: "
             f"{_value(command.get('movement_mode'))}"
             f"->{_value(command.get('destination_zone_id'))}",
+            f"retreat_ratio={retreat_text}",
             f"reached={_value(group.get('current_destination_reached'))}",
             f"objective={_value(group.get('current_objective_status'))}",
             f"age_s={_value(group.get('command_age_seconds'))}",
@@ -780,6 +904,9 @@ def _combat_execution_lines(army_control: Dict[str, Any]) -> List[str]:
             bits.append(
                 f"search_target={_value(group.get('search_target_zone_id'))}"
             )
+        searched = _list(group.get("searched_zone_ids"))
+        if searched:
+            bits.append(f"searched={_items(searched)}")
         lines.append("; ".join(bits))
     return lines
 
@@ -872,7 +999,7 @@ def _own_forces_summary_line(
         f"army_supply={_value(own.get('army_supply'))}; "
         f"living_combat_unit_composition={living}; "
         f"training_combat_unit_composition={training} "
-        f"(living = on-field ready combat units; training = still in queues)"
+        f"(living=on-field ready combat; training=still in queues)"
     )
 
 
@@ -896,6 +1023,7 @@ def _render_full(view: Dict[str, Any]) -> str:
     execution = _dict(view.get("execution"))
     map_control = _dict(view.get("map_control"))
     combat = _dict(view.get("combat"))
+    # Order: match/economy → build/macro → own army → enemy/space → recon → history.
     lines: List[str] = [
         "[Game]",
         _game_time_line(
@@ -915,29 +1043,39 @@ def _render_full(view: Dict[str, Any]) -> str:
         "",
         "[Production]",
         *_production_lines(production),
-        "",
-        "[Technology]",
-        f"completed_upgrades={_items(_list(technology.get('completed_upgrades')))}",
-        f"upgrades_in_progress={_items(_list(technology.get('upgrades_in_progress')))}",
-        "",
-        "[Own Forces]",
-        _own_forces_summary_line(own, army),
-        "",
-        "[Enemy Intelligence]",
-        *_enemy_lines(enemy),
-        "",
-        "[Combat Analysis]",
-        _combat_line(combat),
-        "",
-        "[Army Groups]",
-        *_group_lines(army),
-        "",
-        "[Army Zones]",
-        *_zone_lines(army),
     ]
-    _append_section(lines, _scan_lines(capabilities))
-    _append_section(lines, _macro_execution_lines(execution))
+    _append_section(lines, _macro_execution_lines(execution, production))
+    lines.extend(
+        [
+            "",
+            *_technology_lines(technology, execution),
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "[Own Forces]",
+            _own_forces_summary_line(own, army),
+            "",
+            "[Army Groups]",
+            *_group_lines(army),
+        ]
+    )
     _append_section(lines, _combat_execution_lines(army))
+    lines.extend(
+        [
+            "",
+            "[Enemy Intelligence]",
+            *_enemy_lines(enemy),
+            "",
+            "[Combat Analysis]",
+            _combat_line(combat),
+            "",
+            "[Army Zones]",
+            *_zone_lines(army),
+        ]
+    )
+    _append_section(lines, _scan_lines(capabilities))
     _append_section(lines, _previous_decision_lines(execution))
     return "\n".join(lines)
 
@@ -956,18 +1094,27 @@ def _base_resource_lines(map_control: Dict[str, Any]) -> List[str]:
         )
         for item in mineral_details
     ]
-    gas_records = [
-        (
-            f"base_label={item.get('label', item.get('zone_index', '?'))}, "
-            f"zone_index={_value(item.get('zone_index'))}, "
-            f"owned_gas_structure_count={_value(item.get('geysers', 0))}, "
-            f"vespene_gas_remaining={_value(item.get('gas_left', 0))}"
+    available_total = 0
+    gas_records = []
+    for item in gas_details:
+        owned = int(item.get("owned_gas_structure_count", item.get("geysers", 0)) or 0)
+        slots = int(item.get("geyser_slots", owned) or 0)
+        available = int(item.get("available_geyser_slots", max(0, slots - owned)) or 0)
+        available_total += available
+        gas_records.append(
+            (
+                f"base_label={item.get('label', item.get('zone_index', '?'))}, "
+                f"zone_index={_value(item.get('zone_index'))}, "
+                f"owned_gas_structure_count={owned}, "
+                f"geyser_slots={slots}, "
+                f"available_geyser_slots={available}, "
+                f"vespene_gas_remaining={_value(item.get('gas_left', 0))}"
+            )
         )
-        for item in gas_details
-    ]
     return [
         "own_base_mineral_details="
         + (" | ".join(mineral_records) if mineral_records else "none"),
+        f"available_geyser_slots_total={available_total}",
         "own_base_vespene_gas_details="
         + (" | ".join(gas_records) if gas_records else "none"),
     ]

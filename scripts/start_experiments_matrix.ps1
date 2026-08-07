@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
 $env:PYTHONIOENCODING = "utf-8"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -67,14 +67,14 @@ $EXPERIMENTS = @(
     # @{ EnemyRace = "protoss";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
 
 
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
     @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 10 }
 
     
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 10 }
 
     # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
     # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }

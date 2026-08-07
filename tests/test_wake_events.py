@@ -164,6 +164,110 @@ class ValidateWakeForCycleTests(unittest.TestCase):
         )
         self.assertEqual(blocking, [])
 
+    def test_structure_count_without_build_is_blocking(self):
+        event, _ = normalize_wake_event(
+            {
+                "logic": "any",
+                "conditions": [
+                    {
+                        "type": "structure_count_at_least",
+                        "unit": "FusionCore",
+                        "count": 1,
+                    },
+                ],
+            }
+        )
+        blocking = validate_wake_for_cycle(
+            event,
+            macro_actions=["train_battlecruiser"],
+            legal_macro_keys=[
+                "train_battlecruiser",
+                "build_fusion_core",
+                "build_starport",
+            ],
+        )
+        self.assertTrue(any("FusionCore" in item for item in blocking))
+        self.assertTrue(any("build_fusion_core" in item for item in blocking))
+
+    def test_structure_count_with_build_ok(self):
+        event, _ = normalize_wake_event(
+            {
+                "logic": "any",
+                "conditions": [
+                    {
+                        "type": "structure_count_at_least",
+                        "unit": "FactoryTechLab",
+                        "count": 2,
+                    },
+                ],
+            }
+        )
+        blocking = validate_wake_for_cycle(
+            event,
+            macro_actions=["build_factory", "build_factory_techlab"],
+        )
+        self.assertEqual(blocking, [])
+
+    def test_upgrade_completed_without_research_is_blocking(self):
+        event, _ = normalize_wake_event(
+            {
+                "logic": "any",
+                "conditions": [
+                    {"type": "upgrade_completed", "upgrade": "YamatoCannon"},
+                ],
+            }
+        )
+        blocking = validate_wake_for_cycle(
+            event,
+            macro_actions=["train_battlecruiser"],
+            legal_macro_keys=[
+                "train_battlecruiser",
+                "research_yamato_cannon",
+            ],
+        )
+        self.assertTrue(any("YamatoCannon" in item for item in blocking))
+        self.assertTrue(any("research_yamato_cannon" in item for item in blocking))
+
+    def test_upgrade_completed_with_research_ok(self):
+        event, _ = normalize_wake_event(
+            {
+                "logic": "any",
+                "conditions": [
+                    {"type": "upgrade_completed", "upgrade": "YamatoCannon"},
+                ],
+            }
+        )
+        blocking = validate_wake_for_cycle(
+            event,
+            macro_actions=["research_yamato_cannon", "train_battlecruiser"],
+        )
+        self.assertEqual(blocking, [])
+
+    def test_combat_shield_alias_matches_shieldwall(self):
+        event, _ = normalize_wake_event(
+            {
+                "logic": "any",
+                "conditions": [
+                    {"type": "upgrade_completed", "upgrade": "COMBATSHIELD"},
+                ],
+            }
+        )
+        blocking = validate_wake_for_cycle(
+            event,
+            macro_actions=["research_shieldwall", "train_marine"],
+            legal_macro_keys=[
+                "research_shieldwall",
+                "train_marine",
+                "build_barracks",
+            ],
+        )
+        self.assertEqual(blocking, [])
+        snap = build_wake_snapshot(
+            time_seconds=1.0,
+            completed_upgrades=["SHIELDWALL"],
+        )
+        self.assertTrue(evaluate_wake_event(event, snap))
+
     def test_missing_wake_blocks(self):
         blocking = validate_wake_for_cycle(
             None,
@@ -192,6 +296,8 @@ class EvaluateWakeEventTests(unittest.TestCase):
             supply_used=40,
             supply_cap=46,
             own_unit_type_counts={"Marine": 18, "SiegeTank": 2},
+            own_structure_counts={"FUSIONCORE": 0, "FACTORYTECHLAB": 1},
+            completed_upgrades=[],
             army_groups=[
                 {
                     "group_id": "group_0",
@@ -383,6 +489,59 @@ class EvaluateWakeEventTests(unittest.TestCase):
             baseline_objective_status="en_route_unconfirmed",
         )
         self.assertTrue(evaluate_wake_event(event, changed))
+
+    def test_structure_count_and_upgrade_completed(self):
+        event, issues = normalize_wake_event(
+            {
+                "logic": "all",
+                "conditions": [
+                    {
+                        "type": "structure_count_at_least",
+                        "unit": "FusionCore",
+                        "count": 1,
+                    },
+                    {"type": "upgrade_completed", "upgrade": "YamatoCannon"},
+                ],
+            }
+        )
+        self.assertEqual(issues, [])
+        self.assertFalse(evaluate_wake_event(event, self.snapshot))
+        self.snapshot["own_structure_counts"]["FUSIONCORE"] = 1
+        self.assertFalse(evaluate_wake_event(event, self.snapshot))
+        self.snapshot["completed_upgrades"] = ["BATTLECRUISERENABLESPECIALIZATIONS"]
+        self.assertTrue(evaluate_wake_event(event, self.snapshot))
+        # Rising edge only after false→true.
+        self.assertTrue(rising_edge(True, False))
+        self.assertFalse(rising_edge(True, True))
+
+    def test_structure_count_alias_and_legacy_type(self):
+        event, issues = normalize_wake_event(
+            {
+                "logic": "any",
+                "conditions": [
+                    {
+                        "type": "building_count_at_least",
+                        "unit": "SupplyDepot",
+                        "count": 2,
+                    },
+                    {
+                        "type": "upgrade_researched",
+                        "upgrade": "yamato_cannon",
+                    },
+                ],
+            }
+        )
+        self.assertEqual(issues, [])
+        self.assertEqual(
+            [c["type"] for c in event["conditions"]],
+            ["structure_count_at_least", "upgrade_completed"],
+        )
+        snap = build_wake_snapshot(
+            time_seconds=1.0,
+            own_structure_counts={"SUPPLYDEPOTLOWERED": 2},
+            completed_upgrades=["YAMATOCANNON"],
+        )
+        self.assertTrue(evaluate_wake_event(event, snap))
 
 
 class RisingEdgeTests(unittest.TestCase):

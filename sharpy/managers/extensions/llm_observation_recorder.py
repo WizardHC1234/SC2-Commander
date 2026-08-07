@@ -572,7 +572,7 @@ class LLMObservationRecorder(ManagerBase):
             return total
         return total
 
-    def _extract_own_forces_infrastructure(self) -> Dict[str, Dict[str, int]]:
+    def _extract_own_forces_infrastructure(self) -> Dict[str, Any]:
         """Classify own units / structures into four tiers.
 
         Returned shape::
@@ -582,6 +582,7 @@ class LLMObservationRecorder(ManagerBase):
                 "under_construction":{<UnitTypeId.name>: count, ...},  # buildings 0<bp<1
                 "workers_en_route":  {<UnitTypeId.name>: count, ...},  # SCV/Drone/Probe traveling
                 "active_queues":     {<"Training X" | "Researching Y">: count, ...},
+                "producer_addons":   {producer: {ready, with_techlab, with_reactor, no_addon}, ...},
             }
 
         The four-tier breakdown lets the LLM (or downstream consumer) tell
@@ -590,12 +591,16 @@ class LLMObservationRecorder(ManagerBase):
         is producing units or upgrades inside an existing building". This is
         what stops the LLM from re-issuing the same construction order while
         the previous one is still in flight.
+
+        ``producer_addons`` is Terran-facing evidence that a finished Factory /
+        Starport / Barracks is not the same thing as having a Tech Lab attached.
         """
-        result: Dict[str, Dict[str, int]] = {
+        result: Dict[str, Any] = {
             "completed": {},
             "under_construction": {},
             "workers_en_route": {},
             "active_queues": {},
+            "producer_addons": {},
         }
 
         if self.cache is None:
@@ -725,7 +730,69 @@ class LLMObservationRecorder(ManagerBase):
                     key = f"Researching {upgrade.name}"
                     active_queues[key] = active_queues.get(key, 0) + 1
 
+        result["producer_addons"] = self._extract_producer_addon_status(
+            current_own_units
+        )
         return result
+
+    def _extract_producer_addon_status(
+        self, current_own_units: List[Any]
+    ) -> Dict[str, Dict[str, int]]:
+        """Count ready Terran producers by attached add-on.
+
+        TechLab units (Siege Tank, Thor, Battlecruiser, Marauder, …) cannot
+        train from a producer with ``no_addon`` / Reactor. Surface that gap
+        explicitly so the Commander can emit ``build_*_techlab``.
+        """
+        producers = {
+            UnitTypeId.BARRACKS,
+            UnitTypeId.FACTORY,
+            UnitTypeId.STARPORT,
+        }
+        techlabs = {
+            UnitTypeId.BARRACKSTECHLAB,
+            UnitTypeId.FACTORYTECHLAB,
+            UnitTypeId.STARPORTTECHLAB,
+            UnitTypeId.TECHLAB,
+        }
+        reactors = {
+            UnitTypeId.BARRACKSREACTOR,
+            UnitTypeId.FACTORYREACTOR,
+            UnitTypeId.STARPORTREACTOR,
+            UnitTypeId.REACTOR,
+        }
+        out: Dict[str, Dict[str, int]] = {
+            name: {
+                "ready": 0,
+                "with_techlab": 0,
+                "with_reactor": 0,
+                "no_addon": 0,
+            }
+            for name in ("BARRACKS", "FACTORY", "STARPORT")
+        }
+        for unit in current_own_units:
+            if unit.type_id not in producers or not unit.is_ready:
+                continue
+            bucket = out[unit.type_id.name]
+            bucket["ready"] += 1
+            add_on_tag = int(getattr(unit, "add_on_tag", 0) or 0)
+            if add_on_tag == 0:
+                bucket["no_addon"] += 1
+                continue
+            add_on = None
+            if self.cache is not None:
+                add_on = self.cache.by_tag(add_on_tag)
+            if add_on is None:
+                bucket["no_addon"] += 1
+                continue
+            if add_on.type_id in techlabs:
+                bucket["with_techlab"] += 1
+            elif add_on.type_id in reactors:
+                bucket["with_reactor"] += 1
+            else:
+                bucket["no_addon"] += 1
+        # Drop producers that do not exist yet to keep the obs compact.
+        return {key: value for key, value in out.items() if value["ready"] > 0}
 
     @staticmethod
     def _positions_match(p1, p2, tol: float = 1.0) -> bool:
@@ -908,21 +975,68 @@ class LLMObservationRecorder(ManagerBase):
         return {"details": []}
 
     def _add_own_base_gas_status(self, own_base_gas: Dict, zone, index: int, own_base_number: int) -> None:
-        gas_buildings = getattr(zone, "gas_buildings", []) or []
+        gas_buildings = list(getattr(zone, "gas_buildings", None) or [])
         gas_left = 0
-        geysers = 0
+        owned = 0
         for gas in gas_buildings:
-            geysers += 1
+            owned += 1
             try:
                 gas_left += int(getattr(gas, "vespene_contents", 0) or 0)
             except (TypeError, ValueError):
                 pass
 
+        # Neutral geyser slots on this expansion (typically 2). A slot is free
+        # when no own/enemy gas building sits on it (same rule as BuildGas).
+        geyser_distance = float(getattr(zone, "VESPENE_GEYSER_DISTANCE", 10) or 10)
+        center = getattr(zone, "center_location", None)
+        all_geysers = []
+        if center is not None and getattr(self, "ai", None) is not None:
+            try:
+                all_geysers = list(self.ai.vespene_geyser.closer_than(geyser_distance, center))
+            except Exception:
+                all_geysers = []
+
+        occupants = list(gas_buildings)
+        try:
+            from sc2.constants import ALL_GAS
+
+            if getattr(self, "cache", None) is not None:
+                occupants.extend(list(self.cache.own(ALL_GAS) or []))
+                occupants.extend(list(self.cache.enemy(ALL_GAS) or []))
+            elif getattr(self, "ai", None) is not None:
+                occupants.extend(list(getattr(self.ai, "gas_buildings", None) or []))
+        except Exception:
+            pass
+
+        available = 0
+        for geyser in all_geysers:
+            geyser_pos = getattr(geyser, "position", None)
+            if geyser_pos is None:
+                continue
+            occupied = False
+            for building in occupants:
+                building_pos = getattr(building, "position", None)
+                if building_pos is not None and building_pos.distance_to(geyser_pos) <= 1:
+                    occupied = True
+                    break
+            if not occupied:
+                available += 1
+
+        geyser_slots = len(all_geysers)
+        # Fallback when geyser enumeration fails: treat owned buildings as slots.
+        if geyser_slots == 0 and owned > 0:
+            geyser_slots = owned
+            available = 0
+
         own_base_gas["details"].append(
             {
                 "label": self._own_base_label(own_base_number),
                 "zone_index": int(getattr(zone, "zone_index", index)),
-                "geysers": geysers,
+                # Legacy key: owned gas buildings (Refinery/Extractor/Assimilator).
+                "geysers": owned,
+                "owned_gas_structure_count": owned,
+                "geyser_slots": geyser_slots,
+                "available_geyser_slots": available,
                 "gas_left": gas_left,
             }
         )
@@ -1259,10 +1373,16 @@ class LLMObservationRecorder(ManagerBase):
         parts = []
         for item in details:
             label = item.get("label", "?")
-            geysers = int(item.get("geysers", 0) or 0)
+            owned = int(
+                item.get("owned_gas_structure_count", item.get("geysers", 0)) or 0
+            )
+            slots = int(item.get("geyser_slots", owned) or 0)
+            available = int(item.get("available_geyser_slots", max(0, slots - owned)) or 0)
             gas_left = item.get("gas_left", "?")
-            geyser_word = "geyser" if geysers == 1 else "geysers"
-            parts.append(f"{label}={geysers} {geyser_word}({gas_left} gas)")
+            parts.append(
+                f"{label}={owned}/{slots} gas buildings "
+                f"({available} free slots, {gas_left} gas left)"
+            )
         return ", ".join(parts)
 
     # ------------------------------------------------------------------
