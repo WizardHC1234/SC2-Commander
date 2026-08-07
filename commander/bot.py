@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import json
 import logging
 import os
 import re
@@ -22,6 +21,7 @@ from commander.macro_exec import (
     ForceFinishEnemyOnGG,
 )
 from commander.strategy import parse_strategy_document
+from commander.retreat_policy import DEFAULT_RETREAT_RATIO
 from commander.wake_events import (
     FALLBACK_DELAY_SECONDS,
     build_trigger_hint,
@@ -87,6 +87,9 @@ class CommanderBot(KnowledgeBot):
         self.active_tasks: List[Dict[str, Any]] = []
         self.commander_army_policy = None
         self._last_army_summary: Dict[str, Any] = {}
+        # Set by the combat act when the auto-retreat machine intercepts a
+        # command; consumed by _poll_wake_trigger for a proactive wake.
+        self.commander_retreat_wake_pending: Optional[Dict[str, Any]] = None
         # Snapshot of the last Commander tool decision for the next observation.
         self.llm_previous_decision: Optional[Dict[str, Any]] = None
         self._last_decision_time: float = -self.WAKE_COOLDOWN
@@ -256,25 +259,40 @@ class CommanderBot(KnowledgeBot):
 
     def _poll_wake_trigger(self) -> Optional[Dict[str, Any]]:
         """Return trigger payload on rising-edge wake or deadline fuse."""
-        snapshot = self._build_wake_snapshot()
-        event_ok = (
-            evaluate_wake_event(self._wake_event, snapshot)
-            if self._wake_event
-            else False
-        )
-        event_edge = rising_edge(event_ok, self._wake_prev_satisfied)
-        self._wake_prev_satisfied = event_ok
-        if event_edge:
-            fired = list_satisfied_wake_conditions(self._wake_event, snapshot)
-            if self._wake_is_fallback:
-                return {
-                    "reason": "wake_fallback_timeout",
-                    "fired_conditions": fired or ["runtime_deadline_fuse"],
-                }
+        pending = self.commander_retreat_wake_pending
+        if pending is not None:
+            self.commander_retreat_wake_pending = None
             return {
-                "reason": "wake_event",
-                "fired_conditions": fired,
+                "reason": "auto_retreat_triggered",
+                "fired_conditions": [
+                    f"{pending.get('state')}:{pending.get('detail')}"
+                ],
             }
+        # The wake snapshot runs the full army-state collection, which is the
+        # single most expensive per-frame operation. Evaluating conditions at
+        # ~3Hz (every 8 loops) costs nothing decision-wise: a wake fires at
+        # most ~0.4s (game time) later.
+        game_loop = int(getattr(getattr(self, "state", None), "game_loop", 0) or 0)
+        if game_loop % 8 == 0:
+            snapshot = self._build_wake_snapshot()
+            event_ok = (
+                evaluate_wake_event(self._wake_event, snapshot)
+                if self._wake_event
+                else False
+            )
+            event_edge = rising_edge(event_ok, self._wake_prev_satisfied)
+            self._wake_prev_satisfied = event_ok
+            if event_edge:
+                fired = list_satisfied_wake_conditions(self._wake_event, snapshot)
+                if self._wake_is_fallback:
+                    return {
+                        "reason": "wake_fallback_timeout",
+                        "fired_conditions": fired or ["runtime_deadline_fuse"],
+                    }
+                return {
+                    "reason": "wake_event",
+                    "fired_conditions": fired,
+                }
         # Always-on now+N fuse: fires once even if the model event stays false
         # (or stays sticky-true without a new rising edge).
         if (
@@ -291,7 +309,6 @@ class CommanderBot(KnowledgeBot):
     def _build_wake_snapshot(self) -> Dict[str, Any]:
         cleanup_hint = ""
         army_state: Dict[str, Any] = {}
-        last_scout_result_time: Optional[float] = None
         act = getattr(self, "llm_army_control_act", None)
         if act is not None:
             try:
@@ -304,9 +321,6 @@ class CommanderBot(KnowledgeBot):
                 cleanup_hint = (
                     build_cleanup_runtime_hint(act, army_state) or ""
                 ).strip()
-                raw_time = getattr(act, "_last_scout_result_time", None)
-                if raw_time is not None:
-                    last_scout_result_time = float(raw_time)
             except Exception as exc:
                 logger.warning("wake snapshot army state failed: %s", exc)
                 army_state = {}
@@ -316,16 +330,10 @@ class CommanderBot(KnowledgeBot):
             supply_cap=int(getattr(self, "supply_cap", 0) or 0),
             own_unit_type_counts=army_state.get("own_unit_type_counts") or {},
             army_groups=army_state.get("army_groups") or [],
-            army_summary=self._last_army_summary,
             available_zones=army_state.get("available_zones") or [],
-            last_scout_result=str(
-                army_state.get("last_scv_scout_result") or ""
-            ),
-            last_scout_result_time=last_scout_result_time,
             scan_ready=int(army_state.get("scan_ready") or 0) > 0,
             cleanup_hint_present="[Runtime Search-And-Destroy Hint]"
             in cleanup_hint,
-            wake_armed_at=self._wake_armed_at,
             baseline_objective_status=self._wake_baseline_objective_status,
         )
 
@@ -368,7 +376,7 @@ class CommanderBot(KnowledgeBot):
             return
 
         self._last_decision_time = float(self.time)
-        obs_text, full_obs, _view = self._capture_observation_bundle("full")
+        obs_text, full_obs, _view = self._capture_observation_bundle()
         cleanup_hint = self._cleanup_runtime_hint()
         trigger_hint = ""
         if trigger_reason != "commander_bootstrap":
@@ -380,16 +388,10 @@ class CommanderBot(KnowledgeBot):
         runtime_hint = "\n\n".join(
             part for part in (cleanup_hint, trigger_hint) if part
         )
-        previous_macro = [
-            {"action": t.get("action"), "to_count": t.get("to_count")}
-            for t in self.active_tasks
-        ]
         outcome = run_commander_decision(
             race=self.race_name,
             strategy_description=self.strategy_description,
             observation_text=obs_text,
-            previous_macro_tasks=previous_macro,
-            previous_army_summary=self._last_army_summary,
             runtime_hint=runtime_hint,
             map_topology_text=self._get_map_topology_text(),
             action_space=action_space,
@@ -431,8 +433,8 @@ class CommanderBot(KnowledgeBot):
             outcome["issues"] = issues
         self._wake_event = wake_event
         self._wake_is_fallback = wake_fallback
-        # Arm baselines before resampling so scout_just_finished /
-        # objective_status_became ignore already-true stale states.
+        # Arm baselines before resampling so objective_status_became ignores
+        # already-true stale states.
         self._wake_armed_at = float(self.time)
         self._wake_deadline = float(self.time) + float(FALLBACK_DELAY_SECONDS)
         arm_snapshot = self._build_wake_snapshot()
@@ -475,6 +477,7 @@ class CommanderBot(KnowledgeBot):
                     "group_id": c.get("group_id"),
                     "destination_zone_id": c.get("destination_zone_id"),
                     "movement_mode": c.get("movement_mode"),
+                    "retreat_ratio": c.get("retreat_ratio"),
                 }
                 for c in list(army_summary.get("commands") or [])
                 if isinstance(c, dict)
@@ -519,6 +522,7 @@ class CommanderBot(KnowledgeBot):
                 "  army=%s",
                 "; ".join(
                     f"{c['group_id']}:{c['movement_mode']}->{c['destination_zone_id']}"
+                    f"(r{c.get('retreat_ratio') if c.get('retreat_ratio') is not None else f'{DEFAULT_RETREAT_RATIO}d'})"
                     for c in army["commands"]
                 ),
             )
@@ -595,12 +599,12 @@ class CommanderBot(KnowledgeBot):
             logger.warning("cleanup runtime hint failed: %s", exc)
             return ""
 
-    def _capture_observation_bundle(self, view_type: str = "full"):
+    def _capture_observation_bundle(self):
         recorder = getattr(self, "llm_observation_recorder", None)
         if recorder is None:
             return "(observation unavailable)", None, None
         try:
-            return recorder.capture_observation_bundle(view_type)
+            return recorder.capture_observation_bundle()
         except Exception as exc:
             logger.warning("observation failed: %s", exc)
             return "(observation unavailable)", None, None

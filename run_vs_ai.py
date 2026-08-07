@@ -63,10 +63,10 @@ DEFAULT_MAP_NAME = "KairosJunctionLE"
 DEFAULT_REAL_TIME = False
 
 DEFAULT_ENEMY_RACE = "terran"
-DEFAULT_ENEMY_DIFFICULTY = "mediumhard"
+DEFAULT_ENEMY_DIFFICULTY = "hard"
 DEFAULT_ENEMY_BUILD = "macro"
 
-DEFAULT_COMMANDER_MODEL = "qwen3-32b"
+DEFAULT_COMMANDER_MODEL = "deepseek-v4-flash"
 DEFAULT_FORCE_STRATEGY = "tank"
 
 # --- 其它 ---
@@ -219,11 +219,23 @@ def _map_code(map_name: str) -> str:
     return _safe_match_part(cleaned or raw, max_len=6)
 
 
+# Fixed readable tags for frequently used keys; others fall through to the
+# compact rules below.
+_MODEL_CODE_EXACT = {
+    "qwen3-32b": "qwen3-32b",
+    "qwen3-32b-reasoning": "qw332r",
+    "deepseek-v4-flash": "ds4-flash",
+}
+
+
 def _model_code(model: str) -> str:
-    """Compress model key, e.g. kimi-k2.5 -> k25, DeepSeek-V4-flash -> dsv4f."""
+    """Compress model key, e.g. kimi-k2.5 -> k25; fixed tags in _MODEL_CODE_EXACT."""
     text = str(model or "").strip()
     if not text:
         return "nm"
+    fixed = _MODEL_CODE_EXACT.get(text.lower())
+    if fixed:
+        return _safe_match_part(fixed, max_len=16)
     compact = "".join(ch for ch in text.lower() if ch.isalnum())
     if compact.startswith("kimi"):
         digits = "".join(ch for ch in compact if ch.isdigit())
@@ -317,6 +329,7 @@ def play_vs_ai(
     record_dir_file: Optional[str] = None,
     skip_version_update: bool = DEFAULT_SKIP_VERSION_UPDATE,
     force_strategy: Optional[str] = None,
+    profile: bool = False,
 ) -> None:
     force_strategy = _resolve_force_strategy(force_strategy)
     _install_interrupt_flush_handlers()
@@ -441,7 +454,28 @@ def play_vs_ai(
         definitions: BotDefinitions = BotDefinitions(ladder_bots_path)
 
         starter = GameStarter(definitions)
-        starter.play()
+        if not profile:
+            starter.play()
+        else:
+            import cProfile
+            import pstats
+
+            profiler = cProfile.Profile()
+            profiler.enable()
+            try:
+                starter.play()
+            finally:
+                profiler.disable()
+                profile_path = os.path.join(
+                    record_dir, f"{match_id}.profile.txt"
+                )
+                with open(profile_path, "w", encoding="utf-8") as handle:
+                    # tottime surfaces real CPU hotspots (LLM socket waits
+                    # only show up under cumulative).
+                    stats = pstats.Stats(profiler, stream=handle)
+                    stats.sort_stats("tottime").print_stats(80)
+                    stats.sort_stats("cumulative").print_stats(50)
+                print(f" ▷ Profile   : {profile_path}")
     finally:
         if direct_log is not None:
             sys.stdout = original_stdout
@@ -492,6 +526,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             f"传 none 取消强制。"
         ),
     )
+    p.add_argument(
+        "--profile",
+        action="store_true",
+        help="Run the match under cProfile and dump hot functions to the record dir.",
+    )
 
     return p.parse_args(argv)
 
@@ -513,6 +552,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         record_dir_file=ns.record_dir_file or None,
         skip_version_update=ns.skip_version_update,
         force_strategy=ns.force_strategy,
+        profile=ns.profile,
     )
 
 if __name__ == "__main__":

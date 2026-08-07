@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from commander.observation import _zone_has_enemy_evidence
+
 ALLOWED_LOGICS = frozenset({"all", "any"})
 
 UNIT_COUNT_TYPES = frozenset({"unit_count_at_least", "unit_count_less_than"})
@@ -66,18 +68,6 @@ ALLOWED_CONDITION_TYPES = (
     | SUPPLY_TYPES
 )
 
-# Runtime emits "completed"; accept legacy "reached" from older records/prompts.
-SCOUT_RESULT_ALIASES = {
-    "reached": "completed",
-    "complete": "completed",
-    "completed": "completed",
-    "killed_en_route": "killed_en_route",
-    "interrupted": "interrupted",
-}
-SCOUT_TERMINAL_RESULTS = frozenset(
-    {"completed", "killed_en_route", "interrupted"}
-)
-
 FALLBACK_DELAY_SECONDS = 60.0
 MAX_WAKE_REFLECTION_RETRIES = 1
 
@@ -92,11 +82,6 @@ def _disabled_wake_reason(ctype: str) -> str:
     if ctype in OBJECTIVE_IS_TYPES:
         return "objective_status_is_wake_disabled"
     return "wake_disabled"
-
-
-def normalize_scout_result(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    return SCOUT_RESULT_ALIASES.get(text, text)
 
 
 def fallback_wake_event(now: float, *, delay: float = FALLBACK_DELAY_SECONDS) -> Dict[str, Any]:
@@ -352,21 +337,6 @@ def _normalize_condition(
             return None, [f"{prefix}:negative_count"]
         return {"type": ctype, "unit": unit, "count": count}, issues
 
-    if ctype in ARMY_GROUP_COUNT_TYPES:
-        try:
-            count = int(item.get("count"))
-        except (TypeError, ValueError):
-            return None, [f"{prefix}:bad_count"]
-        if count < 0:
-            return None, [f"{prefix}:negative_count"]
-        return {"type": ctype, "count": count}, issues
-
-    if ctype in MOVEMENT_MODE_TYPES:
-        modes = _string_list(item.get("modes"))
-        if not modes:
-            return None, [f"{prefix}:empty_modes"]
-        return {"type": ctype, "modes": modes}, issues
-
     if ctype in OBJECTIVE_TYPES:
         status = str(item.get("status") or "").strip()
         if not status:
@@ -381,15 +351,6 @@ def _normalize_condition(
         return {"type": ctype, "status": status}, issues
 
     if ctype in DESTINATION_TYPES:
-        return {"type": ctype}, issues
-
-    if ctype == "scout_result_is":
-        result = normalize_scout_result(item.get("result"))
-        if not result:
-            return None, [f"{prefix}:missing_result"]
-        return {"type": ctype, "result": result}, issues
-
-    if ctype == "scout_just_finished":
         return {"type": ctype}, issues
 
     if ctype in BOOL_FLAG_TYPES:
@@ -414,20 +375,6 @@ def _normalize_condition(
         return {"type": ctype, "count": count}, issues
 
     return None, [f"{prefix}:unsupported"]
-
-
-def _string_list(value: Any) -> List[str]:
-    if isinstance(value, str):
-        text = value.strip()
-        return [text] if text else []
-    if not isinstance(value, (list, tuple)):
-        return []
-    out: List[str] = []
-    for item in value:
-        text = str(item or "").strip()
-        if text:
-            out.append(text)
-    return out
 
 
 def evaluate_wake_event(event: Optional[Dict[str, Any]], snapshot: Dict[str, Any]) -> bool:
@@ -476,15 +423,6 @@ def format_wake_condition(cond: Any) -> str:
     if ctype in OBJECTIVE_TYPES:
         return f"{ctype}(status={cond.get('status')})"
     if ctype in DESTINATION_TYPES or ctype in BOOL_FLAG_TYPES:
-        return ctype
-    if ctype in MOVEMENT_MODE_TYPES:
-        modes = cond.get("modes")
-        return f"{ctype}(modes={modes})"
-    if ctype in ARMY_GROUP_COUNT_TYPES:
-        return f"{ctype}(count={cond.get('count')})"
-    if ctype in SCOUT_TYPES:
-        if ctype == "scout_result_is":
-            return f"{ctype}(result={cond.get('result')})"
         return ctype
     return ctype or "unknown_condition"
 
@@ -544,67 +482,27 @@ def build_wake_snapshot(
     supply_cap: int = 0,
     own_unit_type_counts: Optional[Dict[str, int]] = None,
     army_groups: Optional[Sequence[Dict[str, Any]]] = None,
-    army_summary: Optional[Dict[str, Any]] = None,
     available_zones: Optional[Sequence[Dict[str, Any]]] = None,
-    last_scout_result: str = "",
-    last_scout_result_time: Optional[float] = None,
     scan_ready: bool = False,
     cleanup_hint_present: bool = False,
-    wake_armed_at: Optional[float] = None,
     baseline_objective_status: str = "",
 ) -> Dict[str, Any]:
     """Assemble a cheap evaluation snapshot (no observation text)."""
     groups = [g for g in (army_groups or []) if isinstance(g, dict)]
     zones = [z for z in (available_zones or []) if isinstance(z, dict)]
-    summary = army_summary if isinstance(army_summary, dict) else {}
-    modes = _modes_from_summary_or_groups(summary, groups)
     main = _main_group(groups)
     objective_status, destination_reached = _main_objective(main, zones)
-    scout_result = normalize_scout_result(last_scout_result)
     return {
         "time_seconds": float(time_seconds),
         "supply_used": int(supply_used),
         "supply_cap": int(supply_cap),
         "own_unit_type_counts": dict(own_unit_type_counts or {}),
-        "army_group_count": len(groups),
-        "movement_modes": modes,
         "objective_status": objective_status,
         "destination_reached": destination_reached,
-        "last_scout_result": scout_result,
-        "last_scout_result_time": (
-            float(last_scout_result_time)
-            if last_scout_result_time is not None
-            else None
-        ),
         "scan_ready": bool(scan_ready),
         "cleanup_hint_present": bool(cleanup_hint_present),
-        "wake_armed_at": (
-            float(wake_armed_at) if wake_armed_at is not None else None
-        ),
         "baseline_objective_status": str(baseline_objective_status or ""),
     }
-
-
-def _modes_from_summary_or_groups(
-    summary: Dict[str, Any], groups: Sequence[Dict[str, Any]]
-) -> List[str]:
-    modes: List[str] = []
-    for command in summary.get("commands") or []:
-        if not isinstance(command, dict):
-            continue
-        mode = str(command.get("movement_mode") or "").strip()
-        if mode:
-            modes.append(mode)
-    if modes:
-        return modes
-    for group in groups:
-        command = group.get("current_command") or {}
-        if not isinstance(command, dict):
-            continue
-        mode = str(command.get("movement_mode") or "").strip()
-        if mode:
-            modes.append(mode)
-    return modes
 
 
 def _main_group(groups: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -644,20 +542,6 @@ def _main_objective(
     return "en_route_unconfirmed", destination_reached
 
 
-def _zone_has_enemy_evidence(zone: Dict[str, Any]) -> bool:
-    visible_contents = zone.get("visible_enemy_contents") or {}
-    remembered = zone.get("last_seen_enemy_contents") or {}
-    return bool(
-        (isinstance(visible_contents, dict) and visible_contents)
-        or (isinstance(remembered, dict) and remembered)
-        or int(zone.get("visible_enemy_units", 0) or 0) > 0
-        or int(zone.get("remembered_enemy_units", 0) or 0) > 0
-        or float(zone.get("visible_enemy_power", 0.0) or 0.0) > 0.0
-        or float(zone.get("remembered_enemy_power", 0.0) or 0.0) > 0.0
-        or float(zone.get("enemy_static_power", 0.0) or 0.0) > 0.0
-    )
-
-
 def _unit_count(counts: Dict[str, int], unit: str) -> int:
     want = unit.strip().lower()
     total = 0
@@ -685,24 +569,6 @@ def _evaluate_condition(cond: Any, snapshot: Dict[str, Any]) -> bool:
             snapshot.get("own_unit_type_counts") or {},
             str(cond.get("unit") or ""),
         ) < int(cond.get("count") or 0)
-    if ctype == "army_group_count_at_least":
-        return int(snapshot.get("army_group_count") or 0) >= int(cond.get("count") or 0)
-    if ctype == "army_group_count_less_than":
-        return int(snapshot.get("army_group_count") or 0) < int(cond.get("count") or 0)
-    if ctype == "movement_mode_in":
-        modes = set(snapshot.get("movement_modes") or [])
-        wanted = set(cond.get("modes") or [])
-        return bool(modes & wanted)
-    if ctype == "movement_mode_not_in":
-        modes = set(snapshot.get("movement_modes") or [])
-        forbidden = set(cond.get("modes") or [])
-        if not modes:
-            return True
-        return not bool(modes & forbidden)
-    if ctype == "objective_status_is":
-        return str(snapshot.get("objective_status") or "") == str(
-            cond.get("status") or ""
-        )
     if ctype == "objective_status_became":
         wanted = str(cond.get("status") or "")
         current = str(snapshot.get("objective_status") or "")
@@ -710,20 +576,6 @@ def _evaluate_condition(cond: Any, snapshot: Dict[str, Any]) -> bool:
         return bool(wanted) and current == wanted and current != baseline
     if ctype == "destination_reached":
         return bool(snapshot.get("destination_reached"))
-    if ctype == "scout_result_is":
-        current = normalize_scout_result(snapshot.get("last_scout_result"))
-        wanted = normalize_scout_result(cond.get("result"))
-        return bool(wanted) and current == wanted
-    if ctype == "scout_just_finished":
-        current = normalize_scout_result(snapshot.get("last_scout_result"))
-        if current not in SCOUT_TERMINAL_RESULTS:
-            return False
-        result_time = snapshot.get("last_scout_result_time")
-        armed_at = snapshot.get("wake_armed_at")
-        if result_time is None or armed_at is None:
-            return False
-        # Strictly after this wake was armed — ignores stale prior scout results.
-        return float(result_time) > float(armed_at)
     if ctype == "scan_ready":
         return bool(snapshot.get("scan_ready"))
     if ctype == "cleanup_hint_present":

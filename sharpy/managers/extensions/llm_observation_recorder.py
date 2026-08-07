@@ -257,8 +257,8 @@ class LLMObservationRecorder(ManagerBase):
 
         try:
             snapshot = self.build_full_observation()
-            view = self.mask_observation(snapshot, "full")
-            text_obs = self.render_observation(view, "full")
+            view = self.mask_observation(snapshot)
+            text_obs = self.render_observation(view)
             self.record_history.append(
                 {
                     "game_time_seconds": round(self.ai.time, 2),
@@ -447,15 +447,11 @@ class LLMObservationRecorder(ManagerBase):
             army_state = self._collect_registered_army_state()
 
         macro_execution = self._collect_macro_execution_state()
-        combat_execution = getattr(
-            self.ai, "llm_combat_execution_state", None
-        )
         previous_decision = getattr(self.ai, "llm_previous_decision", None)
         return build_full_observation(
             legacy_snapshot,
             army_state=army_state,
             macro_execution=macro_execution,
-            combat_execution=combat_execution,
             previous_decision=previous_decision,
             game_loop=self._current_game_loop(),
             game_time_limit_seconds=getattr(
@@ -464,34 +460,26 @@ class LLMObservationRecorder(ManagerBase):
         )
 
     @staticmethod
-    def mask_observation(
-        full_observation: Dict,
-        view_type: str,
-        **kwargs,
-    ) -> Dict:
+    def mask_observation(full_observation: Dict) -> Dict:
         from commander.observation import mask_observation
 
-        return mask_observation(
-            full_observation, view_type, **kwargs
-        )
+        return mask_observation(full_observation)
 
     @staticmethod
-    def render_observation(view: Dict, view_type: str) -> str:
+    def render_observation(view: Dict) -> str:
         from commander.observation import render_observation
 
-        return render_observation(view, view_type)
+        return render_observation(view)
 
     def capture_observation_bundle(
         self,
-        view_type: str,
         *,
         army_state: Optional[Dict] = None,
-        **mask_kwargs,
     ) -> tuple:
         """Return ``(text, full, masked_view)`` from one immutable snapshot."""
         full = self.build_full_observation(army_state=army_state)
-        view = self.mask_observation(full, view_type, **mask_kwargs)
-        text = self.render_observation(view, view_type)
+        view = self.mask_observation(full)
+        text = self.render_observation(view)
         return text, full, view
 
     def _collect_registered_army_state(self) -> Dict:

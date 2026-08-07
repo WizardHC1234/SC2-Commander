@@ -452,26 +452,9 @@ _ACTION_REGISTRY: Dict[str, Dict] = {
     },
 }
 
-ARMY_ACTION_KEYS = frozenset(
-    key for key, meta in _ACTION_REGISTRY.items() if meta.get("type") == "army"
-)
-META_ACTION_KEYS = frozenset(
-    key for key, meta in _ACTION_REGISTRY.items() if meta.get("type") == "meta"
-)
-
-
 def get_action_space() -> Dict[str, str]:
     """返回 ``{action_key: description}``：宏观 + 军队控制 + meta，统一合法 tool 清单。"""
     return {key: value["description"] for key, value in _ACTION_REGISTRY.items()}
-
-
-def get_macro_action_space() -> Dict[str, str]:
-    """仅宏观（可实例化为 Sharpy Act、参数为 to_count）的 key。"""
-    return {
-        key: value["description"]
-        for key, value in _ACTION_REGISTRY.items()
-        if value.get("type") not in {"army", "meta"}
-    }
 
 
 def get_action(action_key: str, *args, **kwargs):
@@ -487,18 +470,7 @@ def get_action(action_key: str, *args, **kwargs):
     return meta["action_func"](*args, **kwargs)
 
 
-def get_action_type(action_key: str) -> str:
-    """返回粗粒度类型 ``unit`` / ``building`` / ``tech`` / ``army`` / ``meta``，未知则 ``unknown``。"""
-    if action_key not in _ACTION_REGISTRY:
-        return "unknown"
-    return _ACTION_REGISTRY[action_key].get("type", "unknown")
-
-
 __all__ = [
-    "ARMY_ACTION_KEYS",
-    "META_ACTION_KEYS",
     "get_action_space",
-    "get_macro_action_space",
     "get_action",
-    "get_action_type",
 ]

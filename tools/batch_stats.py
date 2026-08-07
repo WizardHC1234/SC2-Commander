@@ -50,8 +50,8 @@ GROUP_BY_CHOICES = (
 
 _MODEL_SHORT = {
     "kimi-k2.5": "kimi",
-    "qwen3-32b": "qwen",
-    "deepseek-v4-flash": "ds-flash",
+    "qwen3-32b-reasoning": "qwen3-32b-r",
+    "deepseek-v4-flash": "ds4-flash",
     "deepseek-v4-pro": "ds-pro",
 }
 

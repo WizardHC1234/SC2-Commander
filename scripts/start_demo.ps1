@@ -15,10 +15,10 @@ if (-not $env:SC2PATH -or -not (Test-Path -LiteralPath $env:SC2PATH)) {
 $MAP_NAME = "KairosJunctionLE"
 $ENEMY_RACE = "terran"
 # $ENEMY_RACE = "protoss"
-$ENEMY_DIFFICULTY = "harder"
+$ENEMY_DIFFICULTY = "hard"
 $ENEMY_BUILD = "macro"
 $BOT_RACE = "terran"
-$FORCE_STRATEGY = "tank"
+$FORCE_STRATEGY = "battlecruiser"
 $COMMANDER_MODEL = "qwen3-32b"
 # $COMMANDER_MODEL = "deepseek-v4-flash"
 

@@ -6,13 +6,11 @@ Emits optional [Runtime Search-And-Destroy Hint] when cleanup conditions hold.
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
 from sc2.ids.unit_typeid import UnitTypeId
 
-
-logger = logging.getLogger("commander.combat_state")
+from commander.retreat_policy import LOCAL_BATTLE_RADIUS
 
 
 ENEMY_MAIN_ZONE_ID = "zone_15"
@@ -233,7 +231,7 @@ def collect_army_control_state(act: Any) -> Dict[str, Any]:
     enemy_units = getattr(ai, "all_enemy_units", [])
     visible_enemy_units, remembered_enemy_units = _split_enemy_units(enemy_units)
     close_enemies = (
-        visible_enemy_units.closer_than(28, controlled_units.center)
+        visible_enemy_units.closer_than(LOCAL_BATTLE_RADIUS, controlled_units.center)
         if controlled_units and visible_enemy_units
         else []
     )
@@ -331,8 +329,20 @@ def collect_army_control_state(act: Any) -> Dict[str, Any]:
         "own_unit_type_counts": _living_combat_unit_counts(act),
         "close_enemy_type_counts": _unit_counts(close_enemies),
         "known_enemy_type_counts": _unit_counts(enemy_combat_units),
-        "zone_topology": _zone_topology(zones, set(getattr(act.zone_manager, "gather_points", []))),
+        "zone_topology": _cached_zone_topology(act, zones),
     }
+
+
+def _cached_zone_topology(act: Any, zones: list) -> Dict[str, Any]:
+    """Topology is match-static (roles/neighbors/path distances never change
+    after setup); compute once instead of every frame."""
+    cached = getattr(act, "_cached_zone_topology", None)
+    if cached is None:
+        cached = _zone_topology(
+            zones, set(getattr(act.zone_manager, "gather_points", []))
+        )
+        act._cached_zone_topology = cached
+    return cached
 
 
 def _is_remembered_enemy(unit: Any) -> bool:

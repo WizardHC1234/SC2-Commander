@@ -17,6 +17,19 @@ from commander.combat_policy import (
     ArmyGroupCommand,
     InjectedArmyPolicyProvider,
 )
+from commander.combat_state import _nearest_zone_name, _total_power, _unit_counts
+from commander.retreat_policy import (
+    ARRIVAL_RADIUS,
+    DEFAULT_RETREAT_RATIO,
+    LOCAL_BATTLE_RADIUS,
+    RECOVER_MARGIN,
+    RETREAT_TIME_CAP_SECONDS,
+    RETREAT_WATCHED_MODES,
+    STATE_ACTIVE,
+    STATE_HOLDING,
+    STATE_RETREATING,
+    GroupRetreatState,
+)
 
 
 MOVE_TYPE_BY_NAME = {
@@ -45,11 +58,9 @@ class CombatControlAct(ActBase):
     EXPANSION_CLEARANCE = 14
     SEARCH_ZONE_REVISIT_SECONDS = 60
 
-    def __init__(self, policy_provider: Optional[object] = None):
+    def __init__(self):
         super().__init__()
-        self.policy_provider = (
-            policy_provider or InjectedArmyPolicyProvider()
-        )
+        self.policy_provider = InjectedArmyPolicyProvider()
         self.micro_rules: Optional[MicroRules] = None
         self._current_groups: Dict[str, Units] = {}
         self._main_unit_tags: set = set()
@@ -74,13 +85,14 @@ class CombatControlAct(ActBase):
         self._last_scan_zone_id: Optional[str] = None
         self._last_scan_result: Optional[str] = None
         self._last_scan_result_time: Optional[float] = None
+        # Per-group auto-retreat machine states (see retreat_policy.py).
+        self._retreat_states: Dict[str, GroupRetreatState] = {}
 
     async def start(self, knowledge):
         await super().start(knowledge)
         # The unified Observation builder discovers the live Army collector
         # through the bot. This avoids maintaining a second Army snapshot.
         self.ai.llm_army_control_act = self
-        self.ai.llm_combat_execution_state = {}
         self.gather_manager = self.knowledge.get_required_manager(
             IGatherPointSolver
         )
@@ -154,6 +166,7 @@ class CombatControlAct(ActBase):
                     destination_zone_id=source.destination_zone_id,
                     movement_mode=source.movement_mode,
                     move_type=MOVE_TYPE_BY_MOVEMENT_MODE[source.movement_mode],
+                    retreat_ratio=source.retreat_ratio,
                 )
             synced.append(main_command)
             follow = main_command
@@ -173,6 +186,7 @@ class CombatControlAct(ActBase):
                     destination_zone_id=follow.destination_zone_id,
                     movement_mode=follow.movement_mode,
                     move_type=MOVE_TYPE_BY_MOVEMENT_MODE[follow.movement_mode],
+                    retreat_ratio=follow.retreat_ratio,
                 )
             )
 
@@ -348,6 +362,8 @@ class CombatControlAct(ActBase):
             None,
         )
         if search_command is not None:
+            # Endgame sweep: auto-retreat overrides do not apply.
+            self._retreat_states.clear()
             self._execute_search_and_destroy(search_command)
             return
 
@@ -356,44 +372,257 @@ class CombatControlAct(ActBase):
             units = self._current_groups.get(command.group_id)
             if units is None or not units.exists:
                 continue
-            if command.movement_mode == "regroup":
+            effective = self._advance_retreat_state(command, units)
+            if effective.movement_mode == "regroup":
                 target = self._resolve_regroup_target(
-                    command.destination_zone_id, units
+                    effective.destination_zone_id, units
                 )
-            elif command.movement_mode in {"push", "assault", "harass"}:
+            elif effective.movement_mode in {"push", "assault", "harass"}:
                 target = self._resolve_target(
-                    command.destination_zone_id,
+                    effective.destination_zone_id,
                     enter_zone=True,
                 )
-            elif command.movement_mode == "contain":
+            elif effective.movement_mode == "contain":
                 target = self._resolve_contain_target(
-                    command.destination_zone_id, units
+                    effective.destination_zone_id, units
                 )
             else:
                 # hold and retreats: settle at the zone's safe point
                 # (own/neutral: gather-point side; enemy: zone center).
-                target = self._resolve_target(command.destination_zone_id)
+                target = self._resolve_target(effective.destination_zone_id)
             if target is None:
                 continue
 
             self.roles.set_tasks(
-                self._task_for_mode(command.movement_mode),
+                self._task_for_mode(effective.movement_mode),
                 units,
             )
             for unit in units:
                 self.combat.add_unit(unit)
 
-            rules = self._configure_rules(command)
+            rules = self._configure_rules(effective)
             self.combat.execute(
                 target,
-                MOVE_TYPE_BY_NAME[command.move_type],
+                MOVE_TYPE_BY_NAME[effective.move_type],
                 rules,
             )
+            now = float(getattr(self.ai, "time", 0.0))
+            previous = self._active_commands.get(command.group_id) or {}
+            same_command = (
+                previous.get("destination_zone_id")
+                == effective.destination_zone_id
+                and previous.get("movement_mode") == effective.movement_mode
+            )
             self._active_commands[command.group_id] = {
-                "destination_zone_id": command.destination_zone_id,
-                "movement_mode": command.movement_mode,
-                "issued_at": float(getattr(self.ai, "time", 0.0)),
+                "destination_zone_id": effective.destination_zone_id,
+                "movement_mode": effective.movement_mode,
+                "retreat_ratio": effective.retreat_ratio,
+                "issued_at": (
+                    float(previous["issued_at"])
+                    if same_command and "issued_at" in previous
+                    else now
+                ),
+                "source": (
+                    "auto_retreat"
+                    if (
+                        effective.group_id in self._retreat_states
+                        and self._retreat_states[effective.group_id].state
+                        != STATE_ACTIVE
+                    )
+                    else "llm"
+                ),
             }
+
+    # ------------------------------------------------------------------
+    # auto-retreat state machine (native PlanZoneAttack-style: front-runner
+    # local ratio, arrival-stop, hysteresis + time-based recovery). The
+    # threshold travels with each move_group command (retreat_ratio).
+    # ------------------------------------------------------------------
+
+    def _advance_retreat_state(
+        self,
+        command: ArmyGroupCommand,
+        units: Units,
+    ) -> ArmyGroupCommand:
+        """Advance one group's retreat machine and return the command to run."""
+        group_id = command.group_id
+        if command.movement_mode not in RETREAT_WATCHED_MODES:
+            self._retreat_states.pop(group_id, None)
+            return command
+
+        state = self._retreat_states.setdefault(group_id, GroupRetreatState())
+        now = float(getattr(self.ai, "time", 0.0))
+
+        # The model issued a different command than the one we interrupted:
+        # respect the new intent and re-evaluate from scratch.
+        if (
+            state.state != STATE_ACTIVE
+            and state.original_command is not None
+            and (
+                command.movement_mode != state.original_command.movement_mode
+                or command.destination_zone_id
+                != state.original_command.destination_zone_id
+            )
+        ):
+            state.state = STATE_ACTIVE
+            state.original_command = None
+
+        retreat_ratio = (
+            command.retreat_ratio
+            if command.retreat_ratio is not None
+            else DEFAULT_RETREAT_RATIO
+        )
+        recover_ratio = retreat_ratio + RECOVER_MARGIN
+        center = self._group_center(units)
+        local_ratio = self._local_battle_ratio(units, center)
+
+        if state.state in (STATE_RETREATING, STATE_HOLDING):
+            timed_out = now - state.since >= RETREAT_TIME_CAP_SECONDS
+            if local_ratio >= recover_ratio or timed_out:
+                state.state = STATE_ACTIVE
+                state.original_command = None
+                state.detail = ""
+            else:
+                if state.state == STATE_RETREATING and self._arrived_at(
+                    center, state.retreat_zone_id
+                ):
+                    state.state = STATE_HOLDING
+                    state.detail = (
+                        f"holding at {state.retreat_zone_id} after retreat "
+                        f"(local_ratio {local_ratio:.2f} < recover "
+                        f"{recover_ratio:.2f})"
+                    )
+                return self._rewritten_command(command, state)
+
+        if local_ratio < retreat_ratio:
+            if state.state != STATE_RETREATING:
+                retreat_zone_id = (
+                    state.retreat_zone_id
+                    if state.state != STATE_ACTIVE
+                    else None
+                ) or self._auto_retreat_zone_id(center)
+                self._enter_state(
+                    state,
+                    STATE_RETREATING,
+                    command,
+                    now,
+                    retreat_zone_id=retreat_zone_id,
+                    detail=(
+                        f"local_ratio {local_ratio:.2f} < retreat "
+                        f"{retreat_ratio:.2f}; retreating to {retreat_zone_id}"
+                    ),
+                )
+            return self._rewritten_command(command, state)
+
+        return command
+
+    def _enter_state(
+        self,
+        state: GroupRetreatState,
+        new_state: str,
+        command: ArmyGroupCommand,
+        now: float,
+        *,
+        retreat_zone_id: Optional[str] = None,
+        detail: str = "",
+    ) -> None:
+        # Called only on an actual transition; proactively wake the Commander
+        # so it can react to the override (e.g. adjust orders or thresholds).
+        state.state = new_state
+        state.original_command = command
+        state.since = now
+        state.detail = detail
+        if retreat_zone_id is not None:
+            state.retreat_zone_id = retreat_zone_id
+        self.ai.commander_retreat_wake_pending = {
+            "reason": "auto_retreat_triggered",
+            "state": new_state,
+            "detail": detail,
+        }
+
+    def _rewritten_command(
+        self,
+        command: ArmyGroupCommand,
+        state: GroupRetreatState,
+    ) -> ArmyGroupCommand:
+        if state.state == STATE_RETREATING and state.retreat_zone_id:
+            return ArmyGroupCommand(
+                group_id=command.group_id,
+                destination_zone_id=state.retreat_zone_id,
+                movement_mode="defensive_retreat",
+                move_type=MOVE_TYPE_BY_MOVEMENT_MODE["defensive_retreat"],
+                retreat_ratio=command.retreat_ratio,
+            )
+        if state.state == STATE_HOLDING and state.retreat_zone_id:
+            return ArmyGroupCommand(
+                group_id=command.group_id,
+                destination_zone_id=state.retreat_zone_id,
+                movement_mode="hold",
+                move_type=MOVE_TYPE_BY_MOVEMENT_MODE["hold"],
+                retreat_ratio=command.retreat_ratio,
+            )
+        return command
+
+    def _front_runner_position(self, units: Units, center: Point2) -> Point2:
+        """Front runner = unit closest to the enemy nearest the group."""
+        enemies = getattr(self.ai, "all_enemy_units", None)
+        if not enemies:
+            return center
+        try:
+            nearest_enemy = enemies.closest_to(center)
+            return units.closest_to(nearest_enemy).position
+        except (AttributeError, ValueError):
+            return center
+
+    def _local_battle_ratio(self, units: Units, center: Point2) -> float:
+        enemies = getattr(self.ai, "all_enemy_units", None)
+        if not enemies:
+            return float("inf")
+        front = self._front_runner_position(units, center)
+        nearby = enemies.closer_than(LOCAL_BATTLE_RADIUS, front).filter(
+            lambda unit: not getattr(unit, "is_structure", False)
+            and not self.unit_values.is_worker(unit)
+        )
+        enemy_power = _total_power(self, nearby)
+        own_power = _total_power(self, units)
+        if enemy_power <= 0:
+            return float("inf")
+        if own_power <= 0:
+            return 0.0
+        return own_power / enemy_power
+
+    def _arrived_at(self, center: Point2, zone_id: Optional[str]) -> bool:
+        if not zone_id:
+            return False
+        zones = list(self.knowledge.zone_manager.expansion_zones)
+        zone = self._zone_by_id(zones, zone_id)
+        if zone is None:
+            return False
+        return center.distance_to(zone.center_location) <= ARRIVAL_RADIUS
+
+    def _auto_retreat_zone_id(self, center: Point2) -> str:
+        """Nearest safe own zone; falls back to the nearest own zone."""
+        zones = list(self.knowledge.zone_manager.expansion_zones)
+        if not zones:
+            return "zone_0"
+        own_safe = [
+            (index, zone)
+            for index, zone in enumerate(zones)
+            if getattr(zone, "is_ours", False)
+            and not getattr(zone, "is_under_attack", False)
+        ]
+        pool = own_safe or [
+            (index, zone)
+            for index, zone in enumerate(zones)
+            if getattr(zone, "is_ours", False)
+        ]
+        if not pool:
+            return "zone_0"
+        index, _zone = min(
+            pool,
+            key=lambda item: center.distance_to(item[1].center_location),
+        )
+        return f"zone_{index}"
 
     def _execute_search_and_destroy(
         self,
@@ -407,10 +636,17 @@ class CombatControlAct(ActBase):
         self.roles.set_tasks(UnitTask.Attacking, units)
         now = float(getattr(self.ai, "time", 0.0))
         for group_id in self._current_groups:
+            previous = self._active_commands.get(group_id) or {}
+            same_command = previous.get("movement_mode") == command.movement_mode
             self._active_commands[group_id] = {
                 "destination_zone_id": command.destination_zone_id,
                 "movement_mode": command.movement_mode,
-                "issued_at": now,
+                "issued_at": (
+                    float(previous["issued_at"])
+                    if same_command and "issued_at" in previous
+                    else now
+                ),
+                "source": "llm",
             }
 
         idle_units = units.filter(
@@ -451,7 +687,7 @@ class CombatControlAct(ActBase):
             return []
 
         powers = {
-            group_id: self._power(units)
+            group_id: _total_power(self, units)
             for group_id, units in self._current_groups.items()
         }
         main_group_id = self._main_group_id
@@ -464,11 +700,11 @@ class CombatControlAct(ActBase):
             components = self._spatial_clusters(units)
             core = max(
                 components,
-                key=lambda component: (self._power(component), len(component)),
+                key=lambda component: (_total_power(self, component), len(component)),
             )
             center = self._group_center(core)
             total_power = powers[group_id]
-            core_power = self._power(core)
+            core_power = _total_power(self, core)
             if total_power > 0:
                 cohesive_share = core_power / total_power
             else:
@@ -489,13 +725,16 @@ class CombatControlAct(ActBase):
                 "role": role,
                 "unit_count": len(units),
                 "power": round(powers[group_id], 2),
-                "nearest_zone_id": self._nearest_zone_id(center),
-                "unit_type_counts": self._unit_counts(units),
+                "nearest_zone_id": _nearest_zone_name(
+                    center,
+                    list(self.knowledge.zone_manager.expansion_zones),
+                ),
+                "unit_type_counts": _unit_counts(units),
                 "nearby_enemy_count": len(nearby_enemies),
                 "nearby_enemy_power": round(
-                    self._power(nearby_enemies), 2
+                    _total_power(self, nearby_enemies), 2
                 ),
-                "nearby_enemy_type_counts": self._unit_counts(
+                "nearby_enemy_type_counts": _unit_counts(
                     nearby_enemies
                 ),
                 # A broad but connected formation is cohesive. A small
@@ -509,11 +748,9 @@ class CombatControlAct(ActBase):
             }
             if current is not None:
                 state["current_command"] = {
-                    key: current[key]
-                    for key in (
-                        "destination_zone_id",
-                        "movement_mode",
-                    )
+                    "destination_zone_id": current.get("destination_zone_id"),
+                    "movement_mode": current.get("movement_mode"),
+                    "retreat_ratio": current.get("retreat_ratio"),
                 }
                 if current["movement_mode"] == "search_and_destroy":
                     state["search_target_zone_id"] = (
@@ -527,10 +764,25 @@ class CombatControlAct(ActBase):
                     max(
                         0.0,
                         float(getattr(self.ai, "time", 0.0))
-                        - current["issued_at"],
+                        - float(current.get("issued_at") or 0.0),
                     ),
                     1,
                 )
+                state["command_source"] = str(
+                    current.get("source") or "llm"
+                )
+            policy_state = self._retreat_states.get(group_id)
+            if (
+                policy_state is not None
+                and policy_state.state != STATE_ACTIVE
+            ):
+                state["policy_state"] = policy_state.state
+                state["policy_detail"] = policy_state.detail
+                state["command_source"] = "auto_retreat"
+                if policy_state.original_command is not None:
+                    state["blocked_mode"] = (
+                        policy_state.original_command.movement_mode
+                    )
             states.append(state)
         return states
 
@@ -546,7 +798,7 @@ class CombatControlAct(ActBase):
             clusters = self._spatial_clusters(units)
             selected = max(
                 clusters,
-                key=lambda cluster: (self._power(cluster), len(cluster)),
+                key=lambda cluster: (_total_power(self, cluster), len(cluster)),
             )
             living_main_tags = {unit.tag for unit in selected}
             self._main_group_id = self.MAIN_GROUP_ID
@@ -599,6 +851,7 @@ class CombatControlAct(ActBase):
             if group_id not in assigned:
                 del self._active_commands[group_id]
                 self._clear_search_state(group_id)
+                self._retreat_states.pop(group_id, None)
 
     def _living_main_tags(self, current_tags: set) -> set:
         """Keep main membership through temporary non-Army role changes."""
@@ -636,18 +889,6 @@ class CombatControlAct(ActBase):
             clusters.append(Units(cluster, self.ai))
         return clusters
 
-    def _nearest_zone_id(self, point: Point2) -> str:
-        zones = list(self.knowledge.zone_manager.expansion_zones)
-        if not zones:
-            return "unknown"
-        index = min(
-            range(len(zones)),
-            key=lambda value: point.distance_to(
-                zones[value].center_location
-            ),
-        )
-        return f"zone_{index}"
-
     @staticmethod
     def _group_center(units) -> Point2:
         amount = len(units)
@@ -659,28 +900,6 @@ class CombatControlAct(ActBase):
                 sum(unit.position.y for unit in units) / amount,
             )
         )
-    def _power(self, units) -> float:
-        if not units:
-            return 0.0
-        try:
-            return float(
-                self.unit_values.calc_total_power(units).power
-            )
-        except Exception:
-            return float(len(units))
-
-    @staticmethod
-    def _unit_counts(units) -> Dict[str, int]:
-        counts: Dict[str, int] = {}
-        for unit in units:
-            name = getattr(
-                getattr(unit, "type_id", None),
-                "name",
-                "UNKNOWN",
-            )
-            counts[name] = counts.get(name, 0) + 1
-        return counts
-
     def _configure_rules(
         self,
         command: ArmyGroupCommand,

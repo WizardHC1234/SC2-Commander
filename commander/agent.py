@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from llm.caller import call_openai_detailed, load_agent_pool
+from llm.caller import call_openai_detailed
 
 from commander.prompts import build_commander_messages
 from commander.tools import (
-    NON_MACRO_TOOL_NAMES,
+    _macro_keys,
     apply_tool_calls,
     army_group_ids_from_observation,
-    build_commander_tools,
-    normalize_tool_calls,
     parse_tool_calls_from_content,
     validate_army_tools_for_cycle,
 )
@@ -25,59 +23,7 @@ from commander.wake_events import (
 )
 
 
-def _macro_action_space(action_space: Dict[str, str]) -> Dict[str, str]:
-    return {
-        key: description
-        for key, description in action_space.items()
-        if key not in NON_MACRO_TOOL_NAMES
-    }
-
 logger = logging.getLogger("commander.agent")
-
-_NATIVE_TOOL_CHOICE_ERRORS = (
-    "enable-auto-tool-choice",
-    "tool-call-parser",
-    "tool_choice",
-    "tool choice",
-    "does not support tools",
-    "tools is not supported",
-)
-
-# After a model proves native tools are unavailable, keep using JSON for the
-# rest of this process so later decisions do not pay a failed native attempt.
-_json_fallback_models: Set[str] = set()
-
-
-def _resolve_preferred_tool_mode(model_key: str) -> str:
-    """Prefer JSON tool_calls in content; native tools= only when opted in.
-
-    Default is ``json`` (catalog in prompt; model emits JSON in content).
-    Set config ``tool_mode: "native"`` to use OpenAI ``tools=``. If native
-    fails as unsupported, the model is recorded in ``_json_fallback_models``
-    and later cycles stay on JSON for this process.
-    """
-    if model_key in _json_fallback_models:
-        return "json"
-    pool = (load_agent_pool().get("llm_agents_pool") or {}).get(model_key) or {}
-    mode = str(pool.get("tool_mode") or "json").strip().lower()
-    if mode == "native":
-        return "native"
-    return "json"
-
-
-def _is_native_tools_unsupported(error: str) -> bool:
-    text = (error or "").lower()
-    if not text:
-        return False
-    if any(token in text for token in _NATIVE_TOOL_CHOICE_ERRORS):
-        return True
-    # Broad catch for OpenAI-compatible servers that reject the tools field.
-    if "tool" in text and any(
-        word in text
-        for word in ("unsupported", "not support", "invalid", "unknown")
-    ):
-        return True
-    return False
 
 
 def _usage_as_dict(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -117,7 +63,6 @@ def _pack_outcome(
     issues: List[str],
     error: str,
     result: Dict[str, Any],
-    tool_mode: str,
     wake_event: Optional[Dict[str, Any]] = None,
     reflection_retries: int = 0,
     reflection_issues: Optional[List[str]] = None,
@@ -133,6 +78,7 @@ def _pack_outcome(
                 "group_id": c.group_id,
                 "destination_zone_id": c.destination_zone_id,
                 "movement_mode": c.movement_mode,
+                "retreat_ratio": c.retreat_ratio,
             }
             for c in policy.commands
         ],
@@ -168,7 +114,7 @@ def _pack_outcome(
         "finish_reason": result.get("finish_reason"),
         "content": content,
         "assistant_content": content,
-        "tool_mode": tool_mode,
+        "tool_mode": "json",
         "reflection_retries": reflection_retries,
         "reflection_issues": list(reflection_issues or []),
         "messages": deepcopy(prompt_messages or []),
@@ -178,8 +124,6 @@ def _pack_outcome(
         "usage_total": usage_total,
         "accepted": bool(accepted),
     }
-    if tool_mode == "native":
-        packed["raw_message"] = result.get("raw_message") or {}
     return packed
 
 
@@ -197,6 +141,16 @@ def _apply_parsed_calls(
     if full_observation is not None and callable(ensure_addon_parents):
         tasks = ensure_addon_parents(tasks, full_observation)
     return tasks, policy, issues, wake_event
+
+
+def _is_wake_blocking_issue(item: Any) -> bool:
+    text = str(item)
+    return (
+        text.startswith("wake_")
+        or "wake_unreachable" in text
+        or "wake_forbidden" in text
+        or "wake_event" in text
+    )
 
 
 def _blocking_decision_issues(
@@ -233,8 +187,6 @@ def run_commander_decision(
     race: str,
     strategy_description: str,
     observation_text: str,
-    previous_macro_tasks: List[Dict[str, Any]],
-    previous_army_summary: Optional[Dict[str, Any]],
     action_space: Dict[str, str],
     model_key: str,
     full_observation: Optional[Dict[str, Any]] = None,
@@ -243,63 +195,17 @@ def run_commander_decision(
     map_topology_text: str = "",
 ) -> Dict[str, Any]:
     """Call the model and return applied macro/army results."""
-    tool_mode = _resolve_preferred_tool_mode(model_key)
-    if tool_mode == "json":
-        return _run_with_wake_reflection(
-            race=race,
-            strategy_description=strategy_description,
-            observation_text=observation_text,
-            previous_macro_tasks=previous_macro_tasks,
-            previous_army_summary=previous_army_summary,
-            runtime_hint=runtime_hint,
-            map_topology_text=map_topology_text,
-            action_space=action_space,
-            model_key=model_key,
-            full_observation=full_observation,
-            ensure_addon_parents=ensure_addon_parents,
-            tool_mode="json",
-        )
-
-    # Opt-in native OpenAI tools=. Do NOT send tool_choice="auto" — many
-    # vLLM servers reject it unless started with --enable-auto-tool-choice.
-    outcome = _run_with_wake_reflection(
+    return _run_with_wake_reflection(
         race=race,
         strategy_description=strategy_description,
         observation_text=observation_text,
-        previous_macro_tasks=previous_macro_tasks,
-        previous_army_summary=previous_army_summary,
         runtime_hint=runtime_hint,
         map_topology_text=map_topology_text,
         action_space=action_space,
         model_key=model_key,
         full_observation=full_observation,
         ensure_addon_parents=ensure_addon_parents,
-        tool_mode="native",
     )
-    error = outcome.get("error") or ""
-    if error and _is_native_tools_unsupported(error):
-        _json_fallback_models.add(model_key)
-        logger.warning(
-            "Native tools unsupported for %s (%s); falling back to JSON "
-            "tool_mode for this process.",
-            model_key,
-            error[:160],
-        )
-        return _run_with_wake_reflection(
-            race=race,
-            strategy_description=strategy_description,
-            observation_text=observation_text,
-            previous_macro_tasks=previous_macro_tasks,
-            previous_army_summary=previous_army_summary,
-            runtime_hint=runtime_hint,
-            map_topology_text=map_topology_text,
-            action_space=action_space,
-            model_key=model_key,
-            full_observation=full_observation,
-            ensure_addon_parents=ensure_addon_parents,
-            tool_mode="json",
-        )
-    return outcome
 
 
 def _run_with_wake_reflection(
@@ -307,36 +213,23 @@ def _run_with_wake_reflection(
     race: str,
     strategy_description: str,
     observation_text: str,
-    previous_macro_tasks: List[Dict[str, Any]],
-    previous_army_summary: Optional[Dict[str, Any]],
     action_space: Dict[str, str],
     model_key: str,
     full_observation: Optional[Dict[str, Any]],
     ensure_addon_parents,
     runtime_hint: str,
     map_topology_text: str,
-    tool_mode: str,
 ) -> Dict[str, Any]:
-    macro_space = _macro_action_space(action_space)
-    # JSON mode has no native tools payload, so pass the full Action.py catalog
-    # (macro + army + meta descriptions) into the prompt. Native mode only needs
-    # macro names in the prompt text; tool descriptions arrive via tools=.
-    prompt_action_space = (
-        action_space if tool_mode == "json" else macro_space
-    )
+    macro_space = _macro_keys(action_space)
     messages = build_commander_messages(
         race=race,
         strategy_description=strategy_description,
         observation_text=observation_text,
-        previous_macro_tasks=previous_macro_tasks,
-        previous_army_summary=previous_army_summary,
         runtime_hint=runtime_hint,
         map_topology_text=map_topology_text,
-        tool_mode=tool_mode,
-        action_space=prompt_action_space,
+        action_space=action_space,
     )
     prompt_messages = deepcopy(messages)
-    tools = build_commander_tools(action_space) if tool_mode == "native" else None
 
     reflection_retries = 0
     reflection_issues: List[str] = []
@@ -347,13 +240,7 @@ def _run_with_wake_reflection(
     latency_total = 0.0
 
     while True:
-        call_kwargs: Dict[str, Any] = {
-            "model_key": model_key,
-            "timeout": 120.0,
-        }
-        if tools is not None:
-            call_kwargs["tools"] = tools
-        result = call_openai_detailed(messages, **call_kwargs)
+        result = call_openai_detailed(messages, model_key=model_key, timeout=120.0)
         last_result = result
         last_error = result.get("error") or ""
         usage = _usage_as_dict(result)
@@ -364,16 +251,8 @@ def _run_with_wake_reflection(
         except (TypeError, ValueError):
             pass
 
-        if tool_mode == "native":
-            raw_message = result.get("raw_message") or {}
-            tool_calls = normalize_tool_calls(raw_message.get("tool_calls"))
-            if not tool_calls and (result.get("content") or ""):
-                tool_calls = parse_tool_calls_from_content(
-                    result.get("content") or ""
-                )
-        else:
-            content = result.get("content") or ""
-            tool_calls = parse_tool_calls_from_content(content)
+        content = result.get("content") or ""
+        tool_calls = parse_tool_calls_from_content(content)
 
         tasks, policy, issues, wake_event = _apply_parsed_calls(
             tool_calls,
@@ -381,7 +260,7 @@ def _run_with_wake_reflection(
             full_observation=full_observation,
             ensure_addon_parents=ensure_addon_parents,
         )
-        if tool_mode == "json" and not tool_calls and not last_error:
+        if not tool_calls and not last_error:
             issues = list(issues) + ["no_tool_calls_parsed"]
 
         blocking = _blocking_decision_issues(
@@ -400,7 +279,6 @@ def _run_with_wake_reflection(
                 issues=issues,
                 error=last_error,
                 result=last_result,
-                tool_mode=tool_mode,
                 wake_event=wake_event,
                 reflection_retries=reflection_retries,
                 reflection_issues=reflection_issues,
@@ -424,13 +302,36 @@ def _run_with_wake_reflection(
                 reflection_retries,
                 blocking[:5],
             )
-            wake_ok = not any(
-                str(item).startswith("wake_")
-                or "wake_unreachable" in str(item)
-                or "wake_forbidden" in str(item)
-                or "wake_event" in str(item)
-                for item in blocking
-            )
+            non_wake_blocking = [
+                item for item in blocking if not _is_wake_blocking_issue(item)
+            ]
+            if not non_wake_blocking and tool_calls and not last_error:
+                # Wake-only failure: the macro/army tools themselves passed
+                # validation, so apply them and let the bot arm the fallback
+                # wake. Inheriting the previous decision here would discard a
+                # valid tool set and can deadlock macro on a stale decision.
+                # (Empty parses / call errors still take the inherit path so
+                # active tasks are never wiped by a contentless response.)
+                packed = _pack_outcome(
+                    tool_calls=tool_calls,
+                    tasks=tasks,
+                    policy=policy,
+                    issues=issues,
+                    error=last_error,
+                    result=last_result,
+                    wake_event=None,
+                    reflection_retries=reflection_retries,
+                    reflection_issues=blocking,
+                    prompt_messages=prompt_messages,
+                    messages_transcript=messages,
+                    reflection_rounds=reflection_rounds,
+                    usage_parts=usage_parts,
+                    accepted=True,
+                )
+                packed["latency_seconds"] = latency_total or packed.get(
+                    "latency_seconds"
+                )
+                return packed
             packed = _pack_outcome(
                 tool_calls=tool_calls,
                 tasks=tasks,
@@ -438,8 +339,7 @@ def _run_with_wake_reflection(
                 issues=issues,
                 error=last_error,
                 result=last_result,
-                tool_mode=tool_mode,
-                wake_event=wake_event if wake_ok else None,
+                wake_event=None,
                 reflection_retries=reflection_retries,
                 reflection_issues=blocking,
                 prompt_messages=prompt_messages,

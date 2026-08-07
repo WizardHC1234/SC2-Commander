@@ -7,7 +7,6 @@ import unittest
 from commander.tools import (
     apply_tool_calls,
     army_group_ids_from_observation,
-    build_commander_tools,
     validate_army_tools_for_cycle,
 )
 from commander.combat_policy import ArmyControlPolicy, ArmyGroupCommand
@@ -204,15 +203,6 @@ class EvaluateWakeEventTests(unittest.TestCase):
                     },
                 }
             ],
-            army_summary={
-                "commands": [
-                    {
-                        "group_id": "group_0",
-                        "destination_zone_id": "zone_5",
-                        "movement_mode": "regroup",
-                    }
-                ]
-            },
             available_zones=[
                 {
                     "zone_id": "zone_5",
@@ -221,7 +211,6 @@ class EvaluateWakeEventTests(unittest.TestCase):
                     "visible_enemy_units": 0,
                 }
             ],
-            last_scout_result="completed",
             scan_ready=True,
             cleanup_hint_present=False,
         )
@@ -335,40 +324,6 @@ class EvaluateWakeEventTests(unittest.TestCase):
         self.assertFalse(evaluate_wake_event(event, self.snapshot))
         self.snapshot["time_seconds"] = 110.0
         self.assertTrue(evaluate_wake_event(event, self.snapshot))
-
-    def test_scout_result_aliases_reached(self):
-        # scout_* is disabled at normalize; evaluate still accepts aliases.
-        event = {
-            "logic": "any",
-            "conditions": [
-                {"type": "scout_result_is", "result": "completed"},
-            ],
-        }
-        snap = build_wake_snapshot(
-            time_seconds=10.0,
-            last_scout_result="reached",
-        )
-        self.assertTrue(evaluate_wake_event(event, snap))
-
-    def test_scout_just_finished_requires_result_after_arm(self):
-        event = {
-            "logic": "any",
-            "conditions": [{"type": "scout_just_finished"}],
-        }
-        stale = build_wake_snapshot(
-            time_seconds=100.0,
-            last_scout_result="completed",
-            last_scout_result_time=50.0,
-            wake_armed_at=80.0,
-        )
-        self.assertFalse(evaluate_wake_event(event, stale))
-        fresh = build_wake_snapshot(
-            time_seconds=100.0,
-            last_scout_result="completed",
-            last_scout_result_time=90.0,
-            wake_armed_at=80.0,
-        )
-        self.assertTrue(evaluate_wake_event(event, fresh))
 
     def test_objective_status_became(self):
         event, _ = normalize_wake_event(
@@ -520,19 +475,6 @@ class ApplyToolCallsWakeTests(unittest.TestCase):
         )
         self.assertEqual(wake["logic"], "all")
         self.assertEqual(wake["conditions"][0]["seconds"], 99)
-
-    def test_build_tools_includes_set_wake_event(self):
-        tools = build_commander_tools(
-            {
-                "train_scv": "Train SCVs",
-                "move_group": "Move army",
-                "set_wake_event": "Wake next",
-            }
-        )
-        names = [t["function"]["name"] for t in tools]
-        self.assertIn("set_wake_event", names)
-        self.assertIn("train_scv", names)
-        self.assertIn("move_group", names)
 
 
 class ArmyToolValidationTests(unittest.TestCase):

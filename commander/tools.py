@@ -1,4 +1,4 @@
-"""Commander Agent: OpenAI tool_calls schema and application helpers."""
+"""Commander Agent: JSON tool_calls parsing and application helpers."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from commander.combat_policy import (
     ArmyControlPolicy,
     ArmyGroupCommand,
 )
+from commander.retreat_policy import clamp_retreat_ratio
 from commander.wake_events import normalize_wake_event
 
 # Must match Action.py entries with type == "army" / "meta".
@@ -24,302 +25,6 @@ def _macro_keys(action_space: Dict[str, str]) -> Dict[str, str]:
         for name, description in action_space.items()
         if name not in NON_MACRO_TOOL_NAMES
     }
-
-
-def build_macro_tools(action_space: Dict[str, str]) -> List[Dict[str, Any]]:
-    """One OpenAI function tool per macro Action.py key (to_count)."""
-    tools: List[Dict[str, Any]] = []
-    for name, description in _macro_keys(action_space).items():
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": description or f"Set absolute target for {name}",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "to_count": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "description": (
-                                    "Absolute target count on the field "
-                                    "(including under construction). "
-                                    "For expand: desired active mineral-bearing bases."
-                                ),
-                            }
-                        },
-                        "required": ["to_count"],
-                        "additionalProperties": False,
-                    },
-                },
-            }
-        )
-    return tools
-
-
-def build_army_tools(action_space: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
-    """Army-control tools; descriptions prefer Action.py registry when provided."""
-    space = action_space or {}
-    modes = sorted(ALLOWED_MOVEMENT_MODES)
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "move_group",
-                "description": space.get(
-                    "move_group",
-                    (
-                        "Command one army_group to a destination zone with a movement mode. "
-                        "Call exactly once per group_id in army_groups; omit when empty."
-                    ),
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "group_id": {
-                            "type": "string",
-                            "description": (
-                                "Exact group_id from this cycle's army_groups "
-                                "(e.g. group_0). Must exist in the observation."
-                            ),
-                        },
-                        "destination_zone_id": {
-                            "type": "string",
-                            "description": (
-                                "Exact zone_id from the observation zone table "
-                                "(e.g. zone_5). Must exist in the observation."
-                            ),
-                        },
-                        "movement_mode": {
-                            "type": "string",
-                            "enum": modes,
-                            "description": (
-                                "How the group moves: regroup (safe gather), push, "
-                                "assault, harass, hold (settle at the zone and fight "
-                                "only what comes in range), contain (settle outside "
-                                "an enemy zone, never enter), defensive_retreat, "
-                                "panic_retreat, or search_and_destroy (only with a "
-                                "runtime hint)."
-                            ),
-                        },
-                    },
-                    "required": [
-                        "group_id",
-                        "destination_zone_id",
-                        "movement_mode",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "scanner_sweep",
-                "description": space.get(
-                    "scanner_sweep",
-                    (
-                        "Request one Scanner Sweep on a zone (50 Orbital energy). "
-                        "Omit to request no scan."
-                    ),
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "zone_id": {
-                            "type": "string",
-                            "description": (
-                                "Exact zone_id from the observation (e.g. zone_5). "
-                                "Must exist in the observation."
-                            ),
-                        }
-                    },
-                    "required": ["zone_id"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "scout",
-                "description": space.get(
-                    "scout",
-                    (
-                        "Send or keep one SCV zone scout. Omit to cancel any active scout."
-                    ),
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "zone_id": {
-                            "type": "string",
-                            "description": (
-                                "Exact zone_id from the observation (e.g. zone_3). "
-                                "If a scout is already active, repeat the same zone_id "
-                                "to preserve it."
-                            ),
-                        }
-                    },
-                    "required": ["zone_id"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-    ]
-
-
-def build_meta_tools(action_space: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
-    """Meta tools for decision scheduling (wake events)."""
-    space = action_space or {}
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "set_wake_event",
-                "description": space.get(
-                    "set_wake_event",
-                    (
-                        "Required each cycle: set one composite wake condition for "
-                        "the next Commander decision (logic all|any over whitelist "
-                        "predicates). Omit only if you accept the now+60 fallback."
-                    ),
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "logic": {
-                            "type": "string",
-                            "enum": ["all", "any"],
-                            "description": (
-                                "Combine conditions with AND (all) or OR (any)."
-                            ),
-                        },
-                        "conditions": {
-                            "type": "array",
-                            "minItems": 1,
-                            "description": (
-                                "Whitelist predicates: unit_count_at_least / unit_count_less_than "
-                                "{unit,count}; objective_status_became "
-                                "{status}; destination_reached; scan_ready; "
-                                "cleanup_hint_present; game_time_at_least {seconds}; "
-                                "supply_left_at_most {count}. Do not use "
-                                "scout_result_is, scout_just_finished, "
-                                "movement_mode_in, movement_mode_not_in, "
-                                "army_group_count_at_least, "
-                                "army_group_count_less_than, or "
-                                "objective_status_is."
-                            ),
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "type": {
-                                        "type": "string",
-                                        "description": "Predicate type name.",
-                                    },
-                                    "unit": {
-                                        "type": "string",
-                                        "description": (
-                                            "Unit type name for unit_count_* "
-                                            "(e.g. Marine)."
-                                        ),
-                                    },
-                                    "count": {
-                                        "type": "integer",
-                                        "minimum": 0,
-                                        "description": (
-                                            "Threshold for count-based predicates."
-                                        ),
-                                    },
-                                    "modes": {
-                                        "type": "array",
-                                        "items": {"type": "string"},
-                                        "description": (
-                                            "Movement modes for movement_mode_*."
-                                        ),
-                                    },
-                                    "status": {
-                                        "type": "string",
-                                        "description": (
-                                            "Objective status for "
-                                            "objective_status_became "
-                                            "(e.g. confirmed_clear)."
-                                        ),
-                                    },
-                                    "result": {
-                                        "type": "string",
-                                        "description": (
-                                            "Scout result for scout_result_is: "
-                                            "completed, killed_en_route, or "
-                                            "interrupted (reached aliases completed)."
-                                        ),
-                                    },
-                                    "seconds": {
-                                        "type": "number",
-                                        "minimum": 0,
-                                        "description": (
-                                            "Absolute game time for game_time_at_least."
-                                        ),
-                                    },
-                                },
-                                "required": ["type"],
-                                "additionalProperties": False,
-                            },
-                        },
-                    },
-                    "required": ["logic", "conditions"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-    ]
-
-
-def build_commander_tools(action_space: Dict[str, str]) -> List[Dict[str, Any]]:
-    """Flat tool list from unified Action registry (macro + army + meta)."""
-    return (
-        build_macro_tools(action_space)
-        + build_army_tools(action_space)
-        + build_meta_tools(action_space)
-    )
-
-
-def normalize_tool_calls(raw_tool_calls: Any) -> List[Dict[str, Any]]:
-    """Normalize SDK / dict tool_calls into [{id,name,arguments_obj}]."""
-    import json
-
-    if not raw_tool_calls:
-        return []
-    out: List[Dict[str, Any]] = []
-    for item in raw_tool_calls:
-        if item is None:
-            continue
-        if isinstance(item, dict):
-            fn = item.get("function") or {}
-            name = fn.get("name") or item.get("name")
-            args_raw = fn.get("arguments") or item.get("arguments") or "{}"
-            call_id = item.get("id") or ""
-        else:
-            fn = getattr(item, "function", None)
-            name = getattr(fn, "name", None) if fn is not None else getattr(item, "name", None)
-            args_raw = (
-                getattr(fn, "arguments", None) if fn is not None else getattr(item, "arguments", None)
-            ) or "{}"
-            call_id = getattr(item, "id", "") or ""
-        if not isinstance(name, str) or not name:
-            continue
-        if isinstance(args_raw, dict):
-            args_obj = args_raw
-        else:
-            try:
-                args_obj = json.loads(args_raw)
-            except Exception:
-                args_obj = {}
-            if not isinstance(args_obj, dict):
-                args_obj = {}
-        out.append({"id": call_id, "name": name, "arguments": args_obj})
-    return out
 
 
 def _extract_tool_calls_payload(data: Any) -> Optional[Dict[str, Any]]:
@@ -375,7 +80,7 @@ def _loads_tool_json(text: str) -> Any:
 
 
 def parse_tool_calls_from_content(text: str) -> List[Dict[str, Any]]:
-    """Parse JSON tool_calls embedded in assistant content (vLLM / no native tools).
+    """Parse JSON tool_calls embedded in assistant content.
 
     Falls back to ``json_repair`` when the model emits broken braces/commas, which
     is common with JSON tool_mode (e.g. ``\"seconds\":1438}}]``).
@@ -536,7 +241,7 @@ def apply_tool_calls(
             continue
 
         if name == "scanner_sweep":
-            zone = _optional_zone(args.get("zone_id"), "zone_id")
+            zone = _optional_zone(args.get("zone_id"))
             if zone is None:
                 issues.append("scanner_sweep:bad_zone")
                 continue
@@ -545,7 +250,7 @@ def apply_tool_calls(
             continue
 
         if name == "scout":
-            zone = _optional_zone(args.get("zone_id"), "zone_id")
+            zone = _optional_zone(args.get("zone_id"))
             if zone is None:
                 issues.append("scout:bad_zone")
                 continue
@@ -595,10 +300,22 @@ def _parse_move_group(args: Dict[str, Any]) -> ArmyGroupCommand:
         destination_zone_id=zone_id,
         movement_mode=mode,
         move_type=MOVE_TYPE_BY_MOVEMENT_MODE[mode],
+        retreat_ratio=_parse_retreat_ratio(args.get("retreat_ratio")),
     )
 
 
-def _optional_zone(value: Any, field: str) -> Optional[str]:
+def _parse_retreat_ratio(value: Any) -> Optional[float]:
+    """Soft-parse: a bad value falls back to the runtime default instead of
+    dropping the whole move_group command."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return round(clamp_retreat_ratio(float(value)), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_zone(value: Any) -> Optional[str]:
     if value is None:
         return None
     if not isinstance(value, str):
