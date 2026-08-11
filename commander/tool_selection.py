@@ -1,14 +1,9 @@
-"""Pre-match strategy tool selection (automated harness exposure surface).
+"""Select a compact tool surface from the natural-language strategy.
 
-Flow (once per match, before the first Commander decision):
-
-1. Deterministically map ``# Resource Costs`` labels → Action.py tools.
-2. Ask the LLM only to **add** missing macro tools (never remove required ones).
-3. Always keep army/meta tools. Validate names against the full registry.
-4. Cache the filtered action space for every later decision cycle.
-
-The model never sees the full race catalog during play; selection is automated
-from the strategy document with a single optional LLM add-pass.
+Once per match, a selector reads the whole strategy and chooses strategic macro
+tools from the full race catalog. Race-specific metadata then expands those
+choices to their transitive production and technology prerequisites. If semantic
+selection is unavailable or invalid, the safe fallback is the full catalog.
 """
 
 from __future__ import annotations
@@ -16,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 from llm.caller import call_openai_detailed
 
@@ -24,138 +19,16 @@ from commander.tools import NON_MACRO_TOOL_NAMES
 
 logger = logging.getLogger("commander.tool_selection")
 
-_RESOURCE_COSTS_HEADER_RE = re.compile(
-    r"^\s*#\s*Resource\s+Costs\s*$",
-    re.MULTILINE | re.IGNORECASE,
-)
-_NEXT_HEADER_RE = re.compile(r"^\s*#\s+\S+", re.MULTILINE)
-_COST_LINE_RE = re.compile(r"^\s*[-*]\s+([^:\n]+)\s*:", re.MULTILINE)
-
-# Display name (strategy Resource Costs label) → Action.py key(s).
-# Keep aliases short and race-agnostic where possible; unknown labels are logged.
-_LABEL_TO_TOOLS: Dict[str, Tuple[str, ...]] = {
-    "scv": ("train_scv",),
-    "marine": ("train_marine",),
-    "marauder": ("train_marauder",),
-    "reaper": ("train_reaper",),
-    "ghost": ("train_ghost",),
-    "hellion": ("train_hellion",),
-    "hellbat": ("train_hellbat",),
-    "widow mine": ("train_widow_mine",),
-    "cyclone": ("train_cyclone",),
-    "siege tank": ("train_siege_tank",),
-    "thor": ("train_thor",),
-    "viking": ("train_viking",),
-    "medivac": ("train_medivac",),
-    "liberator": ("train_liberator",),
-    "raven": ("train_raven",),
-    "banshee": ("train_banshee",),
-    "battlecruiser": ("train_battlecruiser",),
-    "supply depot": ("build_supply_depot",),
-    "refinery": ("build_gas",),
-    "barracks": ("build_barracks",),
-    "factory": ("build_factory",),
-    "starport": ("build_starport",),
-    "engineering bay": ("build_engineering_bay",),
-    "armory": ("build_armory",),
-    "ghost academy": ("build_ghost_academy",),
-    "fusion core": ("build_fusion_core",),
-    "bunker": ("build_bunker",),
-    "missile turret": ("build_missile_turret",),
-    "sensor tower": ("build_sensor_tower",),
-    "barracks tech lab": ("build_barracks_techlab",),
-    "barracks reactor": ("build_barracks_reactor",),
-    "factory tech lab": ("build_factory_techlab",),
-    "factory reactor": ("build_factory_reactor",),
-    "starport tech lab": ("build_starport_techlab",),
-    "starport reactor": ("build_starport_reactor",),
-    "command center": ("expand",),
-    "orbital command": ("morph_orbital_command",),
-    "planetary fortress": ("morph_planetary_fortress",),
-    "yamato cannon": ("research_yamato_cannon",),
-    "combat shield": ("research_shieldwall",),
-    "stimpack": ("research_stimpack",),
-    "concussive shells": ("research_concussive_shells",),
-    "scanner sweep": ("scanner_sweep",),
-}
-
-# Always useful for Terran macro even when the cost line is terse.
-_DEFAULT_MACRO_EXTRAS: Tuple[str, ...] = (
+# Safe universal Terran surface. Strategic tools and their prerequisites are added
+# by semantic selection and the race-specific dependency resolver.
+_DEFAULT_MACRO_EXTRAS: tuple[str, ...] = (
     "build_supply_depot",
     "expand",
+    "morph_orbital_command",
     "train_scv",
 )
 
-
-def extract_resource_cost_labels(strategy_text: str) -> List[str]:
-    """Return ordered Resource Costs labels from strategy markdown."""
-    text = strategy_text or ""
-    header = _RESOURCE_COSTS_HEADER_RE.search(text)
-    if not header:
-        return []
-    rest = text[header.end() :]
-    next_header = _NEXT_HEADER_RE.search(rest)
-    block = rest[: next_header.start()] if next_header else rest
-    labels: List[str] = []
-    seen: Set[str] = set()
-    for match in _COST_LINE_RE.finditer(block):
-        label = " ".join(match.group(1).strip().split())
-        key = label.lower()
-        if not label or key in seen:
-            continue
-        seen.add(key)
-        labels.append(label)
-    return labels
-
-
-def tools_from_resource_cost_labels(
-    labels: Sequence[str],
-    *,
-    full_action_space: Dict[str, str],
-) -> Tuple[Set[str], List[str]]:
-    """Map cost labels to registry tools. Returns (tools, unmatched_labels)."""
-    known = set(full_action_space)
-    selected: Set[str] = set()
-    unmatched: List[str] = []
-    for label in labels:
-        mapped = _LABEL_TO_TOOLS.get(label.strip().lower())
-        if not mapped:
-            unmatched.append(label)
-            continue
-        for name in mapped:
-            if name in known:
-                selected.add(name)
-            else:
-                unmatched.append(f"{label}->{name}")
-    return selected, unmatched
-
-
-def required_tools_from_strategy(
-    strategy_text: str,
-    *,
-    full_action_space: Dict[str, str],
-) -> Dict[str, Any]:
-    """Deterministic required set: Resource Costs + defaults + army/meta."""
-    labels = extract_resource_cost_labels(strategy_text)
-    mapped, unmatched = tools_from_resource_cost_labels(
-        labels, full_action_space=full_action_space
-    )
-    known = set(full_action_space)
-    required = set(mapped)
-    for name in _DEFAULT_MACRO_EXTRAS:
-        if name in known:
-            required.add(name)
-    for name in NON_MACRO_TOOL_NAMES:
-        if name in known:
-            required.add(name)
-    return {
-        "labels": labels,
-        "required_tools": sorted(required),
-        "unmatched_labels": unmatched,
-    }
-
-
-def _parse_add_list(content: str) -> List[str]:
+def _parse_select_list(content: str) -> List[str]:
     text = (content or "").strip()
     if not text:
         return []
@@ -174,7 +47,7 @@ def _parse_add_list(content: str) -> List[str]:
             continue
         if not isinstance(data, dict):
             continue
-        raw = data.get("add", data.get("tools", data.get("tool_names")))
+        raw = data.get("select", data.get("tools", data.get("tool_names")))
         if isinstance(raw, str):
             raw = [raw]
         if not isinstance(raw, list):
@@ -221,29 +94,36 @@ def build_tool_selection_messages(
     *,
     strategy_text: str,
     full_action_space: Dict[str, str],
-    required_tools: Sequence[str],
 ) -> List[Dict[str, str]]:
-    required_sorted = sorted(required_tools)
     catalog = _format_catalog_grouped(full_action_space)
     system = (
-        "You prepare the Commander tool exposure surface for one StarCraft II "
-        "match. The harness already derived a REQUIRED tool set from the "
-        "strategy Resource Costs. Your only job is to ADD macro tools that are "
-        "clearly needed to execute the strategy but are missing from REQUIRED.\n\n"
+        "You select the strategic Commander macro tools for one StarCraft II "
+        "match. Read the entire natural-language strategy and choose the tools "
+        "that express its intended units, production structures, add-ons, "
+        "upgrades, defenses, and economy.\n\n"
         "Rules:\n"
-        "- Do not remove or replace REQUIRED tools.\n"
-        "- Prefer fewer tools; do not add unused race tech/upgrades.\n"
-        "- Army/meta tools are handled by the harness; you may omit them.\n"
-        "- Output ONE JSON object only: {\"add\":[\"tool_name\",...]} "
-        "(use [] if nothing to add). No markdown fences, no prose."
+        "- The strategy is authoritative for intent; catalog descriptions are "
+        "authoritative for costs, producers, research locations, and prerequisites.\n"
+        "- Select strategic goals, not every noun mentioned in scouting, enemy, "
+        "cleanup, examples, or negative constraints. A statement such as 'no "
+        "upgrades' must not select upgrade tools.\n"
+        "- Do not select structural prerequisites merely because another chosen "
+        "tool needs them; the harness computes the dependency closure.\n"
+        "- Basic SCV, supply, expansion, Orbital, army and scheduling tools are "
+        "added by the harness; omit them unless they are themselves a special "
+        "strategic focus.\n"
+        "- The harness also adds the Refinery tool automatically when selected "
+        "actions consume vespene gas.\n"
+        "- Prefer a compact set, but include every explicitly intended combat "
+        "unit, production addon, upgrade, and static defense.\n"
+        "- Output ONE JSON object only: {\"select\":[\"tool_name\",...]} "
+        "with exact catalog names. No markdown fences, no prose."
     )
     user = (
         f"[Strategy]\n{(strategy_text or '').strip()}\n\n"
-        f"[REQUIRED tools — keep all]\n"
-        + "\n".join(f"- {name}" for name in required_sorted)
-        + "\n\n[Full Action catalog]\n"
+        "[Full Action catalog]\n"
         + catalog
-        + "\n\nReturn JSON {\"add\":[...]} now."
+        + "\n\nReturn JSON {\"select\":[...]} now."
     )
     return [
         {"role": "system", "content": system},
@@ -254,18 +134,11 @@ def build_tool_selection_messages(
 def merge_selected_tools(
     *,
     full_action_space: Dict[str, str],
-    required_tools: Iterable[str],
-    added_tools: Iterable[str] = (),
+    selected_tools: Iterable[str],
 ) -> Dict[str, str]:
-    """Union required+added, drop unknown names, always keep army/meta."""
+    """Drop unknown names and always keep army/meta tools."""
     known = set(full_action_space)
-    names: Set[str] = set()
-    for name in required_tools:
-        if name in known:
-            names.add(name)
-    for name in added_tools:
-        if name in known:
-            names.add(name)
+    names = {name for name in selected_tools if name in known}
     for name in NON_MACRO_TOOL_NAMES:
         if name in known:
             names.add(name)
@@ -278,23 +151,28 @@ def select_tools_for_strategy(
     full_action_space: Dict[str, str],
     model_key: str = "",
     use_llm: bool = True,
+    dependency_resolver: Optional[Callable[..., Set[str]]] = None,
 ) -> Dict[str, Any]:
-    """Run the automated selection pipeline. Safe if the LLM call fails."""
-    seed = required_tools_from_strategy(
-        strategy_text, full_action_space=full_action_space
-    )
-    required = list(seed["required_tools"])
-    added: List[str] = []
+    """Select semantic tools, expand dependencies, or safely expose everything."""
+    known = set(full_action_space)
+    baseline = {
+        name
+        for name in (*_DEFAULT_MACRO_EXTRAS, *NON_MACRO_TOOL_NAMES)
+        if name in known
+    }
+    semantic: List[str] = []
+    dependencies: Set[str] = set()
     llm_error = ""
     llm_content = ""
     llm_latency = None
     messages: List[Dict[str, str]] = []
+    fallback_reason = ""
+    dependency_error = ""
 
     if use_llm and (model_key or "").strip():
         messages = build_tool_selection_messages(
             strategy_text=strategy_text,
             full_action_space=full_action_space,
-            required_tools=required,
         )
         result = call_openai_detailed(
             messages, model_key=model_key.strip(), timeout=90.0
@@ -303,35 +181,70 @@ def select_tools_for_strategy(
         llm_error = str(result.get("error") or "")
         llm_latency = result.get("latency_seconds")
         if not llm_error:
-            parsed = _parse_add_list(llm_content)
-            known = set(full_action_space)
-            required_set = set(required)
-            added = [
+            parsed = _parse_select_list(llm_content)
+            semantic = list(dict.fromkeys(name for name in parsed if name in known))
+            strategic_macro = [
                 name
-                for name in parsed
-                if name in known and name not in required_set
+                for name in semantic
+                if name not in baseline and name not in NON_MACRO_TOOL_NAMES
             ]
+            if not strategic_macro:
+                fallback_reason = "empty_or_invalid_selection"
         else:
+            fallback_reason = "llm_error"
             logger.warning(
-                "tool selection LLM failed (%s); using required set only",
+                "tool selection LLM failed (%s); exposing full catalog",
                 llm_error,
             )
     elif use_llm:
         llm_error = "missing_model_key"
-        logger.warning("tool selection skipped LLM: missing model_key")
+        fallback_reason = "missing_model_key"
+        logger.warning("tool selection skipped LLM: exposing full catalog")
+    else:
+        fallback_reason = "llm_disabled"
 
-    action_space = merge_selected_tools(
-        full_action_space=full_action_space,
-        required_tools=required,
-        added_tools=added,
-    )
+    fallback_used = bool(fallback_reason)
+    if fallback_used:
+        action_space = dict(full_action_space)
+    else:
+        seed = baseline | set(semantic)
+        expanded = set(seed)
+        if dependency_resolver is not None:
+            try:
+                expanded = set(
+                    dependency_resolver(seed, known_action_names=known)
+                )
+            except Exception as exc:
+                dependency_error = f"{type(exc).__name__}: {exc}"
+                fallback_reason = "dependency_resolver_error"
+                fallback_used = True
+                logger.exception(
+                    "tool dependency expansion failed; exposing full catalog"
+                )
+        else:
+            dependency_error = "missing dependency resolver"
+            fallback_reason = "dependency_resolver_error"
+            fallback_used = True
+            logger.error(
+                "tool dependency resolver missing; exposing full catalog"
+            )
+        if fallback_used:
+            action_space = dict(full_action_space)
+        else:
+            dependencies = expanded - seed
+            action_space = merge_selected_tools(
+                full_action_space=full_action_space,
+                selected_tools=expanded,
+            )
     return {
         "action_space": action_space,
-        "required_tools": required,
-        "added_tools": added,
+        "baseline_tools": sorted(baseline),
+        "semantic_tools": semantic,
+        "dependency_tools": sorted(dependencies),
         "selected_tools": sorted(action_space),
-        "labels": seed["labels"],
-        "unmatched_labels": seed["unmatched_labels"],
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
+        "dependency_error": dependency_error,
         "llm_error": llm_error,
         "llm_content": llm_content,
         "llm_latency_seconds": llm_latency,

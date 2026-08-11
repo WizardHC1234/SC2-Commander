@@ -71,6 +71,7 @@ DEFAULT_FORCE_STRATEGY = "tank"
 
 # --- 其它 ---
 DEFAULT_SKIP_VERSION_UPDATE = False  # True：跳过 version.txt 更新（批量并发时防 IO 锁）
+DEFAULT_EXTRACT_ENEMY_TRUTH = True  # 赛后从 Replay 提取敌方玩家真实状态
 
 
 class _TeeStream:
@@ -330,6 +331,7 @@ def play_vs_ai(
     skip_version_update: bool = DEFAULT_SKIP_VERSION_UPDATE,
     force_strategy: Optional[str] = None,
     profile: bool = False,
+    extract_enemy_truth: bool = DEFAULT_EXTRACT_ENEMY_TRUTH,
 ) -> None:
     force_strategy = _resolve_force_strategy(force_strategy)
     _install_interrupt_flush_handlers()
@@ -476,6 +478,22 @@ def play_vs_ai(
                     stats.sort_stats("tottime").print_stats(80)
                     stats.sort_stats("cumulative").print_stats(50)
                 print(f" ▷ Profile   : {profile_path}")
+
+        if extract_enemy_truth:
+            record_path = os.path.join(record_dir, f"{match_id}.json")
+            replay_path = os.path.join(record_dir, f"{match_id}.SC2Replay")
+            if os.path.isfile(record_path) and os.path.isfile(replay_path):
+                try:
+                    from evol_agent.analysis.replay_truth import (
+                        extract_enemy_truth as extract_truth,
+                    )
+
+                    truth_path = extract_truth(record_path)
+                    print(f" ▷ Enemy truth: {truth_path}")
+                except Exception as exc:
+                    # The original match record and replay remain valid if
+                    # optional post-match extraction fails.
+                    print(f" ▷ Enemy truth extraction failed: {exc}")
     finally:
         if direct_log is not None:
             sys.stdout = original_stdout
@@ -531,6 +549,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Run the match under cProfile and dump hot functions to the record dir.",
     )
+    p.add_argument(
+        "--extract-enemy-truth",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_EXTRACT_ENEMY_TRUTH,
+        help="After the match, replay it from player 2 and save *.enemy_truth.json.",
+    )
 
     return p.parse_args(argv)
 
@@ -553,6 +577,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         skip_version_update=ns.skip_version_update,
         force_strategy=ns.force_strategy,
         profile=ns.profile,
+        extract_enemy_truth=ns.extract_enemy_truth,
     )
 
 if __name__ == "__main__":

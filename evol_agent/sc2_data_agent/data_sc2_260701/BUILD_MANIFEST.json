@@ -1,0 +1,624 @@
+{
+  "schema_version": "sc2-dataset-build-manifest-v1",
+  "generated_at": "2026-07-01T04:10:43.932155Z",
+  "source_database": "C:\\code\\SC2_relation_0630\\data_ref\\data_base_add_graph.json",
+  "output_database": "C:\\code\\SC2_relation_0630\\data_sc2_260701\\data_base_sc2_260701.json",
+  "merge": {
+    "base": 4427,
+    "postprocessed": 104,
+    "overlap": 68,
+    "merged": 4463,
+    "counts": {
+      "counters": 2217,
+      "enables_morph": 20,
+      "garrisons_in": 342,
+      "grants_stat_bonus": 1353,
+      "synergizes_with": 531
+    }
+  },
+  "database": {
+    "old_semantic_removed": 989,
+    "structured_relations": 2034,
+    "entity_semantic_relations": 4463,
+    "ontology_subject_relations": 6,
+    "total_stored_relations": 6503
+  },
+  "markdown": {
+    "count": 116,
+    "by_race": {
+      "Protoss": 38,
+      "Terran": 36,
+      "Zerg": 42
+    },
+    "files": [
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/adept.md",
+        "destination": "markdown/Protoss/adept.md",
+        "sha256": "e11c9226eb8142aa27f5bd027c6e367d2fe3fa769e43c841f87805e626a259f7"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/archon.md",
+        "destination": "markdown/Protoss/archon.md",
+        "sha256": "0f86a7a0fa8e6a2048e779af379f4c39c8bc9adca9f529e34eb07ab3f6ab9141"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/assimilator.md",
+        "destination": "markdown/Protoss/assimilator.md",
+        "sha256": "22f4ea684e4095e3f44d91b291432a44a37a98002a63181fe97bbf15e95866e9"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/carrier.md",
+        "destination": "markdown/Protoss/carrier.md",
+        "sha256": "08577855e8ce3ea87eac916f629ae8697765b3f170ea9516153c9bdd43173b6d"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/colossus.md",
+        "destination": "markdown/Protoss/colossus.md",
+        "sha256": "a19805a2a14e2191464406e98d599454117d8af8359aadce58f90991756f8463"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/cybernetics_core.md",
+        "destination": "markdown/Protoss/cybernetics_core.md",
+        "sha256": "cf99c0a6fb6b208f13690793934d6a93d9188f470d41adcf88be9968d52b3cab"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/dark_shrine.md",
+        "destination": "markdown/Protoss/dark_shrine.md",
+        "sha256": "2fb2c2061dd989e61ea95ed258f3e40036c4c1bd8d42ea354716747c888602ab"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/dark_templar.md",
+        "destination": "markdown/Protoss/dark_templar.md",
+        "sha256": "e370c33a93b889855a4f74baab2e1b704fe0b1bdced7cc9f78f358e86a657908"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/disruptor.md",
+        "destination": "markdown/Protoss/disruptor.md",
+        "sha256": "bfaa50c5f0e002b2bbf5e26bd9d9ecd84e8ee0c7bd6e4de81e2221ec1648bff9"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/fleet_beacon.md",
+        "destination": "markdown/Protoss/fleet_beacon.md",
+        "sha256": "2ff342baf3674c9c76ba57009f26b47aa48044b8fa6ae0d8e9dfe25e6b4a76dd"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/forge.md",
+        "destination": "markdown/Protoss/forge.md",
+        "sha256": "0de34cb7912bcec62254261e24d57e749e17b5c25d5d199b79e0080707e33938"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/gateway.md",
+        "destination": "markdown/Protoss/gateway.md",
+        "sha256": "e6cd5a91932dcc2651d1f430176ecd44ed98d62cd299caa85f31b261f59a6012"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/high_templar.md",
+        "destination": "markdown/Protoss/high_templar.md",
+        "sha256": "cc3ca899d8f9c8dbb8f89524e248cca9439ed9a60a4af49164dcdd00a51b96f3"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/immortal.md",
+        "destination": "markdown/Protoss/immortal.md",
+        "sha256": "5a0386160f219bdddbdb6f62d5cb6766c6ea71d1215405fda78ed6c6ef54e137"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/interceptor.md",
+        "destination": "markdown/Protoss/interceptor.md",
+        "sha256": "f0186bc7ad436661345f6749cf06c2448a5022bffd9f6925fb609a19e606d274"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/mothership.md",
+        "destination": "markdown/Protoss/mothership.md",
+        "sha256": "04109985207c8a42caa2940d8c8cdff1847b08a5aed61c9ca6cd285846f0f127"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/mothership_core.md",
+        "destination": "markdown/Protoss/mothership_core.md",
+        "sha256": "4cf145f1128c3b1305a79a24041e77c364749c7a13f9bbe0796ce5f560b26d94"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/nexus.md",
+        "destination": "markdown/Protoss/nexus.md",
+        "sha256": "636acd375a578da9bb024ab29dbef8b6294ca74f387735381e08267383725874"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/observer.md",
+        "destination": "markdown/Protoss/observer.md",
+        "sha256": "920269c5a1f4eb74e017afc9aa403a2b52ec0a28fd4695e7e04e3f02e891d4a1"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/oracle.md",
+        "destination": "markdown/Protoss/oracle.md",
+        "sha256": "07a8a1f84790948a260f9a0187b21401b95e3db31adf057569615ddd8d3f5e59"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/phoenix.md",
+        "destination": "markdown/Protoss/phoenix.md",
+        "sha256": "b117791c260f899bec13535ac4d95ca6a5532c7db6f0b3d916f5c3eb43304932"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/photon_cannon.md",
+        "destination": "markdown/Protoss/photon_cannon.md",
+        "sha256": "bd6e2eb475a9a2bff0b302725300f3a36bfbd9e44a7d308f553a4cca9d92c426"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/probe.md",
+        "destination": "markdown/Protoss/probe.md",
+        "sha256": "9f595bc20bca4a84b06550cb77003cf45c4a30ddc7b940482f23d5b10f4b8e33"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/pylon.md",
+        "destination": "markdown/Protoss/pylon.md",
+        "sha256": "55dbccad25800e728b246d7196ddbeaf082f101260caad6ce9fecd7218a82fea"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/robotics_bay.md",
+        "destination": "markdown/Protoss/robotics_bay.md",
+        "sha256": "1e72df74a6c62607954999bcda43c720780d2ded91838cebece4f838238e05bc"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/robotics_facility.md",
+        "destination": "markdown/Protoss/robotics_facility.md",
+        "sha256": "48d142ca1ebf8e7a090e3effaf3dc306dcceb1172c530ccad2a8cc9ec30a2f7e"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/sentry.md",
+        "destination": "markdown/Protoss/sentry.md",
+        "sha256": "e8630cc2c28f79ef0a4625babe7e9be25bea5368872b93bd0921f5fe80531853"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/shield_battery.md",
+        "destination": "markdown/Protoss/shield_battery.md",
+        "sha256": "ce97ae17708987b36c833b4b6361fb1217ef8e7f40d3ca3e84391f8cdae13b0c"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/stalker.md",
+        "destination": "markdown/Protoss/stalker.md",
+        "sha256": "61296f77957cd5348bb77989dae1a383f6e4024f03dca1979e7055a4cae55cc3"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/stargate.md",
+        "destination": "markdown/Protoss/stargate.md",
+        "sha256": "1059d07012e914d687b23b5406bd6e159f2045447597940cc7fb89969aaa3cf7"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/stasis_ward.md",
+        "destination": "markdown/Protoss/stasis_ward.md",
+        "sha256": "59dd6cc2fffe473e7969aa5e0884bf1e94d1b5d3f73c2309bad871abaad45c80"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/tempest.md",
+        "destination": "markdown/Protoss/tempest.md",
+        "sha256": "a4bea47e7ae7586242e09c75d4953eaa6cc5744800bb576a23f4ab00677e8800"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/templar_archives.md",
+        "destination": "markdown/Protoss/templar_archives.md",
+        "sha256": "0f63bef451b9bf2afeaa99254cf395a35d1002a689a93f94ea54cd70878d3e99"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/twilight_council.md",
+        "destination": "markdown/Protoss/twilight_council.md",
+        "sha256": "4ceb10c8879cef27baac6335cb2442ef968f5ae17d8e026d16839e75eeebc278"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/void_ray.md",
+        "destination": "markdown/Protoss/void_ray.md",
+        "sha256": "1395bbe7128a910d4535a75727cb904ae2eb4ff9941da5ce2135561c985f94c7"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/warp_gate.md",
+        "destination": "markdown/Protoss/warp_gate.md",
+        "sha256": "4768290a011859b9644ad169e7b131ebc216dbaa3071716e8347c774f9d740f4"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/warp_prism.md",
+        "destination": "markdown/Protoss/warp_prism.md",
+        "sha256": "accce2e57c72c7e9f0a6ffdd25ee4fba8614cbe18ad637ef67db6edc76e45a0f"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Protoss/zealot.md",
+        "destination": "markdown/Protoss/zealot.md",
+        "sha256": "539c92cae0dc1a4dcf43ccfddfd153284e25f89658408fb49632a2f81d2c1efe"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/armory.md",
+        "destination": "markdown/Terran/armory.md",
+        "sha256": "c54e2d2144d9c6a9fddcefb5f75737671d8cc9780afd8e9665b0d901b14b5587"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/auto_turret.md",
+        "destination": "markdown/Terran/auto_turret.md",
+        "sha256": "32d00c46e3d135c3592fe632819c4072c06b0ee58c72dc424e408cd06e3f22a7"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/banshee.md",
+        "destination": "markdown/Terran/banshee.md",
+        "sha256": "70b456bb48d0438534aa42334f4e8a290646686e1b8b325110cac466fb4a4f58"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/barracks.md",
+        "destination": "markdown/Terran/barracks.md",
+        "sha256": "210054b08655f17f63ba587437e3bf1106a8656cc6c998d030f5fe67068af1c0"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/battlecruiser.md",
+        "destination": "markdown/Terran/battlecruiser.md",
+        "sha256": "04103932fb55e18d58a699da7ad945162eb142c5f6715581fe726c86bcbea893"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/command_center.md",
+        "destination": "markdown/Terran/command_center.md",
+        "sha256": "634d839ab476163e9fb210ba48e0e6d538d680a68eadd913a3b945cf821a6bea"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/cyclone.md",
+        "destination": "markdown/Terran/cyclone.md",
+        "sha256": "a812eac3fddbc4ddfc9eb10351f774e7d185123be6281703b55eb0043a302010"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/engineering_bay.md",
+        "destination": "markdown/Terran/engineering_bay.md",
+        "sha256": "30e71a6f9da1d98630a941b702a1265e88dd532dc2a87a177f65cfc0069b1414"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/factory.md",
+        "destination": "markdown/Terran/factory.md",
+        "sha256": "f1390ee59724a3c8d6f795c6f7e689b75343f87c11ab8b5aae91199bef06d7ae"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/fusion_core.md",
+        "destination": "markdown/Terran/fusion_core.md",
+        "sha256": "6fba8a1754467e86fac5c9efc873ea0d8e043f9ebd35beed23323443ab4ba64b"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/ghost.md",
+        "destination": "markdown/Terran/ghost.md",
+        "sha256": "b52e2a6de27827b43290711aa258b490ac03794e76d36acb69a8b3c0719340f3"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/ghost_academy.md",
+        "destination": "markdown/Terran/ghost_academy.md",
+        "sha256": "1f8c171b569d0c94b4775cb182b3ee3e2069a8238b17b438d1f0b85c742fab29"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/hellbat.md",
+        "destination": "markdown/Terran/hellbat.md",
+        "sha256": "3b58cacfeb7d47fdfbcd163aff7ed3bd2ee2ac1276484d16c5aa4ab07b95e129"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/hellion.md",
+        "destination": "markdown/Terran/hellion.md",
+        "sha256": "b001da094931900784f690b5a4e769d3d2296e0fcc1eaa3f7caa949ecce454bd"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/liberator.md",
+        "destination": "markdown/Terran/liberator.md",
+        "sha256": "8efa6228a9d31568210dc93e1d53efb0e73b11f4e880734e9ab3dce4d7a0019b"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/marauder.md",
+        "destination": "markdown/Terran/marauder.md",
+        "sha256": "d9f191dbf534cec6d4af9ea2a0813cc98ed92eceb1fda9fce13fcac33a360dd9"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/marine.md",
+        "destination": "markdown/Terran/marine.md",
+        "sha256": "230d6c655676feec4795b94d1e749960a76da6b871ef9dc43dca92ccc0ef5480"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/medivac.md",
+        "destination": "markdown/Terran/medivac.md",
+        "sha256": "9f0b577a9e69c99ff6db4f76efce694512fb4226c778bd5a5a8c3cd3af444b16"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/missile_turret.md",
+        "destination": "markdown/Terran/missile_turret.md",
+        "sha256": "be179d6947a57d7afe6edce77f54a0620cfbeaaf9dd4aaf4262e02295a7babf0"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/mule.md",
+        "destination": "markdown/Terran/mule.md",
+        "sha256": "8bc4ce4e5d61691b3c75ebab78f40c5c6d6fdc37a552e4be5b307902170442de"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/orbital_command.md",
+        "destination": "markdown/Terran/orbital_command.md",
+        "sha256": "fafb341f3247849d3ffa45cdb5adf00d344f26c2d31c2155619eb2bb7fbd4bb7"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/planetary_fortress.md",
+        "destination": "markdown/Terran/planetary_fortress.md",
+        "sha256": "3114a90f18d201b3e0bea400e2a0fb7664f0123715d3294469dc004a236a6389"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/point_defense_drone.md",
+        "destination": "markdown/Terran/point_defense_drone.md",
+        "sha256": "f6462aeb27d369061e56c0e04174f3bde7314e24baafcefc0687487c8d18c539"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/raven.md",
+        "destination": "markdown/Terran/raven.md",
+        "sha256": "85550e3b9ead105e8ec65d509f795a56d4cc9aa79c709e3602a48228cb576c9f"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/reactor.md",
+        "destination": "markdown/Terran/reactor.md",
+        "sha256": "395b6f2fe590498df2a19d1739877203d614d80408de732a6261ddbf32cd7a1f"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/reaper.md",
+        "destination": "markdown/Terran/reaper.md",
+        "sha256": "4679e761446cce30cb728837e0652a1a4fee1d313eff7b18532948e90809bc8f"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/refinery.md",
+        "destination": "markdown/Terran/refinery.md",
+        "sha256": "cdd26f30c6228d189966c4d02fb3ba458e0fd00255edc45397eda9e447f5d412"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/scv.md",
+        "destination": "markdown/Terran/scv.md",
+        "sha256": "c0530e7f05009edcdb3341da2cd806ededf9e6f5e6ad94a951047644c6d5704c"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/sensor_tower.md",
+        "destination": "markdown/Terran/sensor_tower.md",
+        "sha256": "ac7321ae9ae8fd9cef1b8634dc27422970297f53e0904df07f1c6870f13a66a4"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/siege_tank.md",
+        "destination": "markdown/Terran/siege_tank.md",
+        "sha256": "585c0f3a37315fb6537438fca4f6ac807c575705b2e3f22c4838521ed2964352"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/starport.md",
+        "destination": "markdown/Terran/starport.md",
+        "sha256": "ebc72cd2896a07d58bafe490bc2fdd4a87573d43a4e40bee1f4e46f2e62bd6ba"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/supply_depot.md",
+        "destination": "markdown/Terran/supply_depot.md",
+        "sha256": "7209cd4c38d60a096f957bdaba594ce2fb078b636fced76b0a4e4fd2c41dd6b1"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/tech_lab.md",
+        "destination": "markdown/Terran/tech_lab.md",
+        "sha256": "876e9d0df1f5128f35c4e36f37485c03b402b90ff99bf53f20caf74928f78683"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/thor.md",
+        "destination": "markdown/Terran/thor.md",
+        "sha256": "0ff6048b4126a5da667cc66eb2d34299e7a4d12395209aa6f8adde5966cb2848"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/viking.md",
+        "destination": "markdown/Terran/viking.md",
+        "sha256": "39369390b4ec8b6a4bf1ce3188f5bd85360cf9aa83dccec76b2d013f004e8a25"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Terran/widow_mine.md",
+        "destination": "markdown/Terran/widow_mine.md",
+        "sha256": "c8085e99ebe8c685e85cc9f3621f71bebf63bf6fcfc239663d2a7b0e03afb425"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/baneling.md",
+        "destination": "markdown/Zerg/baneling.md",
+        "sha256": "efdf3f9382e76b7912760d9b86b4443931797a50a604c14bb5c20cd73ef7917d"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/baneling_nest.md",
+        "destination": "markdown/Zerg/baneling_nest.md",
+        "sha256": "8925deac841a6fdf7c3f6d70d086447cc6c914f19554f238a932494c2d352a79"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/brood_lord.md",
+        "destination": "markdown/Zerg/brood_lord.md",
+        "sha256": "055e4df6355aa641e8f40e5fc62dd19ea91a957638f584cd05ee584fdc85feb8"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/broodling.md",
+        "destination": "markdown/Zerg/broodling.md",
+        "sha256": "05252d84f74b21dce390ef85e79dac7caa1e065a8dbce84033ba46f8b336aeba"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/changeling.md",
+        "destination": "markdown/Zerg/changeling.md",
+        "sha256": "22c02e0008d123e39623e3d24bfb6309a73c62c9f701d85c1dcfce9fd8de6371"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/cocoon.md",
+        "destination": "markdown/Zerg/cocoon.md",
+        "sha256": "fa681cc38886d2bf643cabdbc34d1fa74cb0cf47dd14273a58c39d5a2b6fc39a"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/corruptor.md",
+        "destination": "markdown/Zerg/corruptor.md",
+        "sha256": "2482e9cbe0dfe8478628d2c9a7d8b365acc177a1a2ab03ae8569041ce72c05fc"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/creep_tumor.md",
+        "destination": "markdown/Zerg/creep_tumor.md",
+        "sha256": "ad9a877aa56ca1985da89884c9c40ddeb9703c2a6aba305192f6302ecc599eea"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/drone.md",
+        "destination": "markdown/Zerg/drone.md",
+        "sha256": "9549f491838aad8b99d772c78e7b312d3776f2a5338685099eaac0fffbe04dc4"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/evolution_chamber.md",
+        "destination": "markdown/Zerg/evolution_chamber.md",
+        "sha256": "ce455cd0324a1dfe58587f0b33c56d057bcc951c745d9a1be8258b62d9f47c03"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/extractor.md",
+        "destination": "markdown/Zerg/extractor.md",
+        "sha256": "8d8d8db8d4934992223d23947f6d86faab9cf2f5e1532b5f0bcb1f52da2e64d5"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/greater_spire.md",
+        "destination": "markdown/Zerg/greater_spire.md",
+        "sha256": "4c0d5ca85c480c21027ced78f1e47a79c30588af0d545806458a2adbaac6995b"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/hatchery.md",
+        "destination": "markdown/Zerg/hatchery.md",
+        "sha256": "523a618fd58028e1855023eed1344fbff94e4a5b18f3946ff4a286491a23aa18"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/hive.md",
+        "destination": "markdown/Zerg/hive.md",
+        "sha256": "8995d6aa989bc476e3a349776b4f8d26901a057b34e081fe15aa43306960d4b9"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/hydralisk.md",
+        "destination": "markdown/Zerg/hydralisk.md",
+        "sha256": "e04ede7714b0fea15028ee0bf5e298c24d7f8fdf491ff580d37229fe0431d0a8"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/hydralisk_den.md",
+        "destination": "markdown/Zerg/hydralisk_den.md",
+        "sha256": "5ca8d84e5f4965e1d56bc74c776b549c8617ca50dc9b345853c8a4577b72d03a"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/infestation_pit.md",
+        "destination": "markdown/Zerg/infestation_pit.md",
+        "sha256": "6ac45a4cc25e1979eadaed0df4f97fa421584e283c0b46c6c1e43b5cc0d92249"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/infested_terran.md",
+        "destination": "markdown/Zerg/infested_terran.md",
+        "sha256": "c9cfde02bf3c5d6ee78dcff78484af70c44bbf1ab99a8fb702a32af75cd20c19"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/infestor.md",
+        "destination": "markdown/Zerg/infestor.md",
+        "sha256": "11f72a5809878815f27c0031cab75cb0bbfa16f7fd23988f4e6b5889b5200563"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/lair.md",
+        "destination": "markdown/Zerg/lair.md",
+        "sha256": "15ce79a40e686c2000b858d42f31b6c862a07c42d402424fb65e2633bc856504"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/larva.md",
+        "destination": "markdown/Zerg/larva.md",
+        "sha256": "85166556a1c99519b2f50dd416b8bf00f9e8b3bec7494709fb1b3cace31b94cd"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/locust.md",
+        "destination": "markdown/Zerg/locust.md",
+        "sha256": "952110a404057236ff3ad77b7bb64c9280e757e18052405003f2bdd561fb2a41"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/lurker.md",
+        "destination": "markdown/Zerg/lurker.md",
+        "sha256": "a793720433417644864be34db3a18c39e4befaf0d3e4d619449981abbe5d6023"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/lurker_den.md",
+        "destination": "markdown/Zerg/lurker_den.md",
+        "sha256": "01848bb52366214443fd2b97bc9d73fdf9cdb72d409a6fb87abf6dcb910b9793"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/mutalisk.md",
+        "destination": "markdown/Zerg/mutalisk.md",
+        "sha256": "c874c8c5c931c391f1ed224a1a7d542ff0f187afc674a0c89896b5d2586c9e5e"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/nydus_network.md",
+        "destination": "markdown/Zerg/nydus_network.md",
+        "sha256": "98878df1cbd1114241e74254d366669713c9f9809dd2a69791bd5dfec0aa9a55"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/nydus_worm.md",
+        "destination": "markdown/Zerg/nydus_worm.md",
+        "sha256": "6b99335ff98b297215391785c811dbb02bd105b2c80e8dae714eff2a95d0a534"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/overlord.md",
+        "destination": "markdown/Zerg/overlord.md",
+        "sha256": "0136bafd64629a5e7948037d1a5e41fd6d4fd4400bb278126932ad15e2d369bd"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/overseer.md",
+        "destination": "markdown/Zerg/overseer.md",
+        "sha256": "a4bb967a99ac9a9458d1dc10e5b9cd8554e5e038ada6f109be686168fdca4c71"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/queen.md",
+        "destination": "markdown/Zerg/queen.md",
+        "sha256": "7c4be43a165f2065be97e6c3dd251c684ab38e874f5e68b784b0203f5bfea0f7"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/ravager.md",
+        "destination": "markdown/Zerg/ravager.md",
+        "sha256": "e31483870e78a81359b5ae6ec49d0c5af77376ba184193bfa11123959104b05d"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/roach.md",
+        "destination": "markdown/Zerg/roach.md",
+        "sha256": "2312f09a1c2563dc02f05ad0fbb93ac11276e5df62985b98bf26bff0bab6500d"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/roach_warren.md",
+        "destination": "markdown/Zerg/roach_warren.md",
+        "sha256": "4b60697052fc86704ee6950e21f1fb4572bff2f5248925a10d61d2ad69de2642"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/spawning_pool.md",
+        "destination": "markdown/Zerg/spawning_pool.md",
+        "sha256": "cb76db8811445ea3cf9f4216fcb43f3b22fd0a8f1cc82606d8d2ccb7b41fda54"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/spine_crawler.md",
+        "destination": "markdown/Zerg/spine_crawler.md",
+        "sha256": "df212b94e9d45d5625ccf25df2ac530d395df34810d465d9bbc19fc9b265c101"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/spire.md",
+        "destination": "markdown/Zerg/spire.md",
+        "sha256": "788667321af1e25d8229caa2fa08028a87fe04a8db1cf467fdabeb95a6128239"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/spore_crawler.md",
+        "destination": "markdown/Zerg/spore_crawler.md",
+        "sha256": "5f507898dea94248269809e5adf63d5d558200c795eadd864ee24d5dd3268575"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/swarm_host.md",
+        "destination": "markdown/Zerg/swarm_host.md",
+        "sha256": "04a22d1ad72153729f8eeee242d013a51ef6e0075299544a0be5c9b43f1f393f"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/ultralisk.md",
+        "destination": "markdown/Zerg/ultralisk.md",
+        "sha256": "4f1bb7480797fa998bc66c0815af92f10f1d82fa1c4d2267335ff15d30868a4b"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/ultralisk_cavern.md",
+        "destination": "markdown/Zerg/ultralisk_cavern.md",
+        "sha256": "bfa4ba8a74aaa749071d11fef116f11f6d480ebd45e5e42914eff045f08d9a98"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/viper.md",
+        "destination": "markdown/Zerg/viper.md",
+        "sha256": "dc19c772883bc424eb859b334be1ca957ddfe0313367ee0fe17dcebebc446448"
+      },
+      {
+        "source": "MD_OUTPUT_BY_RACE/Zerg/zergling.md",
+        "destination": "markdown/Zerg/zergling.md",
+        "sha256": "f456127867d13024788383ca66ade0f06eb8743672c31a32c2b3ee352823415f"
+      }
+    ]
+  },
+  "validation": {
+    "status": "passed",
+    "semantic_triples": 4463,
+    "stored_relation_objects": 6503,
+    "markdown_files": 116,
+    "sub_ontologies": 109,
+    "fact_count": 6131
+  }
+}

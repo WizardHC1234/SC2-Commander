@@ -16,24 +16,3 @@ A defensive late-game strategy that uses Marines and Siege Tanks to survive the 
 * Engagement and Reinforcement: After the planned attack begins, keep the Battlecruisers, Thors, and Siege Tanks committed to the same current objective while they can make progress. Send newly completed core units to that objective instead of starting isolated attacks.
 * Recovery and Cleanup: If the heavy force can no longer make progress in an unfavorable engagement, withdraw the survivors to a safe owned zone, rebuild the attack-gate composition, and concentrate it before attacking again. Search remaining expansions after known enemy bases are destroyed.
 * Ultimate Goal: Establish a core force of approximately 12 Battlecruisers, 4 Thors, 8 Siege Tanks, and 12 Marines while maintaining approximately 50 SCVs. After the attack gate is met, retain or raise production toward those Ultimate Goal counts. Prioritize additional Battlecruisers and replace lost core units until reaching 200 supply and destroying all enemy structures.
-
-# Resource Costs
-
-* SCV: 50 minerals, 0 gas, 1 supply. Produced from a Command Center.
-* Marine: 50 minerals, 0 gas, 1 supply. Produced from a Barracks.
-* Siege Tank: 150 minerals, 125 gas, 3 supply. Produced from a Factory with a Factory Tech Lab.
-* Thor: 300 minerals, 200 gas, 6 supply. Produced from a Factory with a Factory Tech Lab and requires an Armory.
-* Battlecruiser: 400 minerals, 300 gas, 6 supply. Produced from a Starport with a Starport Tech Lab and requires a Fusion Core.
-* Supply Depot: 100 minerals, 0 gas. Provides 8 supply.
-* Refinery: 75 minerals, 0 gas. Collects gas.
-* Barracks: 150 minerals, 0 gas. Requires a completed Supply Depot.
-* Factory: 150 minerals, 100 gas. Requires a Barracks.
-* Starport: 150 minerals, 100 gas. Requires a Factory.
-* Factory Tech Lab: 50 minerals, 25 gas. Attached to a completed Factory and required for Siege Tanks and Thors.
-* Starport Tech Lab: 50 minerals, 25 gas. Attached to a completed Starport and required for Battlecruisers.
-* Armory: 150 minerals, 100 gas. Requires a Factory and unlocks Thors.
-* Fusion Core: 150 minerals, 150 gas. Requires a Starport and unlocks Battlecruiser production.
-* Yamato Cannon: 150 minerals, 150 gas. Researched at the Fusion Core.
-* Command Center: 400 minerals, 0 gas. Produces SCVs.
-* Orbital Command: 150 minerals, 0 gas. Requires a Barracks.
-* Scanner Sweep: 50 Orbital energy. Requires an Orbital Command and provides temporary vision and detection.

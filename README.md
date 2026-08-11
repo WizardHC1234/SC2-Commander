@@ -15,9 +15,10 @@
 
 ```text
 SC2-Commander/
-  commander/     # Bot、提示词、tool、观测、军队执行、唤醒
+  commander/     # Bot、提示词、tool、观测、执行层，以及 races/<race> 适配器
+  evol_agent/    # 离线读取对局记录并生成优化版 strategy.md
   llm/           # API 调用；config.example.json（密钥勿提交）
-  skills/        # 策略与 Action 空间（terran/marine|tank|battlecruiser）
+  skills/        # 仅保存各族的 strategy.md 策略内容
   scripts/       # 启动脚本（demo / batch / 实验矩阵）
   tools/         # 批局统计等辅助脚本
   docs/          # 方案笔记
@@ -71,7 +72,7 @@ Copy-Item llm\config.example.json llm\config.json
 ### 提示词与策略
 
 - System 提示在 [`commander/prompts.py`](commander/prompts.py)：SC2 通则、宏执行/唤醒、宏决策序、军队 zone/mode、军队规则、输出格式
-- 具体开局与门控以 `skills/terran/<strategy>/strategy.md` 为准；Action 名与描述来自 [`skills/terran/Action.py`](skills/terran/Action.py)
+- 具体开局与门控以 `skills/terran/<strategy>/strategy.md` 为准；动作执行、静态数据和工具描述统一定义在 [`commander/races/terran/actions.py`](commander/races/terran/actions.py)
 
 ### 决策调度
 
@@ -105,6 +106,16 @@ class CommanderBot(KnowledgeBot):
 python tools/batch_time_stats.py
 python tools/batch_time_stats.py --group-by strategy
 ```
+
+### 离线策略优化
+
+`evol_agent/` 可读取当前单 Commander 的对局记录，执行跨局分析，并只生成新的 `skills/<race>/<strategy>_optN/strategy.md`。它与 Commander 共用 `llm/config.json`，静态成本与前置条件来自动作目录，因此优化策略仍只包含 `# Summary` 和 `# Details`。
+
+```powershell
+.\venv\Scripts\python.exe -m evol_agent.cli --batch-dir game_records\<batch_name> --strategy tank
+```
+
+详细说明见 [`evol_agent/README.md`](evol_agent/README.md)。
 
 ### 对局默认值
 

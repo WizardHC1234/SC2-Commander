@@ -16,13 +16,3 @@ A one-base Marine rush that sacrifices gas, advanced technology, and expansion f
 * Engagement and Reinforcement: After the planned attack begins, keep the forward force advancing toward the current objective while it can make progress. Send newly completed Marines to the same objective instead of recalling the forward force or waiting at home.
 * Recovery and Cleanup: If the forward force can no longer make progress and its strength has fallen below the 20-Marine attack gate, withdraw the surviving Marines to a safe owned zone, rebuild to 20 Marines, and attack again. Search remaining expansions after known enemy bases are destroyed.
 * Ultimate Goal: Maintain approximately 20 SCVs and continue toward 180 Marines to fill the 200-supply limit. After the attack gate is met, retain or raise Marine production toward that Ultimate Goal count. Replace Marine losses until all enemy structures are destroyed.
-
-# Resource Costs
-
-* SCV: 50 minerals, 0 gas, 1 supply. Produced from a Command Center.
-* Marine: 50 minerals, 0 gas, 1 supply. Produced from a Barracks.
-* Supply Depot: 100 minerals, 0 gas. Provides 8 supply.
-* Barracks: 150 minerals, 0 gas. Requires a completed Supply Depot.
-* Command Center: 400 minerals, 0 gas. Produces SCVs.
-* Orbital Command: 150 minerals, 0 gas. Requires a Barracks.
-* Scanner Sweep: 50 Orbital energy. Requires an Orbital Command and provides temporary vision and detection.

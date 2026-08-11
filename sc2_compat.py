@@ -17,6 +17,13 @@ def apply() -> None:
     if _APPLIED:
         return
 
+    # The bundled python-sc2 version still references aliases removed by
+    # modern NumPy. Keep this compatibility local to SC2 process startup.
+    import numpy as np
+
+    if not hasattr(np, "float"):
+        np.float = float  # type: ignore[attr-defined]
+
     from sc2.cache import property_immutable_cache
     from sc2.ids.buff_id import BuffId
     from sc2.unit import Unit

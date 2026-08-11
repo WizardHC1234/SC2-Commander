@@ -112,6 +112,7 @@ class CommanderBot(KnowledgeBot):
 
         self._get_action_fn: Optional[Callable] = None
         self._get_action_space_fn: Optional[Callable] = None
+        self._expand_action_dependencies_fn: Optional[Callable] = None
         self._full_action_space: Optional[Dict[str, str]] = None
         self._action_space_cache: Optional[Dict[str, str]] = None
         self._strategy_raw: str = ""
@@ -125,7 +126,7 @@ class CommanderBot(KnowledgeBot):
             self.llm_observation_recorder.output_folder = self.record_dir
 
     # ------------------------------------------------------------------
-    # skills/
+    # strategy documents and race adapters
     # ------------------------------------------------------------------
 
     @property
@@ -140,15 +141,19 @@ class CommanderBot(KnowledgeBot):
         return os.path.normpath(os.path.join(self._skills_root, self.race_name))
 
     def _load_race_action_module(self) -> None:
-        module_path = f"skills.{self.race_name}.Action"
+        module_path = f"commander.races.{self.race_name}.actions"
         try:
             mod = importlib.import_module(module_path)
             self._get_action_fn = getattr(mod, "get_action", None)
             self._get_action_space_fn = getattr(mod, "get_action_space", None)
+            self._expand_action_dependencies_fn = getattr(
+                mod, "expand_action_dependencies", None
+            )
         except ImportError:
-            logger.warning("Action module %s not found.", module_path)
+            logger.warning("Race action module %s not found.", module_path)
             self._get_action_fn = None
             self._get_action_space_fn = None
+            self._expand_action_dependencies_fn = None
         full = self._get_action_space_fn() if self._get_action_space_fn else {}
         self._full_action_space = dict(full)
         # Until strategy tool selection runs, expose nothing risky: keep full
@@ -195,7 +200,7 @@ class CommanderBot(KnowledgeBot):
         )
 
     def _select_strategy_tools(self) -> None:
-        """Once per match: Resource Costs → required tools, LLM may only add."""
+        """Once per match: semantic selection plus dependency expansion."""
         full = dict(self._full_action_space or self._action_space_cache or {})
         if not full:
             logger.warning("tool selection skipped: empty action space")
@@ -206,6 +211,7 @@ class CommanderBot(KnowledgeBot):
             full_action_space=full,
             model_key=self._resolved_model_key(),
             use_llm=True,
+            dependency_resolver=self._expand_action_dependencies_fn,
         )
         self._tool_selection = outcome
         selected = outcome.get("action_space") or {}
@@ -213,13 +219,14 @@ class CommanderBot(KnowledgeBot):
             self._action_space_cache = dict(selected)
         selected_names = list(outcome.get("selected_tools") or sorted(selected))
         summary = (
-            "tool_selection selected=%d/%d required=%d added=%d unmatched=%s err=%s"
+            "tool_selection selected=%d/%d semantic=%d dependencies=%d "
+            "fallback=%s err=%s"
             % (
                 int(outcome.get("selected_tool_count") or 0),
                 int(outcome.get("full_tool_count") or 0),
-                len(outcome.get("required_tools") or []),
-                len(outcome.get("added_tools") or []),
-                ",".join(outcome.get("unmatched_labels") or []) or "-",
+                len(outcome.get("semantic_tools") or []),
+                len(outcome.get("dependency_tools") or []),
+                outcome.get("fallback_reason") or "no",
                 outcome.get("llm_error") or "ok",
             )
         )
@@ -228,9 +235,10 @@ class CommanderBot(KnowledgeBot):
         logger.info("[Commander]   selected_tools=%s", ",".join(selected_names))
         self._emit("%s", summary)
         self._emit("  selected_tools=%s", ",".join(selected_names))
-        if outcome.get("added_tools"):
+        if outcome.get("dependency_tools"):
             self._emit(
-                "  added_tools=%s", ",".join(outcome.get("added_tools") or [])
+                "  dependency_tools=%s",
+                ",".join(outcome.get("dependency_tools") or []),
             )
         self._append_tool_selection_match_info(outcome, selected_names)
         self._record_llm_interaction(
@@ -240,9 +248,12 @@ class CommanderBot(KnowledgeBot):
                 "strategy_id": self.selected_strategy,
                 "strategy_hash": self.strategy_hash,
                 "selected_tools": selected_names,
-                "required_tools": list(outcome.get("required_tools") or []),
-                "added_tools": list(outcome.get("added_tools") or []),
-                "unmatched_labels": list(outcome.get("unmatched_labels") or []),
+                "baseline_tools": list(outcome.get("baseline_tools") or []),
+                "semantic_tools": list(outcome.get("semantic_tools") or []),
+                "dependency_tools": list(outcome.get("dependency_tools") or []),
+                "fallback_used": bool(outcome.get("fallback_used")),
+                "fallback_reason": outcome.get("fallback_reason") or "",
+                "dependency_error": outcome.get("dependency_error") or "",
                 "full_tool_count": outcome.get("full_tool_count"),
                 "selected_tool_count": outcome.get("selected_tool_count"),
                 "llm_error": outcome.get("llm_error") or "",
@@ -266,43 +277,47 @@ class CommanderBot(KnowledgeBot):
                 handle.write(
                     f"tool_selection:     {outcome.get('selected_tool_count')}/"
                     f"{outcome.get('full_tool_count')} "
-                    f"(required={len(outcome.get('required_tools') or [])}, "
-                    f"added={len(outcome.get('added_tools') or [])}, "
+                    f"(semantic={len(outcome.get('semantic_tools') or [])}, "
+                    f"dependencies={len(outcome.get('dependency_tools') or [])}, "
+                    f"fallback={outcome.get('fallback_reason') or 'no'}, "
                     f"err={outcome.get('llm_error') or 'ok'})\n"
                 )
                 handle.write("army_tools:         " + ", ".join(army) + "\n")
                 handle.write("macro_tools:        " + ", ".join(macro) + "\n")
-                added = list(outcome.get("added_tools") or [])
-                if added:
-                    handle.write("added_tools:        " + ", ".join(added) + "\n")
+                semantic = list(outcome.get("semantic_tools") or [])
+                if semantic:
+                    handle.write(
+                        "semantic_tools:     " + ", ".join(semantic) + "\n"
+                    )
+                dependencies = list(outcome.get("dependency_tools") or [])
+                if dependencies:
+                    handle.write(
+                        "dependency_tools:   " + ", ".join(dependencies) + "\n"
+                    )
         except Exception as exc:
             logger.warning("failed to append tool selection to match_info: %s", exc)
 
-    def _load_dynamic_tactics(self) -> BuildOrder:
-        if not self.selected_strategy:
-            return EmptyTactics()
-        module_path = f"skills.{self.race_name}.{self.selected_strategy}.base_tactics"
+    def _load_race_tactics(self) -> BuildOrder:
+        module_path = f"commander.races.{self.race_name}.tactics"
         try:
             mod = importlib.import_module(module_path)
         except ImportError:
             logger.warning(
                 "Cannot import %s; using EmptyTactics.", module_path)
             return EmptyTactics()
-        for attr_name in dir(mod):
-            attr = getattr(mod, attr_name)
-            if (
-                isinstance(attr, type)
-                and issubclass(attr, BuildOrder)
-                and attr is not BuildOrder
-            ):
-                try:
-                    return attr()
-                except TypeError:
-                    try:
-                        return attr(20)
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to instantiate %s: %s", attr_name, exc)
+        factory = getattr(mod, "create_tactics", None)
+        if callable(factory):
+            try:
+                tactics = factory()
+                if isinstance(tactics, BuildOrder):
+                    return tactics
+                logger.warning(
+                    "%s.create_tactics() returned %s; using EmptyTactics.",
+                    module_path,
+                    type(tactics).__name__,
+                )
+            except Exception as exc:
+                logger.warning("Failed to create tactics from %s: %s", module_path, exc)
         return EmptyTactics()
 
     # ------------------------------------------------------------------
@@ -339,7 +354,7 @@ class CommanderBot(KnowledgeBot):
         return BuildOrder(
             [
                 ActOngoingMacroTasks(active_tasks_ref=self.active_tasks),
-                self._load_dynamic_tactics(),
+                self._load_race_tactics(),
                 ForceFinishEnemyOnGG(lambda ai: getattr(
                     ai, "enemy_said_gg", False)),
             ]

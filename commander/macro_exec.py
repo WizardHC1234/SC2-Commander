@@ -83,7 +83,7 @@ class ActOngoingMacroTasks(ActBase):
 
 
 class EmptyTactics(BuildOrder):
-    """Minimal race-agnostic fallback when a strategy has no base_tactics."""
+    """Minimal race-agnostic fallback when a race has no tactics adapter."""
 
     def __init__(self):
         from sharpy.plans.tactics import (

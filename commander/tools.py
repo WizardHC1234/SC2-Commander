@@ -13,7 +13,7 @@ from commander.combat_policy import (
 from commander.retreat_policy import clamp_retreat_ratio
 from commander.wake_events import normalize_wake_event
 
-# Must match Action.py entries with type == "army" / "meta".
+# Must match race action-registry entries with type == "army" / "meta".
 ARMY_TOOL_NAMES = frozenset({"move_group", "scanner_sweep", "scout"})
 META_TOOL_NAMES = frozenset({"set_wake_event"})
 NON_MACRO_TOOL_NAMES = ARMY_TOOL_NAMES | META_TOOL_NAMES

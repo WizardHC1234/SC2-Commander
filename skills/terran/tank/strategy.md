@@ -16,20 +16,3 @@ A two-base Marine-Siege Tank strategy focused on a concentrated mid-game push. E
 * Engagement and Reinforcement: After the planned attack begins, keep the concentrated force advancing toward the current objective while it can make progress. Send newly completed Marines and Siege Tanks to the same objective instead of starting a separate attack route.
 * Recovery and Cleanup: If the force can no longer make progress against a superior defense, withdraw the survivors to a safe owned zone, rebuild to 45 Marines and 10 Siege Tanks, and concentrate them before attacking again. Search remaining expansions after known enemy bases are destroyed.
 * Ultimate Goal: Continue toward approximately 96 Marines, 20 Siege Tanks, and 44 SCVs to fill the 200-supply limit. After the attack gate is met, retain or raise Marine and Siege Tank production toward those Ultimate Goal counts. Replace combat losses until all enemy structures are destroyed.
-
-# Resource Costs
-
-* SCV: 50 minerals, 0 gas, 1 supply. Produced from a Command Center.
-* Marine: 50 minerals, 0 gas, 1 supply. Produced from a Barracks.
-* Siege Tank: 150 minerals, 125 gas, 3 supply. Produced from a Factory with a Factory Tech Lab.
-* Supply Depot: 100 minerals, 0 gas. Provides 8 supply.
-* Refinery: 75 minerals, 0 gas. Collects gas.
-* Barracks: 150 minerals, 0 gas. Requires a completed Supply Depot.
-* Factory: 150 minerals, 100 gas. Requires a Barracks.
-* Barracks Reactor: 50 minerals, 50 gas. Attached to a completed Barracks and enables two Marine production queues.
-* Barracks Tech Lab: 50 minerals, 25 gas. Attached to a completed Barracks and required for Combat Shield.
-* Factory Tech Lab: 50 minerals, 25 gas. Attached to a completed Factory and required for Siege Tank production.
-* Combat Shield: 100 minerals, 100 gas. Researched at a Barracks Tech Lab.
-* Command Center: 400 minerals, 0 gas. Produces SCVs.
-* Orbital Command: 150 minerals, 0 gas. Requires a Barracks.
-* Scanner Sweep: 50 Orbital energy. Requires an Orbital Command and provides temporary vision and detection.

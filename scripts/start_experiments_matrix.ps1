@@ -21,14 +21,15 @@ $BOT_RACE = "terran"
 $BOT_INSTRUCT = ""
 
 # Default strategy when an experiment row omits Strategy.
-$FORCE_STRATEGY = "tank"
+$FORCE_STRATEGY = "tank_opt1"
 
 # =============================================================================
 # 2. Commander model (must exist in llm/config.json -> llm_agents_pool)
 # =============================================================================
-$COMMANDER_MODEL = "qwen3-32b"
+# $COMMANDER_MODEL = "qwen3-32b"
+# $COMMANDER_MODEL = "qwen3.5-27b"
 # $COMMANDER_MODEL = "kimi-k2.5"
-# $COMMANDER_MODEL = "deepseek-v4-flash"
+$COMMANDER_MODEL = "deepseek-v4-flash"
 # $COMMANDER_MODEL = "qwen3-32b-reasoning"
 
 # =============================================================================
@@ -49,22 +50,8 @@ $CONCURRENCY = 5
 # Model           : 省略则用 $COMMANDER_MODEL（须存在于 llm/config.json）
 $EXPERIMENTS = @(
 
+    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
 
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "protoss";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "protoss";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "protoss";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "protoss";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "protoss";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
 
     # @{ EnemyRace = "terran";  EnemyDifficulty = "veryeasy"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 }
     # @{ EnemyRace = "terran";  EnemyDifficulty = "veryeasy"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 }
@@ -77,74 +64,19 @@ $EXPERIMENTS = @(
     # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
 
 
-    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 ; Model = "qwen3-32b" }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20 ; Model = "qwen3-32b" }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20}
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20     }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20  }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20 }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20  }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20 }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20  }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20  }
 
-
-    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20; Model = "deepseek-v4-flash" }
-
-    @{ EnemyRace = "terran"; EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20; Model = "deepseek-v4-flash" }
-
-    @{ EnemyRace = "terran"; EnemyDifficulty = "harder"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "harder"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "harder"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20; Model = "deepseek-v4-flash" }
-
-    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20; Model = "deepseek-v4-flash" }
-
-
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryeasy"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 ; Model = "qwen3-32b" }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryeasy"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 ; Model = "qwen3-32b" }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryeasy"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 ; Model = "qwen3-32b" }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 ; Model = "qwen3-32b" }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 ; Model = "qwen3-32b" }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 ; Model = "qwen3-32b" }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 ; Model = "qwen3-32b" }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 ; Model = "qwen3-32b" }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 ; Model = "qwen3-32b" }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "cheatvision"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "cheatvision"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "cheatvision"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "cheatmoney"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "cheatmoney"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "cheatmoney"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "cheatinsane"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "cheatinsane"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "cheatinsane"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 10 }
-
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "hard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "hard"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 10 }
-
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 10 }
-    # @{ EnemyRace = "zerg";   EnemyDifficulty = "hard";     EnemyBuild = "macro"; Strategy = "tank"; Matches = 10 }
 )
 
 function Get-SafeName {

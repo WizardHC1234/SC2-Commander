@@ -37,6 +37,7 @@ config-local.ini
 # Match / analysis / runtime data (do not upload)
 game_records/
 analysis_results/
+evol_agent/logs/
 paper_notes/
 paper_assets/
 data/
