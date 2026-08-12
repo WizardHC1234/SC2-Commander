@@ -38,6 +38,10 @@ def save_snapshot(
 ) -> list[dict[str, Any]]:
     if source_dir.resolve() == output_dir.resolve():
         raise ValueError("output directory must not overwrite the parent strategy")
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(
+            f"candidate directory already contains files and is immutable: {output_dir}"
+        )
     top_content = files.get("strategy.md", "")
     validation_error = validate_strategy_markdown(top_content, race=race)
     if validation_error:

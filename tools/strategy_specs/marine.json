@@ -1,0 +1,22 @@
+{
+  "schema_version": 3,
+  "strategy_name": "marine",
+  "source_strategy_path": "skills/terran/marine/strategy.md",
+  "worker": {"unit": "SCV", "target": 20},
+  "forbidden_economy_entities": ["REFINERY"],
+  "base_constraints": [
+    {"name": "remain_on_one_base", "type": "at_most_until_end", "count": 1}
+  ],
+  "required_entities_by_end": {"BARRACKS": 6},
+  "required_upgrades_by_end": [],
+  "forbidden_entities": [
+    "BARRACKSTECHLAB", "BARRACKSREACTOR", "FACTORY",
+    "STARPORT", "ARMORY", "FUSIONCORE"
+  ],
+  "forbid_any_upgrade": true,
+  "unit_aliases": {"SCV": ["SCV"], "MARINE": ["MARINE"]},
+  "unit_supply": {"MARINE": 1},
+  "attack_gate": {"MARINE": 20},
+  "attack_modes": ["push", "assault", "search_and_destroy"],
+  "attack_group_roles": ["main_force"]
+}

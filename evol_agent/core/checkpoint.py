@@ -12,15 +12,15 @@ from .config import OPTIMIZATION_LOG_DIR
 from .types import BattleAnalysis, GameDigest, ToolObservation
 from ..sc2_data_agent.bridge import is_knowledge_run_verified
 
-CHECKPOINT_SCHEMA = "evol_agent_checkpoint.v1"
+CHECKPOINT_SCHEMA = "evol_agent_checkpoint.v2"
 
 STAGE_ORDER = (
     "created",
     "match_summaries",
-    "diagnosis",
+    "batch_analysis",
     "knowledge",
-    "finish_analysis",
-    "optimization",
+    "analysis_complete",
+    "candidate",
 )
 
 STAGE_RANK = {name: index for index, name in enumerate(STAGE_ORDER)}
@@ -185,14 +185,14 @@ class EvolCheckpoint:
         errors = [str(item) for item in (data.get("errors") or [])]
         return digests, analyses, int(data.get("completed_matches") or 0), events, errors
 
-    def save_diagnosis(self, diagnosis: dict[str, Any]) -> None:
-        _write_json(self.run_dir / "diagnosis.json", diagnosis)
-        self.set_stage("diagnosis")
+    def save_batch_analysis(self, analysis: dict[str, Any]) -> None:
+        _write_json(self.run_dir / "batch_analysis.json", analysis)
+        self.set_stage("batch_analysis")
 
-    def load_diagnosis(self) -> dict[str, Any]:
-        data = _read_json(self.run_dir / "diagnosis.json")
+    def load_batch_analysis(self) -> dict[str, Any]:
+        data = _read_json(self.run_dir / "batch_analysis.json")
         if not isinstance(data, dict):
-            raise ValueError("diagnosis.json must contain an object")
+            raise ValueError("batch_analysis.json must contain an object")
         return data
 
     def knowledge_result_path(self, question_id: str) -> Path:
@@ -231,13 +231,12 @@ class EvolCheckpoint:
                 ids.add(qid)
         return ids
 
-    def save_finish_analysis(
+    def save_analysis_complete(
         self,
         *,
         battle_analysis: BattleAnalysis,
         tool_observations: list[ToolObservation],
         knowledge_trace: dict[str, Any],
-        diagnosis: dict[str, Any] | None = None,
         events: list[dict[str, Any]] | None = None,
         errors: list[str] | None = None,
     ) -> None:
@@ -245,7 +244,6 @@ class EvolCheckpoint:
             "battle_analysis": battle_analysis.raw or battle_analysis.__dict__,
             "tool_observations": [obs.__dict__ for obs in tool_observations],
             "knowledge_trace": knowledge_trace,
-            "diagnosis": diagnosis or {},
             "events": events or [],
             "errors": errors or [],
         }
@@ -257,11 +255,11 @@ class EvolCheckpoint:
             self.run_dir / "tool_observations.json",
             payload["tool_observations"],
         )
-        self.set_stage("finish_analysis")
+        self.set_stage("analysis_complete")
 
-    def load_finish_analysis(
+    def load_analysis_complete(
         self,
-    ) -> tuple[BattleAnalysis, list[ToolObservation], dict[str, Any], dict[str, Any], list[dict[str, Any]], list[str]]:
+    ) -> tuple[BattleAnalysis, list[ToolObservation], dict[str, Any], list[dict[str, Any]], list[str]]:
         data = _read_json(self.run_dir / "analysis_checkpoint.json")
         analysis = battle_analysis_from_dict(
             data.get("battle_analysis") if isinstance(data.get("battle_analysis"), dict) else {}
@@ -276,17 +274,12 @@ class EvolCheckpoint:
             if isinstance(data.get("knowledge_trace"), dict)
             else {}
         )
-        diagnosis = (
-            dict(data.get("diagnosis") or {})
-            if isinstance(data.get("diagnosis"), dict)
-            else {}
-        )
         events = list(data.get("events") or []) if isinstance(data.get("events"), list) else []
         errors = [str(item) for item in (data.get("errors") or [])]
-        return analysis, observations, knowledge_trace, diagnosis, events, errors
+        return analysis, observations, knowledge_trace, events, errors
 
-    def mark_optimization_complete(self) -> None:
-        self.set_stage("optimization")
+    def mark_candidate_complete(self) -> None:
+        self.set_stage("candidate")
 
 
 def create_checkpoint(

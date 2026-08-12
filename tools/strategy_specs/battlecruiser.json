@@ -1,0 +1,32 @@
+{
+  "schema_version": 3,
+  "strategy_name": "battlecruiser",
+  "source_strategy_path": "skills/terran/battlecruiser/strategy.md",
+  "worker": {"unit": "SCV", "target": 50},
+  "economy_targets": {"REFINERY": 8},
+  "base_constraints": [
+    {"name": "two_bases_by_end", "type": "at_least_by_end", "count": 2},
+    {"name": "four_bases_by_end", "type": "at_least_by_end", "count": 4}
+  ],
+  "required_entities_by_end": {
+    "FACTORY": 2,
+    "FACTORYTECHLAB": 2,
+    "STARPORT": 2,
+    "STARPORTTECHLAB": 2,
+    "ARMORY": 1,
+    "FUSIONCORE": 1
+  },
+  "required_upgrades_by_end": ["YAMATOCANNON"],
+  "forbidden_entities": [],
+  "forbid_any_upgrade": false,
+  "unit_aliases": {
+    "SCV": ["SCV"],
+    "SIEGETANK": ["SIEGETANK", "SIEGETANKSIEGED"],
+    "THOR": ["THOR", "THORAP"],
+    "BATTLECRUISER": ["BATTLECRUISER"]
+  },
+  "unit_supply": {"SIEGETANK": 3, "THOR": 6, "BATTLECRUISER": 6},
+  "attack_gate": {"BATTLECRUISER": 6, "THOR": 4, "SIEGETANK": 6},
+  "attack_modes": ["push", "assault", "search_and_destroy"],
+  "attack_group_roles": ["main_force"]
+}

@@ -13,8 +13,9 @@ param(
 
     [string]$COMMANDER_MODEL = "qwen3-32b",
 
-    [int]$TOTAL_MATCHES = 10,
+    [int]$TOTAL_MATCHES = 20,
     [int]$CONCURRENCY = 2,
+    [int]$START_INDEX = 0,
 
     [string]$BATCH_NAME = ""
 )
@@ -47,6 +48,11 @@ function Test-BatchConfig {
 
     if ($CONCURRENCY -le 0) {
         Write-Error "CONCURRENCY must be greater than 0."
+        exit 1
+    }
+
+    if ($START_INDEX -lt 0) {
+        Write-Error "START_INDEX cannot be negative."
         exit 1
     }
 
@@ -245,7 +251,7 @@ if ($TOTAL_MATCHES -le 1) {
     New-Item -ItemType Directory -Path $singleLogDir -Force | Out-Null
     $outFile = Join-Path $singleLogDir "fg_run_0.log"
     $recordDirFile = Join-Path $singleLogDir ".record_dir_0.txt"
-    $pythonArgs = New-RunVsAiArgs -RunIndex 0 -RecordRoot $recordRoot -BatchName $BATCH_NAME -RecordDirFile $recordDirFile
+    $pythonArgs = New-RunVsAiArgs -RunIndex $START_INDEX -RecordRoot $recordRoot -BatchName $BATCH_NAME -RecordDirFile $recordDirFile
     & $PYTHON_EXE @pythonArgs *>> $outFile
     $exitCode = $LASTEXITCODE
     $outFile = Move-MatchConsoleLog -OutFile $outFile -RecordDirFile $recordDirFile
@@ -298,7 +304,7 @@ for ($i = 0; $i -lt $TOTAL_MATCHES; $i++) {
         }
     }
 
-    $matchIndex = $i
+    $matchIndex = $START_INDEX + $i
     $job = Start-Job -ScriptBlock {
         param(
             $idx,

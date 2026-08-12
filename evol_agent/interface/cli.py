@@ -10,7 +10,7 @@ from ..core.types import EvolRunRequest
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="EvolAgent: per-match summaries, cross-match analysis, then strategy.md optimization",
+        description="EvolAgent: match summaries, one batch analysis, optional knowledge, then one candidate strategy",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--record", action="append", default=[], help="Record JSON path; may be repeated")
@@ -60,6 +60,8 @@ def main() -> None:
     print(f"[{'OK' if result.ok else 'ERROR'}] {result.message}")
     if result.output_dir:
         print(f"Output: {result.output_dir}")
+    if result.candidate_hash:
+        print(f"Candidate hash: {result.candidate_hash}")
     if not result.ok:
         raise SystemExit(1)
 

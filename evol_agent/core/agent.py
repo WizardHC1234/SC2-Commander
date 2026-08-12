@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,7 @@ def _base_run_context(
             "knowledge_mode": request.knowledge_mode,
             "dry_run": request.dry_run,
             "resume_dir": str(request.resume_dir) if request.resume_dir else "",
+            "prior_experiences": list(request.prior_experiences),
         },
         "selected_group": {
             "strategy_name": strategy_name,
@@ -159,6 +161,18 @@ class EvolAgent:
                 strategy_name=strategy_name,
                 race=race,
             )
+        if request.output_dir and request.output_dir.exists() and any(
+            request.output_dir.iterdir()
+        ):
+            return EvolRunResult(
+                ok=False,
+                message=(
+                    "output candidate directory is immutable and already contains files: "
+                    f"{request.output_dir}"
+                ),
+                strategy_name=strategy_name,
+                race=race,
+            )
 
         records = group["records"]
         record_files = normalize_record_files(records)
@@ -214,8 +228,8 @@ class EvolAgent:
             "stage": checkpoint.stage,
         }
 
-        if stage_reached(checkpoint.stage, "optimization"):
-            message = f"checkpoint already complete (optimization) at {checkpoint.run_dir}"
+        if stage_reached(checkpoint.stage, "candidate"):
+            message = f"checkpoint already produced a candidate at {checkpoint.run_dir}"
             print(f"  EvolAgent: {message}", flush=True)
             return EvolRunResult(
                 ok=True,
@@ -227,7 +241,7 @@ class EvolAgent:
         def _save_logs(**kwargs: Any) -> dict[str, Path]:
             return save_evol_logs(run_dir=checkpoint.run_dir, **kwargs)
 
-        if stage_reached(checkpoint.stage, "finish_analysis") and not request.dry_run:
+        if stage_reached(checkpoint.stage, "analysis_complete") and not request.dry_run:
             print(
                 f"  EvolAgent: resume skip analysis (stage={checkpoint.stage}); "
                 "continuing from optimization",
@@ -237,10 +251,9 @@ class EvolAgent:
                 battle_analysis,
                 analysis_observations,
                 knowledge_trace,
-                _diagnosis,
                 analysis_events,
                 analysis_errors,
-            ) = checkpoint.load_finish_analysis()
+            ) = checkpoint.load_analysis_complete()
             digests, single_game_analyses, _completed, match_events, match_errors = (
                 checkpoint.load_match_summaries()
                 if (checkpoint.run_dir / "match_summaries.json").is_file()
@@ -255,11 +268,11 @@ class EvolAgent:
                 "tool_observations": [obs.__dict__ for obs in analysis_observations],
                 "knowledge_trace": knowledge_trace,
                 "errors": [*match_errors, *analysis_errors],
-                "resumed_from": "finish_analysis",
+                "resumed_from": "analysis_complete",
             }
         else:
             print(
-                f"  EvolAgent running per-match summaries and cross-match analysis "
+                f"  EvolAgent running match summaries and one batch analysis "
                 f"for {len(records)} records: {race}/{strategy_name} "
                 f"(analysis={analysis_model}, knowledge=deterministic, "
                 f"stage={checkpoint.stage})",
@@ -274,6 +287,7 @@ class EvolAgent:
                 knowledge_mode=request.knowledge_mode,
                 prefix="    ",
                 checkpoint=checkpoint,
+                prior_experiences=request.prior_experiences,
             )
             digests = analysis_result.game_digests
             battle_analysis = analysis_result.battle_analysis
@@ -396,6 +410,9 @@ class EvolAgent:
             )
 
         out_dir = request.output_dir or output_dir_for_strategy(strategy_name, race)
+        candidate_hash = hashlib.sha256(
+            improvement.files["strategy.md"].encode("utf-8")
+        ).hexdigest()[:16]
         changes = save_snapshot(
             source_dir=skill_dir,
             files=improvement.files,
@@ -407,11 +424,11 @@ class EvolAgent:
                 "records": len(records),
                 "record_mix": battle_analysis.record_mix,
                 "knowledge_mode": request.knowledge_mode,
-                "main_lesson": improvement.analysis.get("main_lesson", ""),
+                "main_lesson": improvement.analysis.get("primary_change", ""),
             },
             race=race,
         )
-        checkpoint.mark_optimization_complete()
+        checkpoint.mark_candidate_complete()
         _save_logs(
             strategy_name=strategy_name,
             game_digests=digests,
@@ -425,6 +442,9 @@ class EvolAgent:
                     "ok": True,
                     "message": "OK",
                     "output_dir": str(out_dir),
+                    "candidate_name": out_dir.name,
+                    "candidate_hash": candidate_hash,
+                    "parent_strategy": strategy_name,
                     "changes": changes,
                 },
             },
@@ -435,6 +455,7 @@ class EvolAgent:
             strategy_name=strategy_name,
             race=race,
             output_dir=out_dir,
+            candidate_hash=candidate_hash,
             game_digests=digests,
             battle_analysis=battle_analysis,
             improvement=improvement,

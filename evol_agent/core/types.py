@@ -93,6 +93,7 @@ class EvolRunRequest:
     knowledge_mode: str = "enabled"
     dry_run: bool = False
     resume_dir: Optional[Path] = None
+    prior_experiences: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -102,6 +103,7 @@ class EvolRunResult:
     strategy_name: str = ""
     race: str = "terran"
     output_dir: Optional[Path] = None
+    candidate_hash: str = ""
     game_digests: list[GameDigest] = field(default_factory=list)
     battle_analysis: Optional[BattleAnalysis] = None
     improvement: Optional[EvolImprovement] = None

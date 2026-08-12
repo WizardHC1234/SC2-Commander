@@ -28,15 +28,15 @@ $FORCE_STRATEGY = "tank_opt1"
 # =============================================================================
 # $COMMANDER_MODEL = "qwen3-32b"
 # $COMMANDER_MODEL = "qwen3.5-27b"
-# $COMMANDER_MODEL = "kimi-k2.5"
-$COMMANDER_MODEL = "deepseek-v4-flash"
+$COMMANDER_MODEL = "kimi-k2.5"
+# $COMMANDER_MODEL = "deepseek-v4-flash"
 # $COMMANDER_MODEL = "qwen3-32b-reasoning"
 
 # =============================================================================
 # 3. Run control
 # =============================================================================
 $DEFAULT_MATCHES_PER_EXPERIMENT = 10
-$CONCURRENCY = 5
+$CONCURRENCY = 4
 
 # =============================================================================
 # 4. Experiment list
@@ -50,7 +50,7 @@ $CONCURRENCY = 5
 # Model           : 省略则用 $COMMANDER_MODEL（须存在于 llm/config.json）
 $EXPERIMENTS = @(
 
-    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 10 }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank_opt1"; Matches = 10 }
 
 
     # @{ EnemyRace = "terran";  EnemyDifficulty = "veryeasy"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 }
@@ -65,17 +65,17 @@ $EXPERIMENTS = @(
 
 
     # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20}
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20     }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20  }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20  }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20  }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20  }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20}
+    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20  }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20  }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20 }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20  }
+    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20  }
 
 )
 

@@ -1,0 +1,32 @@
+{
+  "schema_version": 3,
+  "strategy_name": "tank",
+  "source_strategy_path": "skills/terran/tank/strategy.md",
+  "worker": {"unit": "SCV", "target": 44},
+  "economy_targets": {"REFINERY": 4},
+  "base_constraints": [
+    {"name": "two_bases_by_end", "type": "at_least_by_end", "count": 2},
+    {"name": "three_bases_by_end", "type": "at_least_by_end", "count": 3}
+  ],
+  "required_entities_by_end": {
+    "BARRACKS": 3,
+    "FACTORY": 2,
+    "BARRACKSREACTOR": 2,
+    "FACTORYTECHLAB": 2,
+    "BARRACKSTECHLAB": 1
+  },
+  "required_upgrades_by_end": ["SHIELDWALL"],
+  "forbidden_entities": [
+    "STARPORT", "ARMORY", "FUSIONCORE", "THOR", "BATTLECRUISER"
+  ],
+  "forbid_any_upgrade": false,
+  "unit_aliases": {
+    "SCV": ["SCV"],
+    "MARINE": ["MARINE"],
+    "SIEGETANK": ["SIEGETANK", "SIEGETANKSIEGED"]
+  },
+  "unit_supply": {"MARINE": 1, "SIEGETANK": 3},
+  "attack_gate": {"MARINE": 45, "SIEGETANK": 10},
+  "attack_modes": ["push", "assault", "search_and_destroy"],
+  "attack_group_roles": ["main_force"]
+}

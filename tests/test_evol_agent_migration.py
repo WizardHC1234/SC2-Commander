@@ -13,9 +13,13 @@ from evol_agent.analysis.record_reader import (
     is_completed_match_record,
 )
 from evol_agent.core import config
+from evol_agent.core.analysis_agent_loop import _normalize_batch_analysis
 from evol_agent.core.checkpoint import EvolCheckpoint
 from evol_agent.core.loop_helpers import normalize_strategy_contract
-from evol_agent.core.prompts import build_analysis_agent_prompt
+from evol_agent.core.simple_prompts import (
+    build_batch_analysis_prompt,
+    build_candidate_prompt,
+)
 from evol_agent.core.types import BattleAnalysis
 from evol_agent.optimization.snapshot import save_snapshot
 from evol_agent.sc2_data_agent.bridge import (
@@ -30,7 +34,6 @@ from evol_agent.sc2_data_agent.sc2_data_store import get_dataset_store
 from evol_agent.analysis.match_record import MatchRecordReader
 from evol_agent.analysis.replay_truth import commander_game_loops, enemy_truth_path
 from evol_agent.validation import (
-    find_out_of_scope_knowledge_question_error,
     validate_strategy_markdown,
 )
 
@@ -245,7 +248,7 @@ def test_post_match_enemy_truth_is_joined_by_commander_game_loop(tmp_path: Path)
     assert "post_match_replay_observed_opponent" in timeline
     assert '"SIEGETANK":3' in timeline
 
-def test_finish_prompt_uses_validated_diagnosis_without_repeating_match_summaries() -> None:
+def test_simplified_prompts_use_one_batch_hypothesis_and_one_candidate() -> None:
     analyses = [
         BattleAnalysis(
             strategy_name="tank",
@@ -262,62 +265,51 @@ def test_finish_prompt_uses_validated_diagnosis_without_repeating_match_summarie
             raw={"outcome_summary": "MATCH_RAW_LOSS_MARKER"},
         ),
     ]
-    diagnosis = {
-        "strategy_contract": {
-            "identity": "Two-base gathered mid-game push",
-            "core_commitments": ["gather main force"],
-            "optimization_boundary": "Keep the concentrated mid-game push",
-            "direction": "adjust",
+    batch_prompt = build_batch_analysis_prompt(
+        strategy_name="tank",
+        race="terran",
+        single_game_analyses=analyses,
+        skill_texts={"strategy.md": VALID_STRATEGY},
+        validation_errors=[],
+        knowledge_mode="enabled",
+    )
+    battle_analysis = BattleAnalysis(
+        strategy_name="tank",
+        race="terran",
+        sample_size=2,
+        record_mix="1W/1L",
+        raw={
+            "winning_mechanism": "gathered push",
+            "primary_problem": {"problem": "late regroup"},
+            "optimization_hypothesis": {"direction": "improve regroup timing"},
         },
-        "problems": [{"problem_id": "P1", "problem": "loss", "evidence": ["Match 2"], "strategy_fixable": True}],
-        "wins_to_preserve": [{"win_id": "W1", "pattern": "gather", "evidence": ["Match 1"], "why": "won"}],
-        "cross_outcome_comparison": ["Match 1 gathered; Match 2 did not"],
-        "knowledge_questions": [],
-        "evidence_limits": [],
-    }
-    runs = [
-        {"question_id": "Q1", "problem_ids": ["P1"], "query": "q", "answer": "VERIFIED_KNOWLEDGE_MARKER", "ok": True, "verification_schema": KNOWLEDGE_VERIFICATION_SCHEMA, "dataset_evidence": [{"tool": "get_strategy_knowledge", "result": {"entities": ["Marine"]}}]},
-        {"question_id": "Q2", "problem_ids": ["P1"], "query": "q2", "answer": "FAILED_FALLBACK_DUMP", "error": "context overflow", "ok": False},
-    ]
-    finish = build_analysis_agent_prompt(
+    )
+    candidate_prompt = build_candidate_prompt(
         strategy_name="tank",
         race="terran",
-        single_game_analyses=analyses,
+        battle_analysis=battle_analysis,
         skill_texts={"strategy.md": VALID_STRATEGY},
         tool_observations=[],
         validation_errors=[],
-        phase="finish",
-        diagnosis=diagnosis,
-        knowledge_mode="enabled",
-        knowledge_runs=runs,
-    )
-    diagnose = build_analysis_agent_prompt(
-        strategy_name="tank",
-        race="terran",
-        single_game_analyses=analyses,
-        skill_texts={"strategy.md": VALID_STRATEGY},
-        tool_observations=[],
-        validation_errors=[],
-        phase="diagnose",
-        diagnosis=None,
+        candidate=None,
         knowledge_mode="enabled",
     )
-    assert "MATCH_RAW_WIN_MARKER" not in finish
-    assert "MATCH_RAW_LOSS_MARKER" not in finish
-    assert finish.count("VERIFIED_KNOWLEDGE_MARKER") == 1
-    assert "FAILED_FALLBACK_DUMP" not in finish
-    assert "context overflow" in finish
-    assert "MATCH_RAW_WIN_MARKER" in diagnose
-    assert '"match_coverage"' not in diagnose
-    assert '"decisive_evidence"' not in diagnose
-    assert "Stimpack + Medivac for Marine sustain" not in diagnose
-    assert "Which known effects and synergies support adding Stimpack" not in diagnose
-    assert "Normally return one knowledge question" not in diagnose
-    assert "for each independent strategy-fixable decision" in diagnose
-    assert '"direction": "preserve|adjust|replace"' in diagnose
-    assert "Never ask the dataset which option is best" in diagnose
-    assert "only purpose is to retrieve costs" in diagnose
-    assert "Link a problem_id only when the returned facts" in diagnose
+
+    assert "MATCH_RAW_WIN_MARKER" in batch_prompt
+    assert "MATCH_RAW_LOSS_MARKER" in batch_prompt
+    assert '"action": "analyze_batch"' in batch_prompt
+    assert '"primary_problem"' in batch_prompt
+    assert '"optimization_hypothesis"' in batch_prompt
+    assert "zero to five focused knowledge_questions" in batch_prompt
+    assert "requested command is not proof" in batch_prompt
+    assert "answer must be capable of changing" in batch_prompt
+    assert "Stimpack" not in batch_prompt
+    assert '"action": "draft_candidate"' in candidate_prompt
+    assert "gathered push" in candidate_prompt
+    assert "Implement only optimization_hypothesis" in candidate_prompt
+    assert "mandatory attack prerequisite" in candidate_prompt
+    assert "one reusable rule with an observable condition" in candidate_prompt
+    assert "coherent path through economy and production" in candidate_prompt
 
 
 def test_strategy_contract_normalizes_legacy_checkpoints() -> None:
@@ -336,6 +328,43 @@ def test_strategy_contract_normalizes_legacy_checkpoints() -> None:
         "optimization_boundary": "keep the core win condition",
         "direction": "adjust",
     }
+
+
+def test_batch_analysis_keeps_one_problem_and_at_most_five_knowledge_questions() -> None:
+    payload, error = _normalize_batch_analysis(
+        {
+            "strategy_contract": {"identity": "two-base tank timing"},
+            "winning_mechanism": "a concentrated timing push",
+            "wins_to_preserve": [{"pattern": "gather first", "evidence": ["Match 1"]}],
+            "primary_problem": {
+                "problem": "the main force repeatedly attacks without fresh information",
+                "evidence": ["Match 2 before the first attack"],
+                "strategy_fixable": True,
+            },
+            "optimization_hypothesis": {
+                "direction": "refresh the intended objective before committing the push",
+                "scope": ["information", "army"],
+                "risk_to_winning_mechanism": "waiting too long could delay the timing",
+            },
+            "knowledge_questions": [
+                {
+                    "question": f"What effects distinguish unit {index}?",
+                    "entities": ["Marine"],
+                    "needs": ["effects"],
+                }
+                for index in range(7)
+            ],
+        },
+        strategy_name="tank",
+        knowledge_mode="enabled",
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["primary_problem"]["problem_id"] == "P1"
+    assert len(payload["optimization_targets"]) == 1
+    assert len(payload["knowledge_questions"]) == 5
+    assert all(question["problem_ids"] == ["P1"] for question in payload["knowledge_questions"])
 
 
 def test_strategy_supply_budget_rejects_end_state_over_200() -> None:
@@ -410,14 +439,6 @@ def test_knowledge_question_fields_and_text_fallback_resolve_the_same_entities()
     ]
 
 
-def test_match_dependent_optimal_timing_is_outside_static_knowledge_scope() -> None:
-    error = find_out_of_scope_knowledge_question_error(
-        "Using the bundled SC2 dataset tools as the source of truth, what is the optimal third-base timing?"
-    )
-    assert error is not None
-    assert "match-dependent strategy timing" in error
-
-
 def test_current_fallback_renderer_includes_full_army_group_state() -> None:
     record = _current_record()
     commander_interaction = record["interactions"][-1]
@@ -486,6 +507,19 @@ def test_snapshot_writes_only_strategy_markdown() -> None:
         assert changes == [{"file": "strategy.md", "applied": True}]
         assert [path.name for path in output.iterdir()] == ["strategy.md"]
         assert not (output.parent / "registry.json").exists()
+
+        try:
+            save_snapshot(
+                source_dir=source,
+                files={"strategy.md": VALID_STRATEGY},
+                output_dir=output,
+                source_info={},
+                race="terran",
+            )
+        except FileExistsError as exc:
+            assert "immutable" in str(exc)
+        else:
+            raise AssertionError("an evaluated candidate directory must not be overwritten")
     finally:
         if root.exists():
             shutil.rmtree(root)
