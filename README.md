@@ -30,9 +30,102 @@ SC2-Commander/
 
 ## 环境
 
-- StarCraft II，并设置环境变量 `SC2PATH`（未设置时脚本会回退到 `D:\StarCraft II`）
-- Python 3.8+，依赖见 `requirements.txt`（含 `burnysc2`、`openai` 等）
+### 前置
+
+- StarCraft II，并设置环境变量 `SC2PATH`
+  - Windows：未设置时脚本会回退到 `D:\StarCraft II`
+  - Linux：通常指向安装目录，例如 `~/StarCraftII` 或 Battle.net 安装路径
+- Python 3.8+（推荐 3.9）
+  - Windows：勿用 Microsoft Store 的 `WindowsApps\python.exe` 占位符
+  - Linux：一般用发行版自带的 `python3`（缺包时安装 `python3-venv` / `python3-pip`）
 - 本机可能还需可用的 `sc2pathlib` 原生扩展（`.pyd` / `.so` 不入库，需自行编译或拷贝）
+
+### 创建 / 激活 venv（Windows）
+
+仓库脚本默认使用仓库根目录下的 `venv\`（例如 `.\venv\Scripts\python.exe`）。首次：
+
+```powershell
+cd D:\path\to\SC2-Commander
+
+# 用本机真实 Python 创建虚拟环境（按你的安装路径改）
+python -m venv venv
+# 或： py -3.9 -m venv venv
+# 或： D:\Softwares\miniconda3\envs\my_env\python.exe -m venv venv
+
+.\venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -r requirements.txt
+```
+
+开发/测试额外依赖（可选）：
+
+```powershell
+pip install -r requirements.dev.txt
+```
+
+之后每次开新终端：
+
+```powershell
+cd D:\path\to\SC2-Commander
+.\venv\Scripts\Activate.ps1
+```
+
+不激活也可以直接调用解释器：
+
+```powershell
+.\venv\Scripts\python.exe run_vs_ai.py --force-strategy tank --commander-model qwen3-32b
+.\venv\Scripts\python.exe -m evol_agent.cli --help
+```
+
+### 创建 / 激活 venv（Linux）
+
+在仓库根目录创建 `venv/`（解释器路径为 `venv/bin/python`）：
+
+```bash
+cd /path/to/SC2-Commander
+
+# 若提示缺少 venv 模块：sudo apt install python3-venv  （Debian/Ubuntu）
+python3 -m venv venv
+# 或指定版本：python3.9 -m venv venv
+
+source venv/bin/activate
+python -m pip install -U pip
+pip install -r requirements.txt
+```
+
+开发/测试额外依赖（可选）：
+
+```bash
+pip install -r requirements.dev.txt
+```
+
+之后每次开新终端：
+
+```bash
+cd /path/to/SC2-Commander
+source venv/bin/activate
+```
+
+不激活也可以直接调用解释器：
+
+```bash
+./venv/bin/python run_vs_ai.py --force-strategy tank --commander-model qwen3-32b
+./venv/bin/python -m evol_agent.cli --help
+```
+
+可选：把 `SC2PATH` 写进 shell 配置或当前会话：
+
+```bash
+export SC2PATH="$HOME/StarCraftII"
+```
+
+说明：Linux 上请用 `python` / `./venv/bin/python` 直接跑对局；仓库里的 `scripts/*.ps1` 面向 Windows PowerShell。
+
+### 说明（两端通用）
+
+- `venv/` 已在 `.gitignore` 中，不要提交
+- Windows：`scripts\start_demo.ps1` / `start_batch.ps1` 会优先找 `venv\Scripts\python.exe`（其次当前 `$env:VIRTUAL_ENV`）；`start_evolution.ps1` **要求**仓库根已有该 venv
+- 若 `import openai` / `import sc2` 失败，先确认用的是对应平台的 venv 解释器，再重装 `requirements.txt`
 
 ## 配置
 

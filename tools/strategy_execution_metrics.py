@@ -13,7 +13,10 @@ Primary component metrics:
     overall_strategy_compliance
 
 ``engagement_execution_consistency`` and ``attack_completion`` remain as
-backward-compatible aliases for the mean of the two engagement components.
+backward-compatible aliases for the mean of the available engagement
+components.  Matches that never assemble the strategy's attack gate and never
+attack have no engagement opportunity, so both engagement components are N/A
+rather than artificial perfect scores.
 """
 from __future__ import annotations
 
@@ -95,16 +98,6 @@ class Match:
         return number(self.metadata.get("interval_seconds")) or 12.0
 
     @property
-    def top_interval(self) -> float:
-        times = [number(snapshot.get("game_time")) for snapshot in self.top]
-        gaps = [
-            current - previous
-            for previous, current in zip(times, times[1:])
-            if current > previous
-        ]
-        return statistics.median(gaps) if gaps else 60.0
-
-    @property
     def end_time(self) -> float:
         return number(self.metadata.get("game_duration_seconds"))
 
@@ -170,19 +163,10 @@ def discover_record_files(paths: Iterable[Path]) -> list[Path]:
 
 
 def normalize_current_interaction(item: dict[str, Any]) -> dict[str, Any]:
-    """Expose one current Commander decision through the legacy metric view."""
+    """Expose the current Commander observation to the shared metric helpers."""
     normalized = dict(item)
     obs = item.get("observation")
     normalized["observation_full"] = obs
-
-    policy = item.get("army_policy")
-    policy_error = str(item.get("error") or "")
-    if item.get("accepted") is False and not policy_error:
-        policy_error = "decision_rejected"
-    normalized["army_control_agent_policy"] = {
-        "parsed": policy if isinstance(policy, dict) else {"commands": []},
-        "error": policy_error or None,
-    }
 
     # Current observations keep route distances in zone_topology.  The old
     # evaluator expects the same value directly on each zone when deciding
@@ -656,9 +640,15 @@ def zone_has_enemy_evidence(zone: dict[str, Any]) -> bool:
         number(zone.get(field)) > 0
         for field in (
             "known_enemy_units",
+            "visible_enemy_units",
+            "remembered_enemy_units",
             "known_enemy_power",
+            "visible_enemy_power",
+            "remembered_enemy_power",
             "enemy_static_power",
         )
+    ) or bool(zone.get("visible_enemy_contents")) or bool(
+        zone.get("last_seen_enemy_contents")
     )
 
 
@@ -667,6 +657,104 @@ def is_enemy_side_zone(zone: dict[str, Any]) -> bool:
         zone.get("owner") == "enemy"
         or str(zone.get("zone_role") or "").startswith("enemy_")
     )
+
+
+def first_attack_objective_matches(
+    command: dict[str, Any],
+    snapshot: dict[str, Any],
+    spec: dict[str, Any],
+) -> bool:
+    """Check the strategy-specific first objective against visible state."""
+    configured = [
+        str(value)
+        for value in spec.get("first_attack_zone_roles") or []
+        if str(value)
+    ]
+    if not configured:
+        return True
+    army_control = nested(observation(snapshot), "army_control", default={})
+    zones = {
+        str(zone.get("zone_id") or ""): zone
+        for zone in army_control.get("zones") or []
+    }
+    destination = zones.get(str(command.get("destination_zone_id") or "")) or {}
+    destination_role = str(destination.get("zone_role") or "")
+
+    # A fallback role is valid only when no preferred objective is currently
+    # known.  This represents Battlecruiser's "known expansion, else main"
+    # rule without granting all strategies the same broad target set.
+    fallback_roles = {
+        str(value)
+        for value in spec.get("first_attack_fallback_zone_roles") or []
+        if str(value)
+    }
+    known_preferred = any(
+        str(zone.get("zone_role") or "") in configured
+        and (
+            str(zone.get("owner") or "") == "enemy"
+            or zone_has_enemy_evidence(zone)
+        )
+        for zone in zones.values()
+    )
+    if known_preferred:
+        direct_match = destination_role in configured
+    else:
+        direct_match = destination_role in set(configured) | fallback_roles
+    if direct_match:
+        return True
+
+    # Ground armies can begin an enemy-main attack with a ``push`` to the next
+    # primary-route zone.  That zone is a waypoint in the current action space,
+    # not a different strategic objective.  ``assault`` on another base still
+    # counts as a different objective.
+    if (
+        str(command.get("movement_mode") or "") == "push"
+        and "enemy_main" in configured
+    ):
+        topology = {
+            str(zone.get("zone_id") or ""): zone
+            for zone in nested(
+                army_control,
+                "zone_topology",
+                "zones",
+                default=[],
+            )
+        }
+        waypoint = topology.get(
+            str(command.get("destination_zone_id") or "")
+        ) or {}
+        return bool(waypoint.get("on_primary_route"))
+    return False
+
+
+def continuation_objective_matches(
+    command: dict[str, Any],
+    group: dict[str, Any],
+    zones: dict[str, dict[str, Any]],
+) -> bool:
+    """Allow continued offense, next objectives, and final cleanup."""
+    mode = str(command.get("movement_mode") or "")
+    if mode == "search_and_destroy":
+        return True
+    destination = zones.get(str(command.get("destination_zone_id") or "")) or {}
+    return is_committed_offensive_destination(command, group, zones) and (
+        is_enemy_side_zone(destination)
+        or zone_has_enemy_evidence(destination)
+    )
+
+
+def safe_recovery_command(
+    command: dict[str, Any],
+    zones: dict[str, dict[str, Any]],
+) -> bool:
+    mode = str(command.get("movement_mode") or "")
+    destination = zones.get(str(command.get("destination_zone_id") or "")) or {}
+    return mode in {
+        "hold",
+        "regroup",
+        "defensive_retreat",
+        "panic_retreat",
+    } and str(destination.get("owner") or "") == "own"
 
 
 def is_committed_offensive_destination(
@@ -708,9 +796,8 @@ def main_attack_event_at(
     snapshot: dict[str, Any],
     spec: dict[str, Any],
 ) -> Optional[tuple[dict[str, Any], dict[str, Any]]]:
-    """Return the first coordinated offensive command and its commanded force."""
-    policy = snapshot.get("army_control_agent_policy")
-    if not isinstance(policy, dict) or policy.get("error"):
+    """Return the first offensive command and its gathered main force."""
+    if policy_parse_failed(snapshot):
         return None
 
     modes = set(spec.get("attack_modes") or DEFAULT_ATTACK_MODES)
@@ -724,14 +811,13 @@ def main_attack_event_at(
         zone.get("zone_id"): zone
         for zone in nested(obs, "army_control", "zones", default=[])
     }
-    commands = nested(policy, "parsed", "commands", default=[])
+    commands = issued_army_commands(snapshot)
     candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    seen_group_ids: set[str] = set()
     for command in commands or []:
         if command.get("movement_mode") not in modes:
             continue
         group_id = str(command.get("group_id") or "")
-        if not group_id or group_id in seen_group_ids:
+        if not group_id:
             continue
         group = groups.get(group_id) or {}
         if number(group.get("unit_count")) <= 0:
@@ -739,7 +825,6 @@ def main_attack_event_at(
         if not is_committed_offensive_destination(command, group, zones):
             continue
         candidates.append((command, group))
-        seen_group_ids.add(group_id)
 
     anchor = next(
         (
@@ -752,46 +837,15 @@ def main_attack_event_at(
     if anchor is None:
         return None
 
+    # The current Commander deliberately keeps distant newly produced units in
+    # group_1 until they merge into group_0.  They may reinforce the same
+    # objective, but they must not make an under-strength gathered main force
+    # appear to satisfy the attack gate.
     anchor_command, anchor_group = anchor
-    destination = str(anchor_command.get("destination_zone_id") or "")
-    coordinated = [
-        (command, group)
-        for command, group in candidates
-        if str(command.get("destination_zone_id") or "") == destination
-    ]
-    if len(coordinated) == 1:
-        return anchor_command, {
-            **anchor_group,
-            "group_ids": [anchor_group.get("group_id")],
-        }
-
-    combined_counts: dict[str, float] = {}
-    for _, group in coordinated:
-        for unit_type, count in (group.get("unit_type_counts") or {}).items():
-            combined_counts[str(unit_type)] = (
-                combined_counts.get(str(unit_type), 0.0) + number(count)
-            )
-
-    commanded_group_ids = [
-        str(group.get("group_id"))
-        for _, group in coordinated
-        if group.get("group_id")
-    ]
-    combined_group = {
+    return anchor_command, {
         **anchor_group,
-        "group_id": "+".join(commanded_group_ids),
-        "group_ids": commanded_group_ids,
-        "role": "coordinated_offensive_force",
-        "unit_count": sum(
-            number(group.get("unit_count")) for _, group in coordinated
-        ),
-        "unit_type_counts": combined_counts,
+        "group_ids": [anchor_group.get("group_id")],
     }
-    combined_command = {
-        **anchor_command,
-        "group_ids": commanded_group_ids,
-    }
-    return combined_command, combined_group
 
 
 def main_attack_command_at(
@@ -822,46 +876,6 @@ def first_group_gate_time(
     return None
 
 
-def first_coordinated_group_gate_time(
-    match: Match,
-    spec: dict[str, Any],
-    group_ids: Iterable[str],
-    *,
-    no_later_than: Optional[float] = None,
-) -> Optional[float]:
-    """Return when groups commanded together first met the attack gate."""
-    selected_ids = {str(group_id) for group_id in group_ids if group_id}
-    for snapshot in match.army:
-        snapshot_time = number(snapshot.get("game_time"))
-        if no_later_than is not None and snapshot_time > no_later_than:
-            break
-        selected_groups = [
-            group
-            for group in nested(
-                observation(snapshot),
-                "army_control",
-                "groups",
-                default=[],
-            )
-            if str(group.get("group_id") or "") in selected_ids
-        ]
-        combined_counts: dict[str, float] = {}
-        for group in selected_groups:
-            for unit_type, count in (
-                group.get("unit_type_counts") or {}
-            ).items():
-                combined_counts[str(unit_type)] = (
-                    combined_counts.get(str(unit_type), 0.0)
-                    + number(count)
-                )
-        if selected_groups and group_gate_complete(
-            {"unit_type_counts": combined_counts},
-            spec,
-        ):
-            return snapshot_time
-    return None
-
-
 def first_decision_at_or_after(
     snapshots: list[dict[str, Any]],
     time: float,
@@ -877,16 +891,34 @@ def first_decision_at_or_after(
 
 
 def policy_parse_failed(snapshot: dict[str, Any]) -> bool:
+    if snapshot.get("agent") == "commander":
+        return snapshot.get("accepted") is False or bool(snapshot.get("error"))
     policy = snapshot.get("army_control_agent_policy")
     return isinstance(policy, dict) and bool(policy.get("error"))
+
+
+def issued_army_commands(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return commands issued by the decision represented by ``snapshot``."""
+    if snapshot.get("agent") == "commander":
+        policy = snapshot.get("army_policy")
+        commands = policy.get("commands") if isinstance(policy, dict) else []
+    else:
+        commands = nested(
+            snapshot,
+            "army_control_agent_policy",
+            "parsed",
+            "commands",
+            default=[],
+        )
+    return [command for command in commands or [] if isinstance(command, dict)]
 
 
 def logical_army_decision_snapshots(
     match: Match,
 ) -> list[dict[str, Any]]:
-    """Collapse immediate parser retries into one logical Army decision.
+    """Collapse immediate failed retries into one logical decision.
 
-    Failed Army outputs are retried much faster than the normal scheduler.
+    Failed outputs are retried much faster than the normal scheduler.
     A retry chain contributes one decision: its first successful result, or
     the final failed attempt when the chain never succeeds.  This prevents
     parser retries from creating artificial 12-second opportunities.
@@ -925,15 +957,13 @@ def missed_army_opportunities(
     decisions: list[dict[str, Any]],
     first_opportunity_time: float,
     attack_time: float,
-    interval: float,
 ) -> int:
     return sum(
         1
         for snapshot in decisions
         if first_opportunity_time
         <= number(snapshot.get("game_time"))
-        and number(snapshot.get("game_time")) + interval
-        <= attack_time + 1e-6
+        < attack_time
     )
 
 
@@ -970,29 +1000,28 @@ def evaluate_attack_timing(
         match,
         spec,
     )
-    attack_mode = (
-        str(attack_command.get("movement_mode") or "")
-        if attack_command is not None
-        else ""
-    )
     attack_snapshot = (
         snapshot_at_or_before(match.army, attack_time)
         if attack_time is not None
         else None
     )
-    if attack_mode == "search_and_destroy" and attack_snapshot is not None:
-        attack_group_progress = gate_progress_at(attack_snapshot, spec)
-        readiness_source = "all_completed_units"
-    else:
-        attack_group_progress = (
-            group_gate_progress(attack_group, spec)
-            if attack_group is not None
-            else None
+    objective_correct = (
+        first_attack_objective_matches(
+            attack_command,
+            attack_snapshot,
+            spec,
         )
-        readiness_source = "coordinated_commanded_offensive_groups"
+        if attack_command is not None and attack_snapshot is not None
+        else None
+    )
+    attack_group_progress = (
+        group_gate_progress(attack_group, spec)
+        if attack_group is not None
+        else None
+    )
+    readiness_source = "gathered_main_force"
     common = {
-        "top_window_seconds": match.top_interval,
-        "army_window_seconds": match.interval,
+        "commander_interval_seconds": match.interval,
         "trigger_army_grace_missed_opportunities": (
             TRIGGER_ARMY_GRACE_MISSED_OPPORTUNITIES
         ),
@@ -1003,66 +1032,57 @@ def evaluate_attack_timing(
         "attack_command": attack_command,
         "attack_group_progress": attack_group_progress,
         "attack_readiness_source": readiness_source,
+        "objective_correct": objective_correct,
     }
 
     if attack_time is None:
         gate_time = first_time(
-            match.timeline,
-            lambda snapshot: gate_complete_at(snapshot, spec),
+            logical_decisions,
+            lambda snapshot: main_group_gate_complete_at(snapshot, spec),
         )
         return {
             **common,
             "gate_time": gate_time,
-            "eligible_top_time": None,
             "first_opportunity_time": None,
             "missed_army_opportunities": None,
             "attack_offset_seconds": None,
-            "score": 0.0,
-            "evaluable": True,
-            "status": "attack_not_issued",
+            "score": 0.0 if gate_time is not None else None,
+            "evaluable": gate_time is not None,
+            "status": (
+                "gate_reached_attack_not_issued"
+                if gate_time is not None
+                else "gate_not_reached_not_evaluable"
+            ),
         }
 
-    if attack_mode == "search_and_destroy":
-        gate_time = first_time(
-            [
-                snapshot
-                for snapshot in match.timeline
-                if number(snapshot.get("game_time")) <= attack_time
-            ],
-            lambda snapshot: gate_complete_at(snapshot, spec),
-        )
-    else:
-        attack_group_ids = attack_group.get("group_ids") or [
-            attack_group.get("group_id")
-        ]
-        if len(attack_group_ids) > 1:
-            gate_time = first_coordinated_group_gate_time(
-                match,
-                spec,
-                attack_group_ids,
-                no_later_than=attack_time,
-            )
-        else:
-            group_id = str(attack_group_ids[0] or "")
-            gate_time = first_group_gate_time(
-                match,
-                spec,
-                group_id,
-                no_later_than=attack_time,
-            )
+    attack_group_ids = attack_group.get("group_ids") or [
+        attack_group.get("group_id")
+    ]
+    group_id = str(attack_group_ids[0] or "")
+    gate_time = first_group_gate_time(
+        match,
+        spec,
+        group_id,
+        no_later_than=attack_time,
+    )
     offset = attack_time - gate_time if gate_time is not None else None
 
     if float(attack_group_progress or 0.0) < 1.0:
+        readiness_score = float(attack_group_progress or 0.0)
+        score = readiness_score if objective_correct is not False else 0.0
         return {
             **common,
             "gate_time": gate_time,
-            "eligible_top_time": None,
             "first_opportunity_time": None,
             "missed_army_opportunities": None,
             "attack_offset_seconds": offset,
-            "score": float(attack_group_progress or 0.0),
+            "score": score,
             "evaluable": True,
-            "status": "understrength_attack",
+            "status": (
+                "understrength_wrong_objective"
+                if objective_correct is False
+                else "understrength_attack"
+            ),
         }
 
     if gate_time is None:
@@ -1071,8 +1091,8 @@ def evaluate_attack_timing(
         gate_time = attack_time
         offset = 0.0
 
-    # Army decides independently: first executable chance is the first logical
-    # Army poll at or after the gate, with no Top-cycle delay.
+    # Commander decides directly: each accepted decision after gate readiness
+    # is one executable opportunity.
     first_opportunity_time = first_decision_at_or_after(
         logical_decisions,
         gate_time,
@@ -1088,10 +1108,12 @@ def evaluate_attack_timing(
             logical_decisions,
             first_opportunity_time,
             attack_time,
-            match.interval,
         )
 
-    if missed_opportunities <= TRIGGER_ARMY_GRACE_MISSED_OPPORTUNITIES:
+    if objective_correct is False:
+        score = 0.0
+        status = "wrong_first_objective"
+    elif missed_opportunities <= TRIGGER_ARMY_GRACE_MISSED_OPPORTUNITIES:
         score = 1.0
         status = (
             "on_first_opportunity"
@@ -1105,7 +1127,6 @@ def evaluate_attack_timing(
     return {
         **common,
         "gate_time": gate_time,
-        "eligible_top_time": None,
         "first_opportunity_time": first_opportunity_time,
         "missed_army_opportunities": missed_opportunities,
         "attack_offset_seconds": offset,
@@ -1134,11 +1155,18 @@ def applied_group_commands(
     return active
 
 
-def engagement_snapshot_commitment(
+def engagement_snapshot_consistency(
     snapshot: dict[str, Any],
     spec: dict[str, Any],
 ) -> Optional[float]:
-    """Return the unit-weighted fraction executing offense or reinforcement."""
+    """Return phase-aware unit-weighted consistency for current Commander.
+
+    The operational main force must continue a valid objective, clean up, or
+    recover safely after falling below its rebuild gate.  Distant reinforcement
+    is consistent only when joining the main force or its current objective.
+    Runtime auto-retreat decisions are excluded because they are not authored
+    by Commander.
+    """
     obs = observation(snapshot)
     army_control = nested(obs, "army_control", default={})
     groups = army_control.get("groups") or []
@@ -1149,10 +1177,11 @@ def engagement_snapshot_commitment(
         for zone in army_control.get("zones") or []
     }
     commands = applied_group_commands(snapshot)
-    offensive_groups = [
+    main_groups = [group for group in groups if group.get("role") == "main_force"]
+    offensive_main_groups = [
         group
-        for group in groups
-        if is_committed_offensive_destination(
+        for group in main_groups
+        if continuation_objective_matches(
             commands.get(str(group.get("group_id") or "")) or {},
             group,
             zones,
@@ -1162,237 +1191,98 @@ def engagement_snapshot_commitment(
         commands[str(group.get("group_id") or "")].get(
             "destination_zone_id"
         )
-        for group in offensive_groups
+        for group in offensive_main_groups
         if str(group.get("group_id") or "") in commands
         and commands[str(group.get("group_id") or "")].get(
             "destination_zone_id"
         )
     }
-    offensive_zones = {
+    main_force_zones = {
         group.get("nearest_zone_id")
-        for group in offensive_groups
+        for group in main_groups
         if group.get("nearest_zone_id")
     }
-    reinforcement_destinations = offensive_destinations | offensive_zones
+    reinforcement_destinations = offensive_destinations | main_force_zones
 
-    total_units = sum(number(group.get("unit_count")) for group in groups)
-    if total_units <= 0:
-        return None
-
-    committed_units = 0.0
+    evaluated_units = 0.0
+    consistent_units = 0.0
     for group in groups:
         group_id = str(group.get("group_id") or "")
         command = commands.get(group_id) or {}
-        offensive = is_committed_offensive_destination(
-            command,
-            group,
-            zones,
-        )
-        reinforcing = (
-            str(command.get("movement_mode") or "") == "regroup"
-            and command.get("destination_zone_id")
-            in reinforcement_destinations
-        )
-        if offensive or reinforcing:
-            committed_units += number(group.get("unit_count"))
-    return committed_units / total_units
+        units = number(group.get("unit_count"))
+        if units <= 0 or str(group.get("command_source") or "") == "auto_retreat":
+            continue
+        evaluated_units += units
+        role = str(group.get("role") or "")
+        if role == "main_force":
+            offensive = continuation_objective_matches(command, group, zones)
+            mode = str(command.get("movement_mode") or "")
+            safely_positioned = safe_recovery_command(command, zones)
+            recovering = safely_positioned and (
+                mode in {"defensive_retreat", "panic_retreat"}
+                or not group_gate_complete(group, spec)
+            )
+            consistent = offensive or recovering
+        else:
+            mode = str(command.get("movement_mode") or "")
+            destination = command.get("destination_zone_id")
+            consistent = (
+                destination in reinforcement_destinations
+                and mode in {"regroup", "push", "assault"}
+            )
+        if consistent:
+            consistent_units += units
+    return consistent_units / evaluated_units if evaluated_units > 0 else None
 
 
-def _has_visible_enemy_contact(
-    army_control: dict[str, Any],
-    group: dict[str, Any],
-    zones: dict[str, dict[str, Any]],
+def applied_main_offense_present(
+    snapshot: dict[str, Any],
+    spec: dict[str, Any],
 ) -> bool:
-    if number(army_control.get("visible_enemy_unit_count_near_army")) > 0:
-        return True
-    zone_ids = {
-        str(group.get("current_zone_id") or ""),
-        str(group.get("nearest_zone_id") or ""),
+    """Whether a main-force offensive command is active in Observation."""
+    obs = observation(snapshot)
+    army_control = nested(obs, "army_control", default={})
+    zones = {
+        str(zone.get("zone_id") or ""): zone
+        for zone in army_control.get("zones") or []
     }
-    for zone_id in zone_ids:
-        zone = zones.get(zone_id) or {}
-        visible = zone.get("visible_enemy_contents") or {}
-        if isinstance(visible, dict) and any(
-            number(count) > 0 for count in visible.values()
-        ):
-            return True
-        if number(zone.get("visible_enemy_units")) > 0:
-            return True
-    return False
-
-
-def _group_progress_state(
-    group: dict[str, Any],
-    command: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "nearest_zone_id": str(group.get("nearest_zone_id") or ""),
-        "destination_zone_id": str(
-            command.get("destination_zone_id") or ""
-        ),
-        "search_target_zone_id": str(
-            group.get("search_target_zone_id") or ""
-        ),
-        "searched_zone_ids": frozenset(
-            str(zone_id)
-            for zone_id in group.get("searched_zone_ids") or []
-            if zone_id
-        ),
-    }
-
-
-def _made_forward_progress(
-    previous: dict[str, Any],
-    current: dict[str, Any],
-) -> bool:
-    if current["nearest_zone_id"] != previous["nearest_zone_id"]:
-        return True
-    if current["destination_zone_id"] != previous["destination_zone_id"]:
-        return True
-    if current["search_target_zone_id"] != previous["search_target_zone_id"]:
-        return True
-    return bool(
-        current["searched_zone_ids"] - previous["searched_zone_ids"]
+    commands = applied_group_commands(snapshot)
+    modes = set(spec.get("attack_modes") or DEFAULT_ATTACK_MODES)
+    roles = set(spec.get("attack_group_roles") or DEFAULT_ATTACK_ROLES)
+    return any(
+        (not roles or group.get("role") in roles)
+        and str(command.get("movement_mode") or "") in modes
+        and continuation_objective_matches(command, group, zones)
+        for group in army_control.get("groups") or []
+        if (
+            command := commands.get(str(group.get("group_id") or ""))
+        )
     )
 
 
-def stagnation_adjusted_engagement_commitments(
+def phase_aware_engagement_consistencies(
     snapshots: list[dict[str, Any]],
     spec: dict[str, Any],
-    *,
-    grace_cycles: int = 5,
-    half_life_cycles: int = 5,
-) -> tuple[list[float], int]:
-    """Return continuation values with post-attack stagnation decay.
-
-    The caller supplies only de-duplicated logical Army decisions beginning
-    with the first snapshot where an offensive command is actually active.
-    Consequently, preparation time and parser retry attempts cannot increase
-    the stagnation counter.
-    """
-    trackers: dict[str, dict[str, Any]] = {}
+) -> list[float]:
+    """Return phase-aware continuation values for all later decisions."""
     values: list[float] = []
-    maximum_stagnant_cycles = 0
-
     for snapshot in snapshots:
-        obs = observation(snapshot)
-        army_control = nested(obs, "army_control", default={})
-        groups = army_control.get("groups") or []
-        if not groups:
-            continue
-        zones = {
-            str(zone.get("zone_id") or ""): zone
-            for zone in army_control.get("zones") or []
-        }
-        commands = applied_group_commands(snapshot)
-        offensive_groups = [
-            group
-            for group in groups
-            if is_committed_offensive_destination(
-                commands.get(str(group.get("group_id") or "")) or {},
-                group,
-                zones,
-            )
-        ]
-        offensive_destinations = {
-            commands[str(group.get("group_id") or "")].get(
-                "destination_zone_id"
-            )
-            for group in offensive_groups
-            if str(group.get("group_id") or "") in commands
-            and commands[str(group.get("group_id") or "")].get(
-                "destination_zone_id"
-            )
-        }
-        offensive_zones = {
-            group.get("nearest_zone_id")
-            for group in offensive_groups
-            if group.get("nearest_zone_id")
-        }
-        reinforcement_destinations = offensive_destinations | offensive_zones
-
-        total_units = sum(number(group.get("unit_count")) for group in groups)
-        if total_units <= 0:
-            continue
-
-        active_ids: set[str] = set()
-        effective_committed_units = 0.0
-        parse_failed = policy_parse_failed(snapshot)
-        for group in groups:
-            group_id = str(group.get("group_id") or "")
-            command = commands.get(group_id) or {}
-            offensive = is_committed_offensive_destination(
-                command,
-                group,
-                zones,
-            )
-            reinforcing = (
-                str(command.get("movement_mode") or "") == "regroup"
-                and command.get("destination_zone_id")
-                in reinforcement_destinations
-            )
-            if not group_id or not (offensive or reinforcing):
-                continue
-
-            active_ids.add(group_id)
-            current_state = _group_progress_state(group, command)
-            previous = trackers.get(group_id)
-            made_progress = (
-                previous is None
-                or _has_visible_enemy_contact(army_control, group, zones)
-                or _made_forward_progress(previous["state"], current_state)
-            )
-            if made_progress:
-                stagnant_cycles = 0
-            elif parse_failed:
-                stagnant_cycles = int(previous["stagnant_cycles"])
-            else:
-                stagnant_cycles = int(previous["stagnant_cycles"]) + 1
-
-            trackers[group_id] = {
-                "state": current_state,
-                "stagnant_cycles": stagnant_cycles,
-            }
-            maximum_stagnant_cycles = max(
-                maximum_stagnant_cycles,
-                stagnant_cycles,
-            )
-            decay = (
-                1.0
-                if stagnant_cycles <= grace_cycles
-                else 2.0
-                ** (
-                    -(stagnant_cycles - grace_cycles)
-                    / max(half_life_cycles, 1)
-                )
-            )
-            effective_committed_units += (
-                number(group.get("unit_count")) * decay
-            )
-
-        trackers = {
-            group_id: tracker
-            for group_id, tracker in trackers.items()
-            if group_id in active_ids
-        }
-        values.append(effective_committed_units / total_units)
-
-    return values, maximum_stagnant_cycles
+        value = engagement_snapshot_consistency(snapshot, spec)
+        if value is not None:
+            values.append(value)
+    return values
 
 
 def normal_army_opportunity_snapshots(
     match: Match,
     start_time: float,
 ) -> list[dict[str, Any]]:
-    """Return one snapshot per logical Army decision after ``start_time``."""
+    """Return one snapshot per logical Commander decision after ``start_time``."""
     return [
         snapshot
         for snapshot in logical_army_decision_snapshots(match)
         if number(snapshot.get("game_time")) >= start_time
     ]
-
-
-CONTINUATION_WINDOW_OPPORTUNITIES = 10
 
 
 def evaluate_engagement_continuation(
@@ -1402,31 +1292,28 @@ def evaluate_engagement_continuation(
 ) -> dict[str, Any]:
     """Score sustained unit commitment after the first valid attack.
 
-    Only the first ``CONTINUATION_WINDOW_OPPORTUNITIES`` logical Army decisions
-    after the offense is applied are averaged. Later recovery, rebuild, and
-    cleanup phases are excluded so long matches do not dilute the opening wave.
+    All later logical Commander decisions are evaluated because recovery,
+    rebuild, renewed offense, and cleanup are explicit parts of the strategy.
     """
     initiation = attack_evaluation or evaluate_attack_timing(match, spec)
     attack_time = initiation.get("attack_time")
-    global_gate_time = first_time(
-        match.timeline,
-        lambda snapshot: gate_complete_at(snapshot, spec),
+    main_gate_time = first_time(
+        logical_army_decision_snapshots(match),
+        lambda snapshot: main_group_gate_complete_at(snapshot, spec),
     )
     common = {
         "attack_time": attack_time,
-        "global_gate_time": global_gate_time,
+        "global_gate_time": main_gate_time,
         "first_applied_offense_time": None,
         "evaluated_opportunities": 0,
-        "continuation_window_opportunities": (
-            CONTINUATION_WINDOW_OPPORTUNITIES
-        ),
+        "continuation_window_opportunities": None,
     }
     if attack_time is None:
-        if global_gate_time is None:
+        if main_gate_time is None:
             return {
                 **common,
-                "score": 1.0,
-                "status": "gate_not_reached_correct_wait",
+                "score": None,
+                "status": "gate_not_reached_not_evaluable",
             }
         return {
             **common,
@@ -1439,8 +1326,7 @@ def evaluate_engagement_continuation(
         snapshot_time = number(snapshot.get("game_time"))
         if snapshot_time < number(attack_time):
             continue
-        commitment = engagement_snapshot_commitment(snapshot, spec)
-        if commitment is not None and commitment > 0:
+        if applied_main_offense_present(snapshot, spec):
             first_applied_time = snapshot_time
             break
     if first_applied_time is None:
@@ -1453,21 +1339,18 @@ def evaluate_engagement_continuation(
     window_snapshots = normal_army_opportunity_snapshots(
         match,
         first_applied_time,
-    )[:CONTINUATION_WINDOW_OPPORTUNITIES]
-    values, maximum_stagnant_cycles = (
-        stagnation_adjusted_engagement_commitments(
-            window_snapshots,
-            spec,
-        )
     )
-    score = statistics.fmean(values) if values else 0.0
+    values = phase_aware_engagement_consistencies(
+        window_snapshots,
+        spec,
+    )
+    score = statistics.fmean(values) if values else None
     return {
         **common,
         "score": score,
-        "status": "evaluated" if values else "no_observation_window",
+        "status": "evaluated" if values else "not_evaluable_runtime_control",
         "first_applied_offense_time": first_applied_time,
         "evaluated_opportunities": len(values),
-        "maximum_stagnant_cycles": maximum_stagnant_cycles,
     }
 
 
@@ -1482,23 +1365,12 @@ def evaluate_engagement_execution(
         spec,
         initiation,
     )
-    correct_wait = (
-        initiation.get("attack_time") is None
-        and continuation.get("global_gate_time") is None
-    )
-    trigger_score = (
-        1.0 if correct_wait else float(initiation["score"])
-    )
-    trigger_status = (
-        "gate_not_reached_correct_wait"
-        if correct_wait
-        else str(initiation.get("status") or "")
-    )
-    continuation_score = float(continuation["score"])
+    trigger_score = initiation.get("score")
+    trigger_status = str(initiation.get("status") or "")
+    continuation_score = continuation.get("score")
+    combined = mean_available(trigger_score, continuation_score)
     return {
-        "score": statistics.fmean(
-            [trigger_score, continuation_score]
-        ),
+        "score": combined,
         "trigger_score": trigger_score,
         "trigger_status": trigger_status,
         # Backward-compatible alias for callers using the previous name.
@@ -1506,10 +1378,6 @@ def evaluate_engagement_execution(
         "continuation_score": continuation_score,
         "evaluated_opportunities": continuation.get(
             "evaluated_opportunities",
-            0,
-        ),
-        "maximum_stagnant_cycles": continuation.get(
-            "maximum_stagnant_cycles",
             0,
         ),
         "initiation": initiation,
@@ -1804,9 +1672,9 @@ def evaluate_match(
         ),
     )
 
-    # Engagement trigger: correctly wait while the gate is incomplete,
-    # penalize premature attacks by their readiness, and decay delayed
-    # responses after the gate is complete.
+    # Engagement is N/A until the gathered main force either attacks or reaches
+    # the strategy gate.  N/A values are omitted from both requirements and the
+    # per-match overall rather than being counted as artificial successes.
     engagement_trigger_consistency = engagement_evaluation[
         "trigger_score"
     ]
@@ -1822,60 +1690,56 @@ def evaluate_match(
     trigger_passed = engagement_evaluation["trigger_status"] in {
         "on_first_opportunity",
         "within_army_grace",
-        "gate_not_reached_correct_wait",
     }
-    add(
-        "engagement",
-        "engagement_trigger",
-        engagement_trigger_consistency,
-        trigger_passed,
-        (
-            f"gate_time={gate_time}; attack_time={attack_time}; "
-            f"offset={attack_evaluation['attack_offset_seconds']}; "
-            "eligible_top_time="
-            f"{attack_evaluation['eligible_top_time']}; "
-            "first_opportunity_time="
-            f"{attack_evaluation['first_opportunity_time']}; "
-            "missed_army_opportunities="
-            f"{attack_evaluation['missed_army_opportunities']}; "
-            "trigger_army_grace_missed_opportunities="
-            f"{attack_evaluation.get('trigger_army_grace_missed_opportunities', TRIGGER_ARMY_GRACE_MISSED_OPPORTUNITIES)}; "
-            "decision_half_life_opportunities="
-            f"{attack_evaluation.get('decision_half_life_opportunities', TRIGGER_ARMY_HALF_LIFE_MISSED_OPPORTUNITIES)}; "
-            "attack_force_progress="
-            f"{attack_evaluation['attack_group_progress']}; "
-            "attack_readiness_source="
-            f"{attack_evaluation['attack_readiness_source']}; "
-            f"status={engagement_evaluation['trigger_status']}"
-        ),
-    )
-    add(
-        "engagement",
-        "engagement_continuation",
-        engagement_continuation_consistency,
-        math.isclose(engagement_continuation_consistency, 1.0),
-        (
-            "first_applied_offense_time="
-            f"{continuation_evaluation['first_applied_offense_time']}; "
-            "evaluated_opportunities="
-            f"{continuation_evaluation['evaluated_opportunities']}; "
-            "continuation_window_opportunities="
-            f"{continuation_evaluation.get('continuation_window_opportunities', CONTINUATION_WINDOW_OPPORTUNITIES)}; "
-            "maximum_stagnant_cycles="
-            f"{continuation_evaluation.get('maximum_stagnant_cycles', 0)}; "
-            f"status={continuation_evaluation['status']}"
-        ),
-    )
-
-    overall = statistics.fmean(
-        [
-            economy_completion,
-            technology_completion,
-            army_completion,
+    if engagement_trigger_consistency is not None:
+        add(
+            "engagement",
+            "engagement_trigger",
             engagement_trigger_consistency,
+            trigger_passed,
+            (
+                f"gate_time={gate_time}; attack_time={attack_time}; "
+                f"offset={attack_evaluation['attack_offset_seconds']}; "
+                "first_opportunity_time="
+                f"{attack_evaluation['first_opportunity_time']}; "
+                "missed_commander_opportunities="
+                f"{attack_evaluation['missed_army_opportunities']}; "
+                "grace_opportunities="
+                f"{attack_evaluation.get('trigger_army_grace_missed_opportunities', TRIGGER_ARMY_GRACE_MISSED_OPPORTUNITIES)}; "
+                "attack_force_progress="
+                f"{attack_evaluation['attack_group_progress']}; "
+                "attack_readiness_source="
+                f"{attack_evaluation['attack_readiness_source']}; "
+                "objective_correct="
+                f"{attack_evaluation.get('objective_correct')}; "
+                f"status={engagement_evaluation['trigger_status']}"
+            ),
+        )
+    if engagement_continuation_consistency is not None:
+        add(
+            "engagement",
+            "engagement_continuation",
             engagement_continuation_consistency,
-        ]
+            math.isclose(engagement_continuation_consistency, 1.0),
+            (
+                "first_applied_offense_time="
+                f"{continuation_evaluation['first_applied_offense_time']}; "
+                "evaluated_opportunities="
+                f"{continuation_evaluation['evaluated_opportunities']}; "
+                "scope=all_post_attack_commander_decisions; "
+                f"status={continuation_evaluation['status']}"
+            ),
+        )
+
+    overall = mean_available(
+        economy_completion,
+        technology_completion,
+        army_completion,
+        engagement_trigger_consistency,
+        engagement_continuation_consistency,
     )
+    if overall is None:
+        raise ValueError("strategy spec has no evaluable requirements")
     strict_pass_rate = statistics.fmean(
         float(requirement.passed) for requirement in requirements
     )
@@ -1907,6 +1771,12 @@ def evaluate_match(
         "engagement_continuation_consistency": (
             engagement_continuation_consistency
         ),
+        "engagement_trigger_evaluable": float(
+            engagement_trigger_consistency is not None
+        ),
+        "engagement_continuation_evaluable": float(
+            engagement_continuation_consistency is not None
+        ),
         # Backward-compatible aliases. New analyses should use the two
         # engagement components above; paper metrics average those five
         # primary components (eco/tech/army/trigger/continuation).
@@ -1925,10 +1795,8 @@ def evaluate_match(
         "attack_readiness_source": attack_evaluation[
             "attack_readiness_source"
         ],
-        "top_window_s": attack_evaluation["top_window_seconds"],
-        "army_window_s": attack_evaluation["army_window_seconds"],
-        "attack_eligible_top_time_s": attack_evaluation[
-            "eligible_top_time"
+        "commander_interval_s": attack_evaluation[
+            "commander_interval_seconds"
         ],
         "attack_first_opportunity_time_s": attack_evaluation[
             "first_opportunity_time"
@@ -1940,6 +1808,9 @@ def evaluate_match(
             "decision_half_life_opportunities"
         ],
         "attack_evaluable": float(attack_evaluation["evaluable"]),
+        "first_attack_objective_correct": attack_evaluation.get(
+            "objective_correct"
+        ),
         "attack_evaluation_status": attack_evaluation["status"],
         "engagement_trigger_status": engagement_evaluation[
             "trigger_status"
@@ -1952,9 +1823,6 @@ def evaluate_match(
         ),
         "engagement_continuation_opportunities": (
             continuation_evaluation["evaluated_opportunities"]
-        ),
-        "engagement_maximum_stagnant_cycles": (
-            continuation_evaluation.get("maximum_stagnant_cycles", 0)
         ),
         "engagement_continuation_status": continuation_evaluation[
             "status"
@@ -1973,6 +1841,8 @@ PAPER_COMPONENT_METRICS = (
 
 MAIN_METRICS = (
     *PAPER_COMPONENT_METRICS,
+    "engagement_trigger_evaluable",
+    "engagement_continuation_evaluable",
     "engagement_execution_consistency",
     "overall_strategy_compliance",
     "strict_requirement_pass_rate",
@@ -2051,8 +1921,6 @@ def grouped_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "matches": len(group_rows),
         }
         for metric in MAIN_METRICS:
-            if metric == "overall_strategy_compliance":
-                continue
             values = [
                 float(row[metric])
                 for row in group_rows
@@ -2064,16 +1932,6 @@ def grouped_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 result[f"{metric}_sd"] = (
                     statistics.stdev(values) if len(values) >= 2 else 0.0
                 )
-        component_means = [
-            result.get(f"{metric}_mean")
-            for metric in PAPER_COMPONENT_METRICS
-            if result.get(f"{metric}_mean") is not None
-        ]
-        result["overall_strategy_compliance_mean"] = (
-            statistics.fmean(component_means)
-            if len(component_means) == len(PAPER_COMPONENT_METRICS)
-            else None
-        )
         result["attack_completion_n"] = result.get(
             "engagement_execution_consistency_n"
         )
@@ -2138,6 +1996,7 @@ def balanced_paper_metrics(
             weighted.append((mean, weight))
         if not weighted:
             result[metric] = None
+            result[f"{metric}_n"] = 0
             continue
         total_weight = sum(weight for _mean, weight in weighted)
         result[metric] = (
@@ -2145,12 +2004,23 @@ def balanced_paper_metrics(
             if total_weight > 0
             else None
         )
-    components = [result.get(metric) for metric in PAPER_COMPONENT_METRICS]
+        result[f"{metric}_n"] = int(total_weight)
+    overall_weighted: list[tuple[float, float]] = []
+    for cell in cells:
+        value = cell.get("overall_strategy_compliance_mean")
+        if value is None:
+            continue
+        weight = float(number(cell.get("overall_strategy_compliance_n") or 1))
+        if weight > 0:
+            overall_weighted.append((float(value), weight))
+    total_overall_weight = sum(weight for _value, weight in overall_weighted)
     result["overall_strategy_compliance"] = (
-        statistics.fmean(float(value) for value in components)
-        if all(value is not None for value in components)
+        sum(value * weight for value, weight in overall_weighted)
+        / total_overall_weight
+        if total_overall_weight > 0
         else None
     )
+    result["overall_strategy_compliance_n"] = int(total_overall_weight)
     return result
 
 
@@ -2556,29 +2426,31 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "expected_matches_per_batch": args.expected_matches_per_batch,
                 "allow_incomplete_batches": args.allow_incomplete_batches,
                 "engagement_execution_metric": {
-                    "display_name_zh": "交战执行一致性",
+                    "display_name_zh": "进攻执行一致性",
                     "combination": (
-                        "mean(trigger_consistency, "
-                        "continuation_consistency)"
+                        "mean of available trigger and continuation scores; "
+                        "both are N/A before an engagement opportunity exists"
                     ),
                     "valid_modes": sorted(DEFAULT_ATTACK_MODES),
                     "trigger_roles": sorted(DEFAULT_ATTACK_ROLES),
-                    "continuation_roles": "all combat-bearing groups",
-                    "requires_policy_error_null": True,
+                    "trigger_force": "gathered main_force only",
+                    "continuation_roles": (
+                        "main_force plus reinforcement groups joining the "
+                        "main force or active objective"
+                    ),
+                    "requires_commander_decision_accepted": True,
                     "understrength_score": (
-                        "required-supply-weighted readiness of coordinated "
-                        "groups commanded toward the anchored offensive "
-                        "destination, or all completed units for "
-                        "search_and_destroy"
+                        "required-supply-weighted readiness of the gathered "
+                        "main force; distant group_1 reinforcements do not "
+                        "complete the trigger gate"
                     ),
                     "army_completion_source": (
                         "maximum required-supply-weighted readiness over all "
                         "completed living units"
                     ),
                     "first_executable_opportunity": (
-                        "first logical Army decision at or after gate "
-                        "readiness; Top decisions are ignored because Army "
-                        "is prompted to judge the attack transition itself"
+                        "first logical Commander decision at or after the "
+                        "gathered main force reaches gate readiness"
                     ),
                     "late_decay": (
                         "score=1 if missed_army_opportunities <= "
@@ -2587,37 +2459,30 @@ def main(argv: Optional[list[str]] = None) -> int:
                         f"{TRIGGER_ARMY_HALF_LIFE_MISSED_OPPORTUNITIES})"
                     ),
                     "missed_army_opportunities": (
-                        "logical Army decisions for which one complete normal "
-                        "Army interval elapsed before attack application"
+                        "logical Commander decisions after the first gate-ready "
+                        "decision and before the first issued attack"
                     ),
-                    "army_retry_deduplication": (
-                        "collapse consecutive fast parser retries into one "
-                        "logical Army decision and retain the first successful "
+                    "commander_retry_deduplication": (
+                        "collapse consecutive fast failed retries into one "
+                        "logical decision and retain the first successful "
                         "result or the final failed attempt"
                     ),
                     "no_attack_before_gate": (
-                        "trigger=1, continuation=1"
+                        "trigger=N/A, continuation=N/A"
                     ),
                     "no_attack_after_gate": (
                         "trigger=0, continuation=0"
                     ),
                     "continuation": (
-                        f"mean over the first {CONTINUATION_WINDOW_OPPORTUNITIES} "
-                        "logical Army decisions after the first applied offense "
-                        "of the stagnation-adjusted unit fraction executing "
-                        "committed offense or reinforcing the front"
-                    ),
-                    "continuation_window_opportunities": (
-                        CONTINUATION_WINDOW_OPPORTUNITIES
+                        "mean over all logical Commander decisions after the "
+                        "first applied offense; valid phases are continued or "
+                        "renewed offense, cleanup, safe recovery/rebuild, and "
+                        "reinforcement joining the main force or objective"
                     ),
                     "continuation_uses_applied_commands": True,
-                    "continuation_fast_retry_deduplication": (
-                        "retry attempts never create additional continuation "
-                        "or stagnation cycles"
-                    ),
-                    "continuation_stagnation_decay": (
-                        "no decay for five post-attack no-progress logical "
-                        "cycles; then 2 ** (-(k - 5) / 5), reset by progress"
+                    "runtime_auto_retreat": (
+                        "excluded from the denominator because it is executor "
+                        "control rather than a Commander-authored decision"
                     ),
                 },
                 "batch_summary": batch_rows,

@@ -28,5 +28,7 @@
   "unit_supply": {"SIEGETANK": 3, "THOR": 6, "BATTLECRUISER": 6},
   "attack_gate": {"BATTLECRUISER": 6, "THOR": 4, "SIEGETANK": 6},
   "attack_modes": ["push", "assault", "search_and_destroy"],
-  "attack_group_roles": ["main_force"]
+  "attack_group_roles": ["main_force"],
+  "first_attack_zone_roles": ["enemy_expansion", "enemy_natural"],
+  "first_attack_fallback_zone_roles": ["enemy_main"]
 }

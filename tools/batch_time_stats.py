@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 _LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)")
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 # Support both ``python tools/batch_time_stats.py`` and ``python -m tools.batch_time_stats``.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -151,6 +152,8 @@ def _wall_seconds_from_log(log_path: Path) -> Optional[float]:
     first: Optional[datetime] = None
     last: Optional[datetime] = None
     for line in text.splitlines():
+        if "\x1b" in line:
+            line = _ANSI_ESCAPE_RE.sub("", line)
         match = _LOG_TS_RE.match(line)
         if not match:
             continue

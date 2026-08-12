@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import sys
 from datetime import datetime
@@ -74,8 +75,19 @@ DEFAULT_SKIP_VERSION_UPDATE = False  # True：跳过 version.txt 更新（批量
 DEFAULT_EXTRACT_ENEMY_TRUTH = True  # 赛后从 Replay 提取敌方玩家真实状态
 
 
+# Strip CSI/OSC-style ANSI so match ``.log`` files stay plain text while the
+# console can still show loguru colors.
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def _strip_ansi(text: str) -> str:
+    if "\x1b" not in text and "\x9b" not in text:
+        return text
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
 class _TeeStream:
-    """Mirror direct-run console output into the match log."""
+    """Mirror direct-run console output into the match log (ANSI-stripped)."""
 
     def __init__(self, console, log_file) -> None:
         self.console = console
@@ -83,7 +95,7 @@ class _TeeStream:
 
     def write(self, text: str) -> int:
         self.console.write(text)
-        self.log_file.write(text)
+        self.log_file.write(_strip_ansi(text))
         return len(text)
 
     def flush(self) -> None:
