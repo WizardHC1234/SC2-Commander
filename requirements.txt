@@ -7,6 +7,7 @@ portpicker==1.4.0
 # === LLM 接口调用依赖 ===
 openai>=1.0.0              # 必须！llm_caller.py 依赖此包进行 API 通讯
 json-repair>=0.44.0        # 修复 JSON tool_mode 下模型输出的残缺/错括号 JSON
+httpx[socks]>=0.27.0       # 环境若配置 SOCKS 代理，openai/httpx 需要 socksio
 
 # === 网络请求与异步 ===
 requests==2.23.0

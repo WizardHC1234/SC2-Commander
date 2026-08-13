@@ -505,7 +505,8 @@ def play_vs_ai(
                 except Exception as exc:
                     # The original match record and replay remain valid if
                     # optional post-match extraction fails.
-                    print(f" ▷ Enemy truth extraction failed: {exc}")
+                    detail = str(exc).strip() or repr(exc)
+                    print(f" ▷ Enemy truth extraction failed: {type(exc).__name__}: {detail}")
     finally:
         if direct_log is not None:
             sys.stdout = original_stdout

@@ -46,4 +46,27 @@ def apply() -> None:
 
     Unit.buffs = _buffs
 
+    # burnysc2 无默认带 -verbose，终端会被 MainThread/ResponseThread 刷屏
+    from sc2.sc2process import SC2Process
+
+    _orig_sc2_launch = SC2Process._launch
+
+    def _launch_without_verbose(self):  # noqa: ANN001
+        import subprocess as sp
+
+        real_popen = sp.Popen
+
+        def _popen(args, *a, **k):  # noqa: ANN001
+            if isinstance(args, (list, tuple)):
+                args = [x for x in args if x not in ("-verbose", "--verbose")]
+            return real_popen(args, *a, **k)
+
+        sp.Popen = _popen  # type: ignore[assignment]
+        try:
+            return _orig_sc2_launch(self)
+        finally:
+            sp.Popen = real_popen  # type: ignore[assignment]
+
+    SC2Process._launch = _launch_without_verbose  # type: ignore[method-assign]
+
     _APPLIED = True

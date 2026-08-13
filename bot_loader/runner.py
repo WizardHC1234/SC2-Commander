@@ -110,7 +110,6 @@ class MatchRunner:
             str(Paths.BASE),
             "-tempDir",
             tmp_dir,
-            "--verbose",
         ]
 
         return subprocess.Popen(args, cwd=(str(Paths.CWD) if Paths.CWD else None))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
@@ -26,6 +27,56 @@ def enemy_truth_path(record_path: str | Path) -> Path:
 
 def replay_path_for_record(record_path: str | Path) -> Path:
     return Path(record_path).resolve().with_suffix(".SC2Replay")
+
+
+def _patch_linux_start_replay_absolute_path() -> None:
+    """burnysc2 rewrites Linux replay paths to bare filenames and requires
+    ~/Documents/StarCraft II/Replays. That fails on headless installs where SC2
+    accepts absolute paths instead. Patch once to always send an absolute path.
+    """
+    if platform.system() != "Linux":
+        return
+    from s2clientprotocol import sc2api_pb2 as sc_pb
+    from sc2.controller import Controller
+
+    current = Controller.start_replay
+    if getattr(current, "_sc2_commander_abs_path", False):
+        return
+
+    async def start_replay(self, replay_path: str, realtime: bool, observed_id: int = 0):
+        ifopts = sc_pb.InterfaceOptions(
+            raw=True,
+            score=True,
+            show_cloaked=True,
+            raw_affects_selection=True,
+            raw_crop_to_playable_area=False,
+        )
+        path = str(Path(replay_path).expanduser().resolve())
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"replay not found: {path}")
+        req = sc_pb.RequestStartReplay(
+            replay_path=path,
+            observed_player_id=observed_id,
+            realtime=realtime,
+            options=ifopts,
+        )
+        result = await self._execute(start_replay=req)
+        assert result.status == 4, (
+            f"{result.start_replay.error} - {result.start_replay.error_details}"
+        )
+        return result
+
+    start_replay._sc2_commander_abs_path = True  # type: ignore[attr-defined]
+    Controller.start_replay = start_replay  # type: ignore[method-assign]
+
+
+def prepare_replay_path_for_sc2(replay_path: Path) -> Path:
+    """Return an absolute replay path suitable for run_replay on this OS."""
+    replay_path = Path(replay_path).expanduser().resolve()
+    if not replay_path.is_file():
+        raise FileNotFoundError(f"replay not found: {replay_path}")
+    _patch_linux_start_replay_absolute_path()
+    return replay_path
 
 
 def commander_game_loops(record: dict[str, Any]) -> list[int]:
@@ -90,10 +141,27 @@ def _counter_names(units: Iterable[Any]) -> dict[str, int]:
     )
 
 
+def _unit_type_key(unit: Any) -> int:
+    type_id = getattr(unit, "type_id", None)
+    if type_id is None:
+        return -1
+    value = getattr(type_id, "value", type_id)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
 def _ability_name(order: Any) -> str:
     ability = getattr(order, "ability", None)
     ability_id = getattr(ability, "id", None)
-    return str(getattr(ability_id, "name", None) or ability_id or "UNKNOWN")
+    if ability_id is None:
+        ability_id = ability
+    name = getattr(ability_id, "name", None)
+    if name:
+        return str(name)
+    value = getattr(ability_id, "value", ability_id)
+    return str(value or "UNKNOWN")
 
 
 def _unit_row(unit: Any) -> list[Any]:
@@ -134,14 +202,22 @@ class ReplayTruthBot(BotAI):
             realtime=realtime,
         )
 
+    def _is_army_unit(self, unit: Any) -> bool:
+        entry = self._game_data.units.get(_unit_type_key(unit))
+        if entry is None:
+            return False
+        try:
+            return float(entry._proto.food_required) > 0
+        except Exception:
+            return False
+
     def _snapshot(self, requested_loop: int) -> dict[str, Any]:
         workers = list(self.workers)
         worker_tags = {unit.tag for unit in workers}
         army_units = [
             unit
             for unit in self.units
-            if unit.tag not in worker_tags
-            and self._game_data.units[unit.type_id.value]._proto.food_required > 0
+            if unit.tag not in worker_tags and self._is_army_unit(unit)
         ]
         completed_structures = [
             unit for unit in self.structures if float(unit.build_progress) >= 1.0
@@ -236,9 +312,10 @@ def extract_enemy_truth(
         observed_player_id=opponent_player_id,
         target_loops=target_loops,
     )
+    sc2_replay_path = prepare_replay_path_for_sc2(replay_path)
     run_replay(
         bot,
-        str(replay_path),
+        str(sc2_replay_path),
         realtime=False,
         observed_id=opponent_player_id,
     )

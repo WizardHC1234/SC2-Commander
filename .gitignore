@@ -50,6 +50,10 @@ Bots/
 *.log
 optimizer_timeline.txt
 version.txt
+sft_runs/
+
+# Third-party / large checkouts
+LLaMA-Factory/
 
 # Native / large build artifacts
 sc2-pathlib/
