@@ -64,9 +64,9 @@ $EXPERIMENTS = @(
     # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
 
 
-    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20}
-    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20}
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
     @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
     @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20  }
     @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20 }
