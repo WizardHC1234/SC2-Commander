@@ -49,12 +49,22 @@ def render_sc2_knowledge(observations: list[ToolObservation]) -> str:
     blocks: list[str] = []
     for index, observation in enumerate(observations, 1):
         status = observation.status or ("complete" if observation.ok else "failed")
-        problem_id = ""
+        problem_ids = ""
+        plan_ids = ""
         if isinstance(observation.args, dict):
-            problem_id = str(observation.args.get("problem_id") or "")
+            raw_problem_ids = observation.args.get("problem_ids") or []
+            if raw_problem_ids:
+                problem_ids = ",".join(str(value) for value in raw_problem_ids)
+            else:
+                problem_ids = str(observation.args.get("problem_id") or "")
+            plan_ids = ",".join(
+                str(value) for value in observation.args.get("plan_ids") or []
+            )
         header = f"### Knowledge Result {index} ({status})"
-        if problem_id:
-            header += f" problem_id={problem_id}"
+        if problem_ids:
+            header += f" problems={problem_ids}"
+        if plan_ids:
+            header += f" plans={plan_ids}"
         # Pass through complete verified answers. Failed runs contribute only
         # their error so fallback dumps cannot masquerade as usable knowledge.
         if observation.ok:

@@ -25,6 +25,21 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return json.loads(cleaned)
 
 
+def _usage_payload(usage: Any) -> dict[str, Any]:
+    """Keep provider usage, including cache fields, in a JSON-safe shape."""
+    if isinstance(usage, dict):
+        return usage
+    for method_name in ("model_dump", "dict"):
+        method = getattr(usage, method_name, None)
+        if callable(method):
+            try:
+                value = method()
+                return value if isinstance(value, dict) else {}
+            except Exception:  # pragma: no cover - provider-specific object
+                pass
+    return {}
+
+
 def call_json_llm(
     prompt: str | list[dict[str, str]],
     *,
@@ -32,7 +47,7 @@ def call_json_llm(
     system: str = "You are an expert SC2 bot analyst and strategy designer. Output valid JSON only.",
     is_reasoning: bool = False,
 ) -> Optional[dict[str, Any]]:
-    from llm.caller import call_openai
+    from llm.caller import call_openai_detailed
 
     if isinstance(prompt, str):
         messages = [
@@ -45,12 +60,15 @@ def call_json_llm(
     for attempt in range(1, LLM_CALL_MAX_ATTEMPTS + 1):
         response = ""
         try:
-            response = call_openai(
+            response_data = call_openai_detailed(
                 messages=messages,
                 model_key=model,
                 is_reasoning=is_reasoning,
                 response_format={"type": "json_object"},
             )
+            response = str(response_data.get("content") or "")
+            if response_data.get("error"):
+                raise RuntimeError(str(response_data["error"]))
             if not response.strip():
                 raise RuntimeError("empty response from LLM provider")
             parsed = extract_json_object(response.strip())
@@ -63,6 +81,8 @@ def call_json_llm(
                     "messages": messages,
                     "raw_response": response,
                     "parsed_response": parsed,
+                    "usage": _usage_payload(response_data.get("usage")),
+                    "latency_seconds": response_data.get("latency_seconds"),
                 },
             )
             return parsed

@@ -8,7 +8,7 @@ from .config import (
     OPTIMIZATION_ENABLE_REASONING,
 )
 from .llm import call_json_llm
-from .simple_prompts import build_candidate_prompt
+from .prompts import build_candidate_prompt
 from .types import BattleAnalysis, EvolImprovement, ToolObservation, ValidationResult
 from ..validation import validate_improvement
 
@@ -42,6 +42,11 @@ def run_optimization_agent_loop(
     events: list[dict[str, Any]] = []
     candidate: dict[str, Any] | None = None
     last_improvement: EvolImprovement | None = None
+    valid_plan_ids = {
+        str(item.get("id") or "").strip()
+        for item in (battle_analysis.raw.get("candidate_plans") or [])
+        if isinstance(item, dict)
+    }
 
     print(
         f"{prefix}OptimizationAgent: generating one candidate for "
@@ -90,7 +95,26 @@ def run_optimization_agent_loop(
             raw=normalized,
         )
 
-        result = validate_improvement(files=last_improvement.files, race=race)
+        selected_plan_ids = [
+            str(value).strip()
+            for value in normalized["rationale"].get("selected_plan_ids") or []
+            if str(value).strip()
+        ]
+        if not selected_plan_ids or any(plan_id not in valid_plan_ids for plan_id in selected_plan_ids):
+            error = (
+                "candidate rationale.selected_plan_ids must contain one or more of: "
+                f"{', '.join(sorted(valid_plan_ids)) or '(none)'}"
+            )
+            validation_errors.append(error)
+            events.append(
+                {"attempt": attempt, "action": name or "draft_candidate", "valid": False, "error": error}
+            )
+            continue
+
+        result = validate_improvement(
+            files=last_improvement.files,
+            race=race,
+        )
         events.append(
             {
                 "attempt": attempt,

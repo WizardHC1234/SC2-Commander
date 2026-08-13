@@ -9,7 +9,7 @@ from .sc2_data_store import DEFAULT_DATABASE_PATH
 from .strategy_knowledge import build_strategy_knowledge, render_strategy_knowledge
 
 
-KNOWLEDGE_VERIFICATION_SCHEMA = "strategy_knowledge.v1"
+KNOWLEDGE_VERIFICATION_SCHEMA = "strategy_knowledge.v2"
 DEFAULT_DATA_PATH = DEFAULT_DATABASE_PATH
 
 
@@ -37,10 +37,13 @@ def build_knowledge_query(item: dict[str, Any], *, race: str = "") -> str:
     parts = [str(item.get("question") or "").strip()]
     entities = [str(value).strip() for value in item.get("entities") or [] if str(value).strip()]
     needs = [str(value).strip() for value in item.get("needs") or [] if str(value).strip()]
+    plan_ids = [str(value).strip() for value in item.get("plan_ids") or [] if str(value).strip()]
     if entities:
         parts.append(f"entities={','.join(entities)}")
     if needs:
         parts.append(f"needs={','.join(needs)}")
+    if plan_ids:
+        parts.append(f"plans={','.join(plan_ids)}")
     if race:
         parts.append(f"race={race}")
     return " | ".join(part for part in parts if part)
@@ -59,6 +62,11 @@ def run_knowledge_query(
         for value in item.get("problem_ids") or []
         if str(value).strip()
     ]
+    plan_ids = [
+        str(value).strip()
+        for value in item.get("plan_ids") or []
+        if str(value).strip()
+    ]
     query = build_knowledge_query(item, race=race)
     try:
         packet = build_strategy_knowledge(
@@ -72,6 +80,7 @@ def run_knowledge_query(
             "question_id": question_id,
             "problem_ids": problem_ids,
             "problem_id": problem_ids[0] if problem_ids else question_id,
+            "plan_ids": plan_ids,
             "ok": False,
             "query": query,
             "answer": "",
@@ -85,6 +94,7 @@ def run_knowledge_query(
         "question_id": question_id,
         "problem_ids": problem_ids,
         "problem_id": problem_ids[0] if problem_ids else question_id,
+        "plan_ids": plan_ids,
         "ok": not error,
         "query": query,
         "answer": answer,

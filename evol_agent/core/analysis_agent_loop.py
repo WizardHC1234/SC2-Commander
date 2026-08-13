@@ -11,6 +11,7 @@ from .config import (
     DEFAULT_ANALYSIS_MODEL,
     MAX_CONCURRENT_MATCH_SUBAGENTS,
     MAX_KNOWLEDGE_QUERIES,
+    MIN_KNOWLEDGE_QUERIES,
 )
 from .llm import call_json_llm
 from .loop_helpers import (
@@ -22,7 +23,7 @@ from .loop_helpers import (
     normalize_strategy_contract,
 )
 from .match_summary import run_fixed_match_summary
-from .simple_prompts import build_batch_analysis_prompt
+from .prompts import build_batch_analysis_prompt
 from .types import AnalysisPipelineResult, BattleAnalysis, GameDigest, ToolObservation
 from ..sc2_data_agent import (
     build_knowledge_query,
@@ -51,9 +52,10 @@ def _normalize_batch_analysis(
 ) -> tuple[dict[str, Any] | None, str]:
     """Normalize the intentionally small batch-analysis schema.
 
-    Optional bookkeeping is repaired locally. Only the primary problem and the
-    optimization direction are required because without them no candidate can
-    be generated meaningfully.
+    Optional bookkeeping is repaired locally. At least one strategy-fixable
+    problem, several coherent deterministic plans, and five plan-linked
+    knowledge questions are required in knowledge-enabled runs. Semantic
+    question quality is guided by the prompt rather than rejected here.
     """
     payload = dict(raw)
     payload["strategy_contract"] = normalize_strategy_contract(
@@ -79,46 +81,94 @@ def _normalize_batch_analysis(
             break
     payload["wins_to_preserve"] = wins
 
-    primary = payload.get("primary_problem")
-    if not isinstance(primary, dict):
-        return None, "analysis.primary_problem must be an object"
-    problem = str(primary.get("problem") or primary.get("cause") or "").strip()
-    if not problem:
-        return None, "analysis.primary_problem.problem is required"
-    fixable = primary.get("strategy_fixable")
-    if not isinstance(fixable, bool):
-        fixable = str(fixable).strip().lower() in {"1", "true", "yes"}
-    if not fixable:
-        return None, "the selected primary problem is not strategy-fixable"
-    primary = {
-        "problem_id": "P1",
-        "problem": problem,
-        "evidence": _clean_strings(primary.get("evidence"), limit=4),
-        "consequence": str(primary.get("consequence") or "").strip(),
-        "strategy_fixable": True,
-        "confidence": str(primary.get("confidence") or "medium").strip().lower(),
-    }
-    payload["primary_problem"] = primary
+    raw_problems = payload.get("problems") or []
+    if not raw_problems and isinstance(payload.get("primary_problem"), dict):
+        raw_problems = [payload["primary_problem"]]
+    problems: list[dict[str, Any]] = []
+    for item in raw_problems:
+        if not isinstance(item, dict):
+            continue
+        problem = str(item.get("problem") or item.get("cause") or "").strip()
+        fixable = item.get("strategy_fixable")
+        if not isinstance(fixable, bool):
+            fixable = str(fixable).strip().lower() in {"1", "true", "yes"}
+        if not problem or not fixable:
+            continue
+        problems.append(
+            {
+                "problem_id": f"P{len(problems) + 1}",
+                "problem": problem,
+                "evidence": _clean_strings(item.get("evidence"), limit=4),
+                "consequence": str(item.get("consequence") or "").strip(),
+                "strategy_fixable": True,
+                "confidence": str(item.get("confidence") or "medium").strip().lower(),
+            }
+        )
+        if len(problems) >= 5:
+            break
+    if not problems:
+        return None, "analysis.problems must contain at least one strategy-fixable problem"
+    payload["problems"] = problems
+    payload["primary_problem"] = problems[0]
+    valid_problem_ids = {item["problem_id"] for item in problems}
 
-    hypothesis = payload.get("optimization_hypothesis")
-    if not isinstance(hypothesis, dict):
-        return None, "analysis.optimization_hypothesis must be an object"
-    direction = str(hypothesis.get("direction") or "").strip()
-    if not direction:
-        return None, "analysis.optimization_hypothesis.direction is required"
-    scopes = [
-        value.lower()
-        for value in _clean_strings(hypothesis.get("scope"), limit=3)
-        if value.lower() in {"macro", "army", "information"}
-    ]
-    payload["optimization_hypothesis"] = {
-        "direction": direction,
-        "scope": list(dict.fromkeys(scopes)),
-        "expected_benefit": str(hypothesis.get("expected_benefit") or "").strip(),
-        "risk_to_winning_mechanism": str(
-            hypothesis.get("risk_to_winning_mechanism") or ""
-        ).strip(),
-    }
+    raw_plans = payload.get("candidate_plans") or payload.get("candidate_directions") or []
+    plans: list[dict[str, Any]] = []
+    for item in raw_plans:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("direction") or "").strip()
+        addressed = [
+            problem_id.upper()
+            for problem_id in _clean_strings(
+                item.get("addresses_problem_ids") or item.get("problem_ids"), limit=5
+            )
+            if problem_id.upper() in valid_problem_ids
+        ]
+        if not addressed:
+            addressed = [problems[0]["problem_id"]]
+        changes: list[dict[str, str]] = []
+        raw_changes = item.get("changes") or []
+        if not raw_changes and (item.get("baseline_rule") or item.get("candidate_rule")):
+            raw_changes = [item]
+        for change in raw_changes:
+            if not isinstance(change, dict):
+                continue
+            baseline_rule = str(change.get("baseline_rule") or "").strip()
+            candidate_rule = str(change.get("candidate_rule") or "").strip()
+            if baseline_rule and candidate_rule:
+                changes.append(
+                    {
+                        "baseline_rule": baseline_rule,
+                        "candidate_rule": candidate_rule,
+                        "why_required": str(
+                            change.get("why_required") or change.get("reason") or ""
+                        ).strip(),
+                    }
+                )
+            if len(changes) >= 6:
+                break
+        if not name or not changes:
+            continue
+        plans.append(
+            {
+                "id": f"D{len(plans) + 1}",
+                "name": name,
+                "addresses_problem_ids": list(dict.fromkeys(addressed)),
+                "changes": changes,
+                "expected_benefit": str(item.get("expected_benefit") or "").strip(),
+                "risk_to_winning_mechanism": str(
+                    item.get("risk_to_winning_mechanism") or ""
+                ).strip(),
+            }
+        )
+        if len(plans) >= 5:
+            break
+    if len(plans) < 2:
+        return None, "analysis.candidate_plans must contain at least two complete coherent plans"
+    payload["candidate_plans"] = plans
+    payload.pop("candidate_directions", None)
+    valid_plan_ids = {item["id"] for item in plans}
 
     evidence_limits = _clean_strings(payload.get("evidence_limits"))
     questions: list[dict[str, Any]] = []
@@ -127,7 +177,9 @@ def _normalize_batch_analysis(
             if not isinstance(item, dict):
                 continue
             question = str(item.get("question") or "").strip()
-            if not question:
+            evidence_motivation = str(item.get("evidence_motivation") or "").strip()
+            decision_use = str(item.get("decision_use") or "").strip()
+            if not question or not evidence_motivation or not decision_use:
                 continue
             entities = _clean_strings(item.get("entities"), limit=6)
             needs = [
@@ -135,10 +187,30 @@ def _normalize_batch_analysis(
                 for need in _clean_strings(item.get("needs"), limit=4)
                 if need.lower() in _KNOWLEDGE_NEEDS
             ]
+            plan_ids = [
+                plan_id.upper()
+                for plan_id in _clean_strings(
+                    item.get("plan_ids") or item.get("direction_ids"), limit=5
+                )
+                if plan_id.upper() in valid_plan_ids
+            ]
+            if not entities or not needs or not plan_ids:
+                continue
+            linked_problem_ids = list(
+                dict.fromkeys(
+                    problem_id
+                    for plan in plans
+                    if plan["id"] in plan_ids
+                    for problem_id in plan["addresses_problem_ids"]
+                )
+            )
             questions.append(
                 {
                     "id": f"Q{len(questions) + 1}",
-                    "problem_ids": ["P1"],
+                    "problem_ids": linked_problem_ids,
+                    "plan_ids": list(dict.fromkeys(plan_ids)),
+                    "evidence_motivation": evidence_motivation,
+                    "decision_use": decision_use,
                     "question": question,
                     "entities": entities,
                     "needs": list(dict.fromkeys(needs)),
@@ -146,27 +218,33 @@ def _normalize_batch_analysis(
             )
             if len(questions) >= MAX_KNOWLEDGE_QUERIES:
                 break
+        if len(questions) < MIN_KNOWLEDGE_QUERIES:
+            return None, (
+                f"analysis.knowledge_questions must contain at least "
+                f"{MIN_KNOWLEDGE_QUERIES} complete plan-linked questions"
+            )
     payload["knowledge_questions"] = questions
     payload["evidence_limits"] = list(dict.fromkeys(evidence_limits))
 
     payload["repeated_failures"] = [
         {
-            "problem_id": "P1",
-            "cause": primary["problem"],
-            "consequence": primary["consequence"],
-            "seen_in": primary["evidence"],
+            "problem_id": problem["problem_id"],
+            "cause": problem["problem"],
+            "consequence": problem["consequence"],
+            "seen_in": problem["evidence"],
             "strategy_fixable": True,
-            "confidence": primary["confidence"],
+            "confidence": problem["confidence"],
         }
+        for problem in problems
     ]
     payload["optimization_targets"] = [
         {
-            "problem_id": "P1",
-            "problem": primary["problem"],
-            "match_evidence": primary["evidence"],
-            "strategy_change": payload["optimization_hypothesis"]["direction"],
-            "confidence": primary["confidence"],
+            "plan_id": plan["id"],
+            "addresses_problem_ids": plan["addresses_problem_ids"],
+            "strategy_change": plan["name"],
+            "changes": plan["changes"],
         }
+        for plan in plans
     ]
     payload["cross_outcome_comparison"] = _clean_strings(
         payload.get("cross_outcome_comparison"), limit=5
@@ -192,6 +270,7 @@ def _observations_from_runs(
                 args={
                     "question_id": run.get("question_id"),
                     "problem_ids": run.get("problem_ids") or ["P1"],
+                    "plan_ids": run.get("plan_ids") or [],
                     "query": run.get("query"),
                 },
                 result={"answer": run.get("answer"), "error": error},
@@ -291,7 +370,6 @@ def _summarize_matches(
                 race=race,
                 record=record,
                 game_index=game_index,
-                skill_texts=skill_texts,
                 model=model,
                 prefix=prefix,
             )
@@ -369,7 +447,7 @@ def run_analysis_agent_loop(
     knowledge_mode: str = "enabled",
     prefix: str = "  ",
     checkpoint: EvolCheckpoint | None = None,
-    prior_experiences: list[str] | None = None,
+    prior_experiences: list[Any] | None = None,
 ) -> AnalysisPipelineResult:
     model = str(model or "").strip() or DEFAULT_ANALYSIS_MODEL
     if not records:

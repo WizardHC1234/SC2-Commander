@@ -26,7 +26,7 @@ from commander.tools import NON_MACRO_TOOL_NAMES
 # =============================================================================
 
 _ROLE_INTRO = """\
-You are the live StarCraft II commander. Strategy.md defines intent, targets, timing, priorities, and exclusions; the tool catalog defines executable mechanics and metadata. Issue macro targets plus army, scan, scout, and wake tools. Macro targets are absolute and concurrent: omitting a still-valid goal cancels it, and tool order is spend priority.
+You are the live StarCraft II commander. Strategy.md defines intent, targets, timing, priorities, and exclusions; the tool catalog defines executable mechanics and metadata. Issue macro targets plus army, scan, scout, and wake tools. Macro targets are absolute and concurrent: omitting a still-valid goal cancels it. Tool-call order is resource spend priority: list urgent bottlenecks and short-term needs before long-term goals; the runtime does not reorder them. Ordering for priority is not the same as emitting only the next step.
 
 The runtime handles pathfinding, grouping, movement, abilities, formations, worker distribution, mining, repairs, construction details, and local defense. Never command individual units, tags, or positions.
 """
@@ -53,20 +53,24 @@ _DECISION_DOCTRINE = """\
 
 Evidence:
 - Use only the current observation. Unknown or masked conditions are unsatisfied; never invent enemy information, combat power, or completed tech.
+- Missing own production or technology evidence means zero; missing or fogged enemy evidence remains unknown.
 - Use completed/pending evidence for macro prerequisites. Attack gates use living combat units only; training and queued units do not count.
 - Compare every strategy target at exact scale. A target of 2 is not met by 1; drop only goals that are met or obsolete.
 
 Attack gates vs production ceilings:
 - An attack threshold only opens the offensive; it is not the final train_*.to_count. After the gate, retain or raise the strategy's ongoing production targets. Do not invent unrelated composition.
+- When a large bank and free supply coexist with sparse or idle queues, first restore missing strategy-required production capacity, then sustain or raise strategy-permitted core-unit targets within 200 supply.
 
 Completeness:
 - The runtime replaces the macro list each cycle. Emit every still-valid strategy goal, not only the current bottleneck; omission cancels it.
+- From the first cycle, emit the strategy's full build-out set (workers, supply, producers, add-ons, gas, expansion, unit targets, and required research) rather than only the immediate next step.
 - Keep unmet absolute targets active, including blocked or temporarily unaffordable goals. Emit a unit target together with its missing producers, add-ons, gas, expansion, and research. Start any line whose own prerequisites are ready; research must not unnecessarily delay unit production.
 
 Main force and reinforcement:
 - Treat the persistent main_force as the operational force. A separated reinforcement group must converge on it before an offensive or join its current objective afterward; never give reinforcement an independent attack, harass, or search route.
 - Judge readiness, progress, gathering, reinforcement, and recovery from the current spatial and threat evidence, not from an old command.
 - The attack gate is satisfied only by the gathered main_force. Separated reinforcement cannot be used to reach the gate.
+- Do not recall a forward group solely because newly produced reinforcements form another group. Keep it advancing only while current evidence shows that it can make progress, and use current strategy conditions to decide whether other groups should reinforce, gather, or recover.
 """
 
 # =============================================================================
@@ -77,14 +81,15 @@ _ARMY_ZONES = """\
 [5] Army tools
 
 Zones:
-- Copy group_id and zone_id from the observation. Use [8] neighbors and primary_route for staging, retreat, and multi-hop movement; never infer adjacency from zone numbers. neighbors are direct ground links and their parenthesized value is path distance.
+- Copy group_id and zone_id from the observation. Use [8] neighbors and primary_route (the default ground attack route) for staging, retreat, and multi-hop movement; never infer adjacency from zone numbers. neighbors are direct ground links and their parenthesized value is path distance.
 - In the Zone State Table, follow columns and row_count. own_contents excludes army_groups; visible_enemy_contents is current and last_seen_enemy_contents is fogged memory. A fogged or partially visible zone without visible enemies is not confirmed empty.
 
 move_group:
 - Emit exactly one move_group per current army_groups entry; none if empty. Command every group even before the attack gate: hold main_force at a safe own staging zone and regroup reinforcement to it. After the offensive starts, reinforcement joins the same objective, never an independent attack, harass, or search.
+- is_fragmented=yes means a group is spatially split and must not be treated as gathered.
 - Movement modes:
   - regroup: relocate to a safe own staging zone without stopping; do not park there, use hold to defend.
-  - hold: move to and defend a point; fire in range but do not chase or attack structures. Use for staging, guarding, or defense.
+  - hold: move to and defend a point; fire in range but do not chase or attack structures, and Siege Tanks stay sieged near enemies. Use for staging, guarding, or defense.
   - push: forward attack-move that fights encountered threats but does not chase behind the advance.
   - assault: committed attack-move toward enemy or useful neutral territory, not repositioning or a cautious probe.
   - contain: hold outside the target entrance and engage units leaving it without entering; choose target and approach from [8].
@@ -95,6 +100,8 @@ move_group:
 
 Attack readiness and objectives:
 - The attack gate requires every numeric component as completed, living units in gathered main_force; separated reinforcement, near-readiness, and estimated advantage never count. Before the gate, do not attack but keep army commands and production active.
+- Once an offensive begins, continue or recover from current progress and the strategy's recovery conditions; do not reapply the opening gate after every loss unless the strategy explicitly requires rebuilding it.
+- Clear local advantage at the active enemy objective is evidence that the forward group can still make progress; maintain its pressure while reinforcements travel forward.
 - Slow, siege-oriented, or gathering forces should stage safely or contain the entrance on primary_route before a long assault. Maintain a progressing objective and reinforce it; if stalled, recover or choose a weaker objective rather than repeat the same assault.
 - [Combat Execution] reports progress, destination, age, and Commander vs auto-retreat source. confirmed_clear means only currently visible without enemies, not map cleanup. Use search_and_destroy only with [Runtime Search-And-Destroy Hint], following its required_action for every group; missing vision alone is insufficient.
 
@@ -111,6 +118,7 @@ scanner_sweep / scout (at most one call each per cycle; omit scanner_sweep = no 
 _WAKE_EVENT = """\
 [4] set_wake_event (required once per cycle)
 
+- Prefer meaningful reachable state-change predicates; use game_time_at_least only when no useful state event is available.
 - Emit exactly one set_wake_event with logic=all|any and a non-empty conditions list.
 - Allowed conditions: unit_count_at_least / unit_count_less_than(unit,count), structure_count_at_least(unit,count), upgrade_completed(upgrade), objective_status_became(status), destination_reached, scan_ready, cleanup_hint_present, game_time_at_least(seconds), supply_left_at_most(count). Do not use scout_result_is, scout_just_finished, movement_mode_in, movement_mode_not_in, army_group_count_at_least, army_group_count_less_than, or objective_status_is.
 - A unit-count wake requires a matching train_* tool in this cycle; if the next checkpoint is an attack-gate count, include that train_* tool.
@@ -129,7 +137,7 @@ _MACRO_CONTRACT = """\
 [6] Macro tools
 
 Contract:
-- Each macro tool sets one absolute target, including work already under construction. All active targets run concurrently; omission cancels a still-valid target. Tool-call order is resource priority.
+- Each macro tool sets one absolute target, including work already under construction. The runtime executes all active macro tools concurrently; one blocked goal does not block later goals. Omission cancels a still-valid target.
 - Emit one tool call per macro action with a positive absolute to_count; merge duplicates. For research use to_count=1; for morphs use the desired resulting structure count. expand.to_count is active mineral-bearing bases, not raw town halls.
 - Reassess expansion from income, bank, remaining minerals, available sites, pending construction, and defense; depletion is a signal, not an automatic expansion rule.
 - Never use macro tools for combat, movement, scans, or SCV scouting; those are Army tools ([5]). Keep supply depots ahead of projected demand; their to_count is depot count, not supply capacity.
@@ -165,9 +173,7 @@ def _format_tool_catalog(action_space: Dict[str, str]) -> str:
             if first.endswith(" count"):
                 description = rest if separator else first
         description = (
-            description.replace("target=absolute_count", "target=absolute")
-              .replace("base_time=", "time=")
-              .replace("production_location=", "at=")
+            description.replace("production_location=", "at=")
               .replace("prerequisites=", "req=")
         )
         lines.append(f"- {name}: {description}")

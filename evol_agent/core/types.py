@@ -93,7 +93,7 @@ class EvolRunRequest:
     knowledge_mode: str = "enabled"
     dry_run: bool = False
     resume_dir: Optional[Path] = None
-    prior_experiences: list[str] = field(default_factory=list)
+    prior_experiences: list[Any] = field(default_factory=list)
 
 
 @dataclass

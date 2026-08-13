@@ -16,7 +16,7 @@ from evol_agent.core import config
 from evol_agent.core.analysis_agent_loop import _normalize_batch_analysis
 from evol_agent.core.checkpoint import EvolCheckpoint
 from evol_agent.core.loop_helpers import normalize_strategy_contract
-from evol_agent.core.simple_prompts import (
+from evol_agent.core.prompts import (
     build_batch_analysis_prompt,
     build_candidate_prompt,
 )
@@ -34,6 +34,7 @@ from evol_agent.sc2_data_agent.sc2_data_store import get_dataset_store
 from evol_agent.analysis.match_record import MatchRecordReader
 from evol_agent.analysis.replay_truth import commander_game_loops, enemy_truth_path
 from evol_agent.validation import (
+    validate_improvement,
     validate_strategy_markdown,
 )
 
@@ -248,7 +249,7 @@ def test_post_match_enemy_truth_is_joined_by_commander_game_loop(tmp_path: Path)
     assert "post_match_replay_observed_opponent" in timeline
     assert '"SIEGETANK":3' in timeline
 
-def test_simplified_prompts_use_one_batch_hypothesis_and_one_candidate() -> None:
+def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
     analyses = [
         BattleAnalysis(
             strategy_name="tank",
@@ -280,8 +281,15 @@ def test_simplified_prompts_use_one_batch_hypothesis_and_one_candidate() -> None
         record_mix="1W/1L",
         raw={
             "winning_mechanism": "gathered push",
-            "primary_problem": {"problem": "late regroup"},
-            "optimization_hypothesis": {"direction": "improve regroup timing"},
+            "problems": [{"problem_id": "P1", "problem": "late regroup"}],
+            "candidate_plans": [
+                {
+                    "id": "D1",
+                    "name": "improve regroup timing",
+                    "addresses_problem_ids": ["P1"],
+                    "changes": [],
+                }
+            ],
         },
     )
     candidate_prompt = build_candidate_prompt(
@@ -298,18 +306,54 @@ def test_simplified_prompts_use_one_batch_hypothesis_and_one_candidate() -> None
     assert "MATCH_RAW_WIN_MARKER" in batch_prompt
     assert "MATCH_RAW_LOSS_MARKER" in batch_prompt
     assert '"action": "analyze_batch"' in batch_prompt
-    assert '"primary_problem"' in batch_prompt
-    assert '"optimization_hypothesis"' in batch_prompt
-    assert "zero to five focused knowledge_questions" in batch_prompt
-    assert "requested command is not proof" in batch_prompt
-    assert "answer must be capable of changing" in batch_prompt
+    assert '"problems"' in batch_prompt
+    assert '"candidate_plans"' in batch_prompt
+    assert "five or six focused, non-overlapping knowledge_questions" in batch_prompt
+    assert "requested command is not proof" in batch_prompt.lower()
+    assert "likely effect on match outcomes" in batch_prompt
+    assert "strengthening the existing core through relevant upgrades" in batch_prompt
+    assert "Static defenses are not a default" in batch_prompt
+    assert "force-readiness curve against actual enemy pressure" in batch_prompt
+    assert "unable to survive until that power stage" in batch_prompt
+    assert "full dependency chain, not from final costs alone" in batch_prompt
+    assert "cannot plausibly complete before" in batch_prompt
+    assert '"evidence_motivation"' in batch_prompt
+    assert '"decision_use"' in batch_prompt
     assert "Stimpack" not in batch_prompt
     assert '"action": "draft_candidate"' in candidate_prompt
     assert "gathered push" in candidate_prompt
-    assert "Implement only optimization_hypothesis" in candidate_prompt
-    assert "mandatory attack prerequisite" in candidate_prompt
-    assert "one reusable rule with an observable condition" in candidate_prompt
-    assert "coherent path through economy and production" in candidate_prompt
+    assert "Select one self-contained candidate plan by default" in candidate_prompt
+    assert "only when it is indispensable" in candidate_prompt
+    assert "Multiple dependent deterministic changes are allowed" in candidate_prompt
+    assert "credible path through economy, production capacity" in candidate_prompt
+    assert "enemy-observation-conditioned branch" in candidate_prompt
+    assert "sole optimization objective is higher expected match win rate" in candidate_prompt
+    assert "Add static defense only when" in candidate_prompt
+    assert "survival path before its main power stage" in candidate_prompt
+    assert "candidate's critical path" in candidate_prompt
+
+
+def test_match_summary_prompt_keeps_batch_stable_prefix_before_record_data() -> None:
+    from evol_agent.core.prompts import build_fixed_match_summary_prompt
+
+    shared = {
+        "strategy_name": "tank",
+        "race": "terran",
+    }
+    first = build_fixed_match_summary_prompt(
+        **shared,
+        record_manifest={"record_id": "match_001", "result": "Victory"},
+        match_timeline="TIMELINE_ONE",
+    )
+    second = build_fixed_match_summary_prompt(
+        **shared,
+        record_manifest={"record_id": "match_002", "result": "Defeat"},
+        match_timeline="TIMELINE_TWO",
+    )
+    first_dynamic = first.index("Match-specific metadata:")
+    second_dynamic = second.index("Match-specific metadata:")
+    assert first[:first_dynamic] == second[:second_dynamic]
+    assert "Current strategy.md:" not in first
 
 
 def test_strategy_contract_normalizes_legacy_checkpoints() -> None:
@@ -330,29 +374,50 @@ def test_strategy_contract_normalizes_legacy_checkpoints() -> None:
     }
 
 
-def test_batch_analysis_keeps_one_problem_and_at_most_five_knowledge_questions() -> None:
+def test_batch_analysis_keeps_multiple_plans_and_at_least_five_knowledge_questions() -> None:
     payload, error = _normalize_batch_analysis(
         {
             "strategy_contract": {"identity": "two-base tank timing"},
             "winning_mechanism": "a concentrated timing push",
             "wins_to_preserve": [{"pattern": "gather first", "evidence": ["Match 1"]}],
-            "primary_problem": {
-                "problem": "the main force repeatedly attacks without fresh information",
-                "evidence": ["Match 2 before the first attack"],
-                "strategy_fixable": True,
-            },
-            "optimization_hypothesis": {
-                "direction": "refresh the intended objective before committing the push",
-                "scope": ["information", "army"],
-                "risk_to_winning_mechanism": "waiting too long could delay the timing",
-            },
+            "problems": [
+                {
+                    "problem": "the main force repeatedly attacks without enough preparation",
+                    "evidence": ["Match 2 before the first attack"],
+                    "strategy_fixable": True,
+                }
+            ],
+            "candidate_plans": [
+                {
+                    "name": f"fixed correction {index}",
+                    "addresses_problem_ids": ["P1"],
+                    "changes": [
+                        {
+                            "baseline_rule": f"old fixed rule {index}",
+                            "candidate_rule": f"new fixed rule {index}",
+                            "why_required": "supports the complete force timing",
+                        }
+                    ],
+                    "risk_to_winning_mechanism": "could delay the timing",
+                }
+                for index in range(3)
+            ],
             "knowledge_questions": [
                 {
                     "question": f"What effects distinguish unit {index}?",
-                    "entities": ["Marine"],
+                    "evidence_motivation": f"Match {index + 1} exposed a missing fact",
+                    "decision_use": f"select or size plan {(index % 3) + 1}",
+                    "entities": [
+                        "Marine",
+                        "Siege Tank",
+                        "Barracks",
+                        "Factory",
+                        "Combat Shield",
+                    ][index:index + 1],
                     "needs": ["effects"],
+                    "plan_ids": [f"D{(index % 3) + 1}"],
                 }
-                for index in range(7)
+                for index in range(5)
             ],
         },
         strategy_name="tank",
@@ -362,9 +427,40 @@ def test_batch_analysis_keeps_one_problem_and_at_most_five_knowledge_questions()
     assert error == ""
     assert payload is not None
     assert payload["primary_problem"]["problem_id"] == "P1"
-    assert len(payload["optimization_targets"]) == 1
+    assert len(payload["candidate_plans"]) == 3
+    assert len(payload["optimization_targets"]) == 3
     assert len(payload["knowledge_questions"]) == 5
     assert all(question["problem_ids"] == ["P1"] for question in payload["knowledge_questions"])
+    assert all(question["plan_ids"] for question in payload["knowledge_questions"])
+
+
+def test_candidate_semantics_are_not_hard_coded_in_basic_validation() -> None:
+    fixed_candidate = VALID_STRATEGY.replace(
+        "Gather the persistent main force before attacking",
+        "Gather at least 40 Marines and 10 Siege Tanks before attacking",
+    )
+    assert validate_improvement(
+        files={"strategy.md": fixed_candidate},
+        race="terran",
+    ).ok
+
+    conditional_candidate = VALID_STRATEGY.replace(
+        "Gather the persistent main force before attacking and send reinforcements toward the same objective.",
+        "If a scan confirms weak enemy defenses, attack earlier; otherwise gather the persistent main force before attacking and send reinforcements toward the same objective.",
+    )
+    assert validate_improvement(
+        files={"strategy.md": conditional_candidate},
+        race="terran",
+    ).ok
+
+    summary_conditional = fixed_candidate.replace(
+        "A compact Terran plan built around a gathered Marine and Tank force.",
+        "If scouting reveals an exposed enemy base, change the attack objective.",
+    )
+    assert validate_improvement(
+        files={"strategy.md": summary_conditional},
+        race="terran",
+    ).ok
 
 
 def test_strategy_supply_budget_rejects_end_state_over_200() -> None:
@@ -437,6 +533,51 @@ def test_knowledge_question_fields_and_text_fallback_resolve_the_same_entities()
         "synergy",
         "requirements",
     ]
+
+
+def test_deterministic_knowledge_returns_only_requested_categories_with_descriptions() -> None:
+    requirements = run_knowledge_query(
+        {
+            "id": "Q1",
+            "question": "What does Marine production require?",
+            "entities": ["Marine"],
+            "needs": ["requirements"],
+        },
+        race="terran",
+    )
+    assert "train_marine: 50M/0G/1S" in requirements["answer"]
+    assert "Marine stats:" not in requirements["answer"]
+    assert "Marine:" in requirements["answer"]
+
+    effects = run_knowledge_query(
+        {
+            "id": "Q2",
+            "question": "What are the Marine's effects and combat properties?",
+            "entities": ["Marine"],
+            "needs": ["effects"],
+        },
+        race="terran",
+    )
+    assert "Marine stats:" in effects["answer"]
+    assert "Marine weapon:" in effects["answer"]
+    assert "train_marine:" not in effects["answer"]
+    assert "Marine:" in effects["answer"]
+
+
+def test_explicit_effects_need_does_not_expand_to_requirements_and_uses_scan_metadata() -> None:
+    run = run_knowledge_query(
+        {
+            "id": "Q3",
+            "question": "What is the SCV speed and Scanner Sweep energy cost and cooldown?",
+            "entities": ["SCV", "Scanner Sweep"],
+            "needs": ["effects"],
+        },
+        race="terran",
+    )
+    assert "SCV stats:" in run["answer"]
+    assert "train_scv:" not in run["answer"]
+    assert "Scanner Sweep: energy_cost=50" in run["answer"]
+    assert "limit=energy_limited" in run["answer"]
 
 
 def test_current_fallback_renderer_includes_full_army_group_state() -> None:

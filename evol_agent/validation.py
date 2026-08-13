@@ -217,7 +217,11 @@ def validate_strategy_markdown(content: str, *, race: str = "") -> Optional[str]
     return validate_strategy_supply_budget(text, race=race)
 
 
-def validate_improvement(*, files: dict[str, str], race: str = "") -> ValidationResult:
+def validate_improvement(
+    *,
+    files: dict[str, str],
+    race: str = "",
+) -> ValidationResult:
     if set(files) != {"strategy.md"}:
         return ValidationResult(ok=False, error="files must contain only strategy.md")
     content = files.get("strategy.md", "")

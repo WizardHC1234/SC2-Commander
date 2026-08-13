@@ -19,7 +19,7 @@ from .sc2_data_store import (
 DEFAULT_DATA_PATH = DEFAULT_DATABASE_PATH
 
 
-KNOWLEDGE_PACKET_SCHEMA = "strategy_knowledge.v1"
+KNOWLEDGE_PACKET_SCHEMA = "strategy_knowledge.v2"
 MAX_ENTITIES = 6
 MAX_RELATIONS = 8
 MAX_DESCRIPTIONS_PER_ENTITY = 1
@@ -106,12 +106,14 @@ def _clean_strings(value: Any) -> list[str]:
 
 
 def infer_knowledge_needs(question: str, explicit: Any = None) -> list[str]:
-    """Normalize optional needs, then infer missing intent from the short question."""
+    """Use explicit needs when supplied; otherwise infer them from the question."""
     needs: list[str] = []
     for raw in _clean_strings(explicit):
         normalized = NEED_ALIASES.get(raw.casefold())
         if normalized and normalized not in needs:
             needs.append(normalized)
+    if needs:
+        return needs
     folded = str(question or "").casefold()
     for need, patterns in NEED_PATTERNS.items():
         if need not in needs and any(pattern in folded for pattern in patterns):
@@ -233,6 +235,7 @@ def _entity_fact(
     entity_ref: dict[str, Any],
     question: str,
     entity_names: list[str],
+    needs: list[str],
     data_path: str | Path,
 ) -> dict[str, Any]:
     store = get_dataset_store(data_path)
@@ -244,13 +247,14 @@ def _entity_fact(
     }
     if entity.get("race"):
         fact["race"] = entity.get("race")
-    if section == "Unit":
+    if section == "Unit" and "requirements" in needs:
         fact["cost"] = {
             "minerals": entity.get("minerals", 0),
             "gas": entity.get("gas", 0),
             "supply": entity.get("supply", 0),
             "time_seconds": _seconds(entity.get("time")),
         }
+    if section == "Unit" and "effects" in needs:
         fact["stats"] = {
             key: entity.get(key)
             for key in ("max_health", "armor", "speed", "attributes", "attack_type")
@@ -267,14 +271,14 @@ def _entity_fact(
             )
         if weapons:
             fact["weapons"] = weapons
-    elif section == "Upgrade":
+    elif section == "Upgrade" and "requirements" in needs:
         cost = entity.get("cost") if isinstance(entity.get("cost"), dict) else {}
         fact["cost"] = {
             "minerals": cost.get("minerals", 0),
             "gas": cost.get("gas", 0),
             "time_seconds": _seconds(cost.get("time")),
         }
-    elif section == "Ability":
+    elif section == "Ability" and "effects" in needs:
         fact["ability"] = {
             key: entity.get(key)
             for key in ("energy_cost", "cast_range", "cooldown", "target")
@@ -286,7 +290,7 @@ def _entity_fact(
     if descriptions:
         fact["descriptions"] = descriptions
     chains = _clean_strings(entity.get("tech_chain"))
-    if chains:
+    if chains and "requirements" in needs:
         fact["tech_chain"] = chains[:2]
     return fact
 
@@ -322,6 +326,24 @@ def _action_facts(entity_names: list[str], race: str) -> list[dict[str, Any]]:
                 "production_location": spec.production_location,
                 "prerequisites": list(spec.prerequisites),
                 "dependencies": list(spec.dependencies),
+            }
+        )
+    return rows
+
+
+def _control_effect_facts(entity_names: list[str], race: str) -> list[dict[str, Any]]:
+    """Return structured effects encoded in authoritative control-tool metadata."""
+    wanted = {normalize_key(name) for name in entity_names}
+    rows: list[dict[str, Any]] = []
+    specs = _load_action_specs(race)
+    if any(name.startswith("scannersweep") for name in wanted) and "scanner_sweep" in specs:
+        rows.append(
+            {
+                "entity": "Scanner Sweep",
+                "energy_cost": 50,
+                "cooldown": None,
+                "limit": "energy_limited",
+                "source": "commander_action_metadata",
             }
         )
     return rows
@@ -379,16 +401,19 @@ def _ability_facts(
             if normalize_key(ability.get("name")) in GENERIC_COMMAND_ABILITIES:
                 continue
             descriptions = _clean_strings(ability.get("description"))
-            if not descriptions:
+            structured = {
+                "energy_cost": ability.get("energy_cost"),
+                "cast_range": ability.get("cast_range"),
+                "cooldown": ability.get("cooldown"),
+            }
+            if not descriptions and all(value is None for value in structured.values()):
                 continue
             rows.append(
                 {
                     "unit": entity["name"],
                     "ability": ability.get("name"),
-                    "energy_cost": ability.get("energy_cost"),
-                    "cast_range": ability.get("cast_range"),
-                    "cooldown": ability.get("cooldown"),
-                    "description": [descriptions[0][:350]],
+                    **structured,
+                    "description": [descriptions[0][:350]] if descriptions else [],
                 }
             )
     return rows[:12]
@@ -460,28 +485,59 @@ def build_strategy_knowledge(
         data_path=data_path,
     )
     entity_names = [entity["name"] for entity in entities]
-    action_facts = _action_facts(entity_names, race)
+    action_facts = (
+        _action_facts(entity_names, race) if "requirements" in needs else []
+    )
     action_entity_names = {
         normalize_key(re.sub(r"^(train|build|research|morph)_?", "", row["action"]))
         for row in action_facts
     }
     entity_facts = [
-        _entity_fact(entity, question, entity_names, data_path) for entity in entities
+        _entity_fact(entity, question, entity_names, needs, data_path)
+        for entity in entities
     ]
-    production = _production_facts(
-        entities, action_entity_names, race, data_path
+    production = (
+        _production_facts(entities, action_entity_names, race, data_path)
+        if "requirements" in needs
+        else []
     )
-    abilities = _ability_facts(entities, data_path) if "effects" in needs else []
+    # A directly resolved Ability already carries its own structured fields.
+    # In that case, do not also dump every command exposed by accompanying units.
+    abilities = (
+        _ability_facts(entities, data_path)
+        if "effects" in needs
+        and not any(entity["section"] == "Ability" for entity in entities)
+        else []
+    )
+    control_effects = (
+        _control_effect_facts(entity_names, race) if "effects" in needs else []
+    )
+    if control_effects:
+        for fact in entity_facts:
+            if normalize_key(fact.get("name")).startswith("scannersweep"):
+                fact["ability"] = {
+                    "energy_cost": 50,
+                    "cooldown": None,
+                    "target": (fact.get("ability") or {}).get("target"),
+                    "source": "commander_action_metadata",
+                }
     relations = _relation_facts(entities, needs, data_path)
 
     missing: list[str] = []
     if not entities:
         missing.append("No canonical Unit or Upgrade entity could be resolved.")
     for need in needs:
-        if need in RELATIONS_BY_NEED and not any(
+        if need in {"synergy", "counters"} and not any(
             row.get("relation") in RELATIONS_BY_NEED[need] for row in relations
         ):
             missing.append(f"No structured {need} relation was found for the resolved entities.")
+        if need == "effects":
+            has_effects = bool(abilities or control_effects or relations) or any(
+                row.get("stats") or row.get("weapons") or row.get("ability")
+                for row in entity_facts
+            )
+            if not has_effects:
+                missing.append("No structured effects facts were found for the resolved entities.")
 
     return {
         "schema": KNOWLEDGE_PACKET_SCHEMA,
@@ -492,6 +548,7 @@ def build_strategy_knowledge(
         "entity_facts": entity_facts,
         "production": production,
         "abilities": abilities,
+        "control_effects": control_effects,
         "relations": relations,
         "missing": missing,
     }
@@ -523,6 +580,12 @@ def render_strategy_knowledge(packet: dict[str, Any]) -> str:
     for row in packet.get("entity_facts") or []:
         if normalize_key(row.get("name")) not in action_names and row.get("cost"):
             lines.append(f"- {row['name']} database card: {row['cost']}")
+        if row.get("stats"):
+            lines.append(f"- {row['name']} stats: {row['stats']}")
+        for weapon in row.get("weapons") or []:
+            lines.append(f"- {row['name']} weapon: {weapon}")
+        if row.get("ability"):
+            lines.append(f"- {row['name']} ability: {row['ability']}")
         for description in row.get("descriptions") or []:
             lines.append(f"- {row['name']}: {description}")
     for row in packet.get("production") or []:
@@ -531,8 +594,24 @@ def render_strategy_knowledge(packet: dict[str, Any]) -> str:
             + (f" with {row['required_addon']}" if row.get("required_addon") else "")
         )
     for row in packet.get("abilities") or []:
+        details = ", ".join(
+            f"{key}={row[key]}"
+            for key in ("energy_cost", "cast_range", "cooldown")
+            if row.get(key) is not None
+        )
+        prefix = f"- {row['unit']} / {row['ability']}"
+        if details:
+            lines.append(f"{prefix}: {details}")
         for description in row.get("description") or []:
-            lines.append(f"- {row['unit']} / {row['ability']}: {description}")
+            lines.append(f"{prefix}: {description}")
+    for row in packet.get("control_effects") or []:
+        details = [f"energy_cost={row['energy_cost']}"]
+        details.append(
+            f"cooldown={row['cooldown']}" if row.get("cooldown") is not None
+            else "cooldown=none listed"
+        )
+        details.append(f"limit={row['limit']}")
+        lines.append(f"- {row['entity']}: {', '.join(details)}")
     for row in packet.get("relations") or []:
         description = "; ".join(row.get("description") or [])
         lines.append(

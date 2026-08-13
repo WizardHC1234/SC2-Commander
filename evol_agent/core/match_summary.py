@@ -44,7 +44,6 @@ def run_fixed_match_summary(
     race: str,
     record: Any,
     game_index: int,
-    skill_texts: dict[str, str],
     model: str,
     prefix: str,
 ) -> tuple[GameDigest, BattleAnalysis, bool, list[str], list[dict[str, Any]]]:
@@ -65,7 +64,6 @@ def run_fixed_match_summary(
             strategy_name=strategy_name,
             race=race,
             record_manifest=manifest,
-            skill_texts=skill_texts,
             match_timeline=timeline,
         ),
         model=model,
