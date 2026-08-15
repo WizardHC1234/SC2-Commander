@@ -64,7 +64,7 @@ Attack gates vs production ceilings:
 Completeness:
 - The runtime replaces the macro list each cycle. Emit every still-valid strategy goal, not only the current bottleneck; omission cancels it.
 - From the first cycle, emit the strategy's full build-out set (workers, supply, producers, add-ons, gas, expansion, unit targets, and required research) rather than only the immediate next step.
-- Keep unmet absolute targets active, including blocked or temporarily unaffordable goals. Emit a unit target together with its missing producers, add-ons, gas, expansion, and research. Start any line whose own prerequisites are ready; research must not unnecessarily delay unit production.
+- Keep unmet absolute targets active, including blocked, temporarily unaffordable, and prerequisite-dependent goals. Emit a unit target together with its missing producers, add-ons, gas, expansion, and research. An intermediate checkpoint or attack-gate count does not satisfy a larger strategy target. Start any line whose own prerequisites are ready; research must not unnecessarily delay unit production.
 
 Main force and reinforcement:
 - Treat the persistent main_force as the operational force. A separated reinforcement group must converge on it before an offensive or join its current objective afterward; never give reinforcement an independent attack, harass, or search route.
@@ -99,7 +99,9 @@ move_group:
 - Optional retreat_ratio=0.3-1.5 (default 0.6) for assault/push/harass/contain: lower accepts more losses, higher disengages earlier. Runtime withdraws a losing group to safety and resumes after recovery; it never overrides explicit hold, regroup, or retreat. After an automatic retreat, do not repeat the same losing assault unchanged.
 
 Attack readiness and objectives:
-- The attack gate requires every numeric component as completed, living units in gathered main_force; separated reinforcement, near-readiness, and estimated advantage never count. Before the gate, do not attack but keep army commands and production active.
+- Before starting a planned offensive, audit every explicit attack-gate condition against the current observation and state each condition in reasoning as current/required and met/unmet. Conditions joined by "and" must all be met.
+- Only completed, living, and gathered main_force units count toward combat-unit conditions. Training, queued, pending, separated, missing, or inferred units do not count; near-readiness, estimated advantage, and previous commands cannot override an unmet condition.
+- Any push, assault, harass, or contain toward enemy-controlled territory starts or advances an offensive and requires the gate. If the gate is unmet, hold main_force at a safe staging zone and regroup reinforcement while continuing all valid macro goals.
 - Once an offensive begins, continue or recover from current progress and the strategy's recovery conditions; do not reapply the opening gate after every loss unless the strategy explicitly requires rebuilding it.
 - Clear local advantage at the active enemy objective is evidence that the forward group can still make progress; maintain its pressure while reinforcements travel forward.
 - Slow, siege-oriented, or gathering forces should stage safely or contain the entrance on primary_route before a long assault. Maintain a progressing objective and reinforce it; if stalled, recover or choose a weaker objective rather than repeat the same assault.
@@ -185,7 +187,7 @@ def _json_output_format(action_space: Dict[str, str]) -> str:
     return """
 [3] Output format (required)
 
-1. Write one concise reasoning paragraph outside JSON: state gate status, macro targets retained/changed, and why army/recon tools are chosen. No bullets.
+1. Write one concise reasoning paragraph outside JSON. Before a not-yet-started planned offensive, list every explicit attack-gate condition as current/required and met/unmet; also state macro targets retained/changed and why army/recon tools are chosen. No bullets.
 2. Leave one blank line, then output exactly one JSON object with this schema and no markdown fences:
 {"tool_calls":[{"name":"<tool_name>","arguments":{...}}, ...]}
 The reasoning paragraph is mandatory; JSON-only output is invalid.
@@ -201,7 +203,8 @@ Army/meta argument shapes:
 - set_wake_event: {"logic":"any","conditions":[{"type":"unit_count_at_least","unit":"Marine","count":20}]} (required; see [4])
 
 Final check:
-- Emit every still-valid strategy macro target, not only the bottleneck or attack-gate target.
+- Emit every still-valid strategy macro target, not only the bottleneck, a minimal opening snippet, or attack-gate counts.
+- Do not issue push, assault, harass, or contain toward enemy-controlled territory while any explicit attack-gate condition is unmet.
 - Emit one move_group per army_groups entry; add scan/scout only when justified and exactly one reachable set_wake_event.
 - Use existing group/zone IDs and current observation evidence; do not act on unconfirmed conditions or stale commands alone.
 """

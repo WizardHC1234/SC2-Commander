@@ -21,14 +21,14 @@ $BOT_RACE = "terran"
 $BOT_INSTRUCT = ""
 
 # Default strategy when an experiment row omits Strategy.
-$FORCE_STRATEGY = "tank_opt1"
+$FORCE_STRATEGY = "tank"
 
 # =============================================================================
 # 2. Commander model (must exist in llm/config.json -> llm_agents_pool)
 # =============================================================================
 # $COMMANDER_MODEL = "qwen3-32b"
-# $COMMANDER_MODEL = "qwen3.5-27b"
-$COMMANDER_MODEL = "kimi-k2.5"
+$COMMANDER_MODEL = "qwen3.5-27b"
+# $COMMANDER_MODEL = "kimi-k2.5"
 # $COMMANDER_MODEL = "deepseek-v4-flash"
 # $COMMANDER_MODEL = "qwen3-32b-reasoning"
 
