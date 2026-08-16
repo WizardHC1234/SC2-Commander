@@ -23,7 +23,6 @@ from commander.macro_exec import (
 from commander.strategy import parse_strategy_document
 from commander.tool_selection import select_tools_for_strategy
 from commander.tools import NON_MACRO_TOOL_NAMES
-from commander.retreat_policy import DEFAULT_RETREAT_RATIO
 from commander.wake_events import (
     FALLBACK_DELAY_SECONDS,
     build_trigger_hint,
@@ -665,24 +664,15 @@ class CommanderBot(KnowledgeBot):
         else:
             self._emit("  macro=(none)")
         army = self._last_army_summary
-        if army.get("intent"):
+        intent = army.get("intent")
+        if intent:
             self._emit(
-                "  army_intent=%s->%s",
-                army["intent"].get("mode"),
-                army["intent"].get("zone_id"),
-            )
-        if army.get("commands"):
-            self._emit(
-                "  army=%s",
-                "; ".join(
-                    f"{c['group_id']}:{c['movement_mode']}->{c['destination_zone_id']}"
-                    f"(r{c.get('retreat_ratio') if c.get('retreat_ratio') is not None else f'{DEFAULT_RETREAT_RATIO}d'})"
-                    for c in army["commands"]
-                ),
+                "  army_intent=%s->%s runtime_expansion=per_frame",
+                intent.get("mode"),
+                intent.get("zone_id"),
             )
         else:
-            # Applied commands this cycle (not observation army_groups).
-            self._emit("  army=(no commands applied)")
+            self._emit("  army_intent=(none)")
         if army.get("scan_zone_id"):
             self._emit("  scan=%s", army["scan_zone_id"])
         if army.get("scout_zone_id"):
