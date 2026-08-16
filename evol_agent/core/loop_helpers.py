@@ -33,7 +33,7 @@ def normalize_strategy_contract(value: Any, *, strategy_name: str) -> dict[str, 
         direction = "adjust"
     return {
         "identity": identity,
-        "core_commitments": commitments[:6],
+        "core_commitments": commitments,
         "optimization_boundary": boundary,
         "direction": direction,
     }

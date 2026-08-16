@@ -13,6 +13,8 @@ def test_single_action_registry_contains_complete_macro_specs():
     macro_specs = {name: spec for name, spec in ACTION_SPECS.items() if spec.is_macro}
     assert len(ACTION_SPECS) == 74
     assert len(macro_specs) == 70
+    assert "army_intent" in ACTION_SPECS
+    assert "move_group" not in ACTION_SPECS
     for action_name, spec in macro_specs.items():
         assert spec.action_func is not None, action_name
         assert spec.target_semantics, action_name

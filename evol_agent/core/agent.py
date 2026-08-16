@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .analysis_agent_loop import run_analysis_agent_loop
+from .capabilities import build_executor_capability_manifest
 from .checkpoint import (
     create_checkpoint,
     load_checkpoint,
@@ -186,6 +187,7 @@ class EvolAgent:
             "optimization": optimization_model,
             "knowledge": "deterministic",
         }
+        capability_manifest = build_executor_capability_manifest(race)
 
         if checkpoint is not None:
             try:
@@ -223,6 +225,7 @@ class EvolAgent:
             model=analysis_model,
         )
         run_context["request"]["models"] = models
+        run_context["executor_capability_manifest"] = capability_manifest
         run_context["checkpoint"] = {
             "run_dir": str(checkpoint.run_dir),
             "stage": checkpoint.stage,
@@ -288,6 +291,7 @@ class EvolAgent:
                 prefix="    ",
                 checkpoint=checkpoint,
                 prior_experiences=request.prior_experiences,
+                capability_manifest=capability_manifest,
             )
             digests = analysis_result.game_digests
             battle_analysis = analysis_result.battle_analysis
@@ -364,6 +368,43 @@ class EvolAgent:
                 tool_observations=analysis_observations,
             )
 
+        decision_action = str(
+            battle_analysis.raw.get("next_action") or "propose_strategy_patch"
+        )
+        action_reason = str(battle_analysis.raw.get("action_reason") or "")
+        if decision_action != "propose_strategy_patch":
+            message = f"EvolAgent selected {decision_action}"
+            if action_reason:
+                message += f": {action_reason}"
+            _save_logs(
+                strategy_name=strategy_name,
+                game_digests=digests,
+                battle_analysis=battle_analysis,
+                tool_observations=analysis_observations,
+                improvement=None,
+                changes=[],
+                run_context={
+                    **run_context,
+                    "output": {
+                        "ok": True,
+                        "message": message,
+                        "decision_action": decision_action,
+                        "action_reason": action_reason,
+                    },
+                },
+            )
+            return EvolRunResult(
+                ok=True,
+                message=message,
+                decision_action=decision_action,
+                action_reason=action_reason,
+                strategy_name=strategy_name,
+                race=race,
+                game_digests=digests,
+                battle_analysis=battle_analysis,
+                tool_observations=analysis_observations,
+            )
+
         print(
             f"  EvolAgent running optimization phase for {race}/{strategy_name} "
             f"(model={optimization_model})",
@@ -379,6 +420,7 @@ class EvolAgent:
                 knowledge_mode=request.knowledge_mode,
                 model=optimization_model,
                 prefix="    ",
+                capability_manifest=capability_manifest,
             )
         )
         run_context["optimization_agent_loop"] = {

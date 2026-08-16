@@ -6,10 +6,11 @@ from typing import Any
 from .context import (
     render_battle_analysis,
     render_sc2_knowledge,
-    render_single_game_analyses,
+    render_batch_match_evidence,
     render_skill_context,
 )
 from .types import BattleAnalysis, ToolObservation
+from ..optimization.strategy_document import StrategyDocument
 
 
 STRATEGY_MARKDOWN_FORMAT = """strategy.md format:
@@ -110,26 +111,70 @@ def build_batch_analysis_prompt(
     validation_errors: list[str],
     knowledge_mode: str,
     prior_experiences: list[Any] | None = None,
+    capability_manifest: dict[str, Any] | None = None,
 ) -> str:
     """Build the single cross-match analysis request used by EvolAgent."""
-    errors = "\n".join(f"- {error}" for error in validation_errors[-3:]) or "None"
+    errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
     knowledge_rule = (
-        "Return five or six focused, non-overlapping knowledge_questions. Each "
-        "must be linked to one or more candidate plans and ask static SC2 facts "
-        "needed to compare or implement those plans."
+        "Return zero to four focused, non-overlapping knowledge_questions. Ask "
+        "only when a missing static SC2 fact can materially change plan selection "
+        "or implementation; an empty list is preferred when supplied action "
+        "metadata and match evidence are already sufficient."
         if knowledge_mode == "enabled"
         else "Knowledge is disabled; return an empty knowledge_questions list."
     )
     experience_lines: list[str] = []
-    for item in (prior_experiences or [])[-3:]:
+    for item in prior_experiences or []:
         if isinstance(item, dict):
-            experience_lines.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+            keep = (
+                "generation",
+                "difficulty",
+                "primary_change",
+                "primary_lever",
+                "hypothesis",
+                "predictions",
+                "disproof_conditions",
+                "selected_changes",
+                "parent_score",
+                "candidate_score",
+                "delta",
+                "posterior_probability_better",
+                "lesson",
+            )
+            compact_item = {key: item.get(key) for key in keep if key in item}
+            evidence = item.get("experiment_evidence")
+            if isinstance(evidence, dict):
+                compact_evidence = {
+                    key: evidence.get(key)
+                    for key in (
+                        "parent_batch",
+                        "candidate_batch",
+                        "candidate_minus_parent",
+                    )
+                    if key in evidence
+                }
+                for batch_key in ("parent_batch", "candidate_batch"):
+                    batch = compact_evidence.get(batch_key)
+                    if isinstance(batch, dict):
+                        compact_evidence[batch_key] = {
+                            key: batch.get(key)
+                            for key in ("wins", "draws", "losses", "games", "score")
+                            if key in batch
+                        }
+                compact_item["experiment_evidence"] = compact_evidence
+            experience_lines.append(
+                json.dumps(compact_item, ensure_ascii=False, separators=(",", ":"))
+            )
         else:
             experience_lines.append(str(item))
     experience_text = "\n".join(f"- {item}" for item in experience_lines) or "None"
+    strategy_document = StrategyDocument.parse(str(skill_texts.get("strategy.md") or ""))
+    strategy_catalog = json.dumps(
+        strategy_document.patch_context(), ensure_ascii=False, separators=(",", ":")
+    )
     return f"""You are EvolAgent's batch Analysis Agent.
 
-Read every independent factual match summary and produce several coherent candidate optimization plans. This is the only cross-match analysis call. Diagnose from recorded evidence; do not rewrite strategy.md and do not modify runtime code.
+Read the deterministic match evidence, update the causal diagnosis, and choose the next action. This is the only cross-match reasoning call. Do not force a strategy candidate when the evidence instead requires more matches, runtime inspection, or stopping.
 
 {RUNTIME_CONTRACT}
 
@@ -138,27 +183,38 @@ Read every independent factual match summary and produce several coherent candid
 Strategy: {strategy_name}
 Race: {race}
 
-Current strategy.md:
-{render_skill_context(skill_texts)}
+Current strategy paragraph catalog. Candidate changes must use these stable ids;
+candidate_rule must be the complete replacement instruction after the bullet title:
+{strategy_catalog}
+
+Executor capability manifest:
+{json.dumps(capability_manifest or {}, ensure_ascii=False, indent=2)}
 
 Independent factual match summaries:
-{render_single_game_analyses(single_game_analyses)}
+{render_batch_match_evidence(single_game_analyses)}
 
 Recent rejected-candidate experience:
 {experience_text}
 
 Rules:
+- Choose next_action before drafting a plan: propose_strategy_patch, request_more_matches, inspect_runtime, or stop. Explain the choice in action_reason.
+- Treat matches classified runtime_contaminated as diagnostic evidence about Sharpy/Commander execution, not clean evidence for changing strategy parameters. runtime_suspect is a warning that requires corroboration from repeated behavior or hard errors; it does not by itself invalidate a match. If hard contamination dominates or explains the apparent failure, choose inspect_runtime and return no candidate plans.
+- Choose request_more_matches when the current evidence cannot distinguish competing causes. Choose stop when no safe, testable, materially new lever remains.
+- Expected match win rate is the sole optimization objective. Intermediate game facts may support diagnosis, but they are not secondary objectives and must not outweigh observed wins, draws, and losses.
 - First identify how the current strategy wins and what successful behavior must remain intact.
+- Before diagnosing the champion again, explain each recent rejected experiment using experiment_evidence when present: compare outcomes, duration, Commander decision counts, and selected-tool differences against its parent. Distinguish a prediction that was disproved from one that was never observable. Use this experimental result to eliminate or revise causal hypotheses.
 - Treat detailed timed evidence as authoritative over a prose outcome summary. Before diagnosing, reconcile attack-order times, contact times, completed upgrades, completed structures, and living-unit counts across each summary; put unresolved contradictions in evidence_limits and do not use them as causal evidence.
 - Rank problems and candidate plans by their likely effect on match outcomes. Do not optimize for a more complete build, broader capability coverage, or greater unit variety unless the match evidence connects it to winning.
-- Identify one to five distinct strategy-fixable problems supported by repeated losses, stalls, bad trades, missed timings, resource conflicts, composition failures, scouting failures, or inability to finish. Do not collapse different causes into one vague problem.
+- Do not infer causation from end-of-game survivor differences alone. For example, winning matches may have more bases or units because they survived longer; require evidence that the proposed difference occurred early enough to plausibly affect the result.
+- Identify one to five distinct problems supported by repeated losses, stalls, bad trades, missed timings, resource conflicts, composition failures, scouting failures, or inability to finish. Classify each as strategy_fixable, commander_execution, runtime_execution, or observation_limited. Only strategy_fixable problems may drive candidate plans.
 - Trace every problem through current strategy rule -> Commander decision -> observed execution or progress -> later outcome. A requested command is not proof that the action succeeded; confirm execution from later game state.
 - Reconstruct the strategy's force-readiness curve against actual enemy pressure. Across matches, identify the first enemy attack that materially threatened workers, production, technology, bases, or the main force; compare its time with the completed and gathered friendly force, completed upgrades, production capacity, unfinished investments, and losses at that moment. Use opponent Replay truth only for post-match diagnosis, never as information the Commander had during play.
 - Test timing feasibility from the full dependency chain, not from final costs alone: resource availability -> prerequisite structures -> production structure or add-on -> build, research, and training durations -> completed units and upgrades -> time to gather. Account for sequential use of the same producer or research facility and for work that can proceed in parallel. Prefer observed completion progress from the records; use verified static durations and requirements only to fill missing facts, and do not invent exact completion times.
 - A powerful final composition is not viable if its economy, technology, upgrades, production, or unit targets repeatedly leave the strategy unable to survive until that power stage. Diagnose whether the gap comes from excessive early investment, late production, late research, an unrealistic readiness target, or insufficient early fighting units.
 - If the strategy already contains a clear executable rule but Commander did not follow it, report an execution limitation instead of proposing the same rule again.
-- Produce two to five alternative, self-contained coherent candidate plans that the Optimization Agent can choose between. Each plan may contain multiple dependent deterministic changes across economy, production capacity, technology, composition, attack timing, reinforcement, or recovery when they jointly solve the same evidenced causal problem. Do not split one required causal chain into separate plans that would later need to be combined, and do not isolate a larger army threshold from the production, resource, supply, and timing changes needed to reach it.
-- For every change in a plan, state the current rule, replacement rule, and why that change is required by the plan. Plans must be meaningfully different, not minor numerical variants or overlapping restatements.
+- Only when next_action is propose_strategy_patch, produce exactly one primary coherent candidate plan. It may contain multiple dependent deterministic changes when they jointly solve the same evidenced causal problem. Do not isolate a larger army threshold from the production, resource, supply, and timing changes needed to reach it.
+- For every change in the plan, state the current rule, replacement rule, target paragraph id from strategy.md, and why that change is required.
+- Unit composition and upgrade changes are first-class plans. Evaluate their expected combat value together with producer capacity, prerequisite timing, gas/mineral demand, supply, assembly time, and the runtime-owned behavior needed to realize that value; never reject a unit merely because some of its behavior is runtime-managed.
 - Make every plan reusable across matches. Do not encode one opponent, one recorded match, a map-specific zone ID, group ID, or an exact timestamp copied from the evidence.
 - Macro changes must use executable absolute targets and must state priority or capacity changes when units, structures, add-ons, upgrades, or expansions compete for the same resources or producer.
 - When combat strength or composition is a problem, compare strengthening the existing core through relevant upgrades, increasing its production or count, adding a support unit, and compatible combinations. Account for upgrade effects, prerequisites, research time, resource cost, research-facility contention, and whether the benefit arrives before the intended power stage; do not assume that adding another unit type is the best correction or that every upgrade should be researched.
@@ -166,11 +222,12 @@ Rules:
 - Reject a candidate plan whose required structures, add-ons, upgrades, and trained units cannot plausibly complete before its stated readiness or the evidenced enemy-pressure window. When the chain is too slow, change its priorities, capacity, technology depth, upgrade order, unit targets, or power-stage timing rather than merely asserting an earlier attack or defense.
 - Static defenses are not a default way to make a strategy complete. Consider them only when repeated evidence shows that direct attacks on workers, production, technology, or a required position materially caused losses, and compare their resource and timing cost against investment in the strategy's force and win condition.
 - Army readiness changes must count completed, living units gathered in the persistent main force. Do not treat requested production targets, units still training, or distant reinforcements as an attack-ready army.
-- Do not propose a new policy branch whose effect depends on enemy scouting, scan results, detected defenses, or uncertain opponent state. For example, do not propose "if the enemy is weak, attack earlier" or "if the main is fortified, change objectives". A fixed readiness threshold is allowed.
+- At most one candidate plan may include a bounded information-conditioned branch. It must use information available in the current observation or an explicit scout/scan result, contain a deterministic default path when information is missing, and change only an executable macro priority, semantic objective, composition target, or readiness rule. Never use Replay truth as live information or build an open-ended condition tree.
 - Preserve successful strategy content unless a plan explicitly needs a dependent change. Each plan must retain a credible path from economy and production to a survivable core force, attack, reinforcement, recovery, and destruction of remaining enemy bases. State its risk to the winning mechanism.
 - Put runtime-only, micro, and unsupported problems in evidence_limits.
-- Treat rejected-candidate experience as limited supporting evidence, not as a permanent prohibition or a substitute for the current match records.
-- Compare candidate plans with rejected-candidate selected_changes. Do not repeat a materially equivalent failed change combination unless current evidence supports retrying it and the new plan states the substantive difference expected to avoid the previous regression.
+- Treat rejected-candidate scores as experimental evidence. A candidate that lost at least 0.10 score is a failed causal test, not merely a weak preference: its primary lever (for example, support-unit addition, upgrade-gated timing, or a recovery-threshold change) is on cooldown for the next candidate.
+- A candidate is promoted only by the external win-rate evaluator. Do not claim that an intermediate prediction proves success; use it only to explain why a win-rate change might occur.
+- Compare candidate plans with rejected-candidate selected_changes. The next candidate must test a materially different primary lever and root cause after a significant rejection. A smaller count, a modest timing adjustment, or the same unit/upgrade with a different gate is materially equivalent and is not a new test. Retry the same lever only when new current-match evidence directly contradicts the prior result; state that evidence and the substantive reason the regression should not recur.
 - Knowledge questions go only to the deterministic SC2 entity dataset. Never ask it for optimal strategy, match timing, Commander behavior, movement modes, or micro.
 - Every knowledge question must include the concrete match evidence that motivates it and explain which plan choice or implementation detail its answer can change. Use exact candidate entity names, do not ask facts already established by the strategy, action metadata, or supplied evidence, and preserve source time units.
 - Choose needs precisely: requirements returns costs, supply, build/research time, producer, add-ons, and prerequisites; effects returns unit stats, weapons, abilities, energy, cooldown, and upgrade effects; counters returns counter relations; synergy returns synergy relations. Combine needs only when the same question genuinely requires several categories.
@@ -187,6 +244,8 @@ Return one JSON object only:
 {{
   "action": "analyze_batch",
   "analysis": {{
+    "next_action":"propose_strategy_patch|request_more_matches|inspect_runtime|stop",
+    "action_reason":"why this is the highest-value next action",
     "strategy_contract": {{
       "identity": "economy shape, core force, power stage, posture, and win condition",
       "core_commitments": ["two to five defining commitments"],
@@ -203,6 +262,7 @@ Return one JSON object only:
         "problem":"distinct strategy problem",
         "evidence":["Match number and event"],
         "consequence":"later match effect",
+        "control_class":"strategy_fixable|commander_execution|runtime_execution|observation_limited",
         "strategy_fixable":true,
         "confidence":"low|medium|high"
       }}
@@ -211,14 +271,26 @@ Return one JSON object only:
       {{
         "id":"D1",
         "name":"coherent deterministic plan",
+        "hypothesis":"one causal claim tested by this plan",
+        "primary_lever":"composition|upgrade|production_capacity|economy|attack_timing|recovery|information_branch|other",
         "addresses_problem_ids":["P1"],
         "changes":[
           {{
+            "target_paragraph_id":"production",
             "baseline_rule":"current fixed rule or parameter",
             "candidate_rule":"replacement fixed rule or parameter",
             "why_required":"why this dependent change is needed"
           }}
         ],
+        "predictions":["observable result that should change in candidate matches"],
+        "disproof_conditions":["observable result that rejects this hypothesis"],
+        "capability_mapping":{{
+          "macro_actions":["exact action name from capability manifest"],
+          "army_controls":["exact army control from capability manifest"],
+          "information_controls":[],
+          "runtime_dependencies":["runtime-owned behavior used by the plan"],
+          "unsupported_dependencies":[]
+        }},
         "expected_benefit":"expected match effect",
         "risk_to_winning_mechanism":"possible regression"
       }}
@@ -250,18 +322,41 @@ def build_candidate_prompt(
     validation_errors: list[str],
     candidate: dict | None,
     knowledge_mode: str,
+    capability_manifest: dict[str, Any] | None = None,
 ) -> str:
-    """Build one candidate-generation request with only basic retry feedback."""
-    errors = "\n".join(f"- {error}" for error in validation_errors[-3:]) or "None"
-    candidate_text = "None"
-    if isinstance(candidate, dict):
-        files = candidate.get("files")
-        if isinstance(files, dict):
-            candidate_text = str(files.get("strategy.md") or "None")
+    """Build a bounded paragraph-patch request for the strategy document."""
+    errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
+    parent_text = str(skill_texts.get("strategy.md") or "")
+    document = StrategyDocument.parse(parent_text)
+    patch_context = json.dumps(document.patch_context(), ensure_ascii=False, indent=2)
+    candidate_text = json.dumps(candidate or {}, ensure_ascii=False, indent=2)
+
+    if isinstance(candidate, dict) and validation_errors:
+        return f"""You are revising an invalid EvolAgent strategy paragraph patch.
+
+Do not redo the battle analysis and do not output a complete strategy.md. Fix only
+the validator errors while preserving the same hypothesis, selected plan, and
+unrelated parent paragraphs. Each target and expected_old_hash must match the
+parent paragraph catalog.
+
+Parent paragraph catalog:
+{patch_context}
+
+Invalid candidate:
+{candidate_text}
+
+Validator errors:
+{errors}
+
+Return one JSON object with action="revise_candidate", the complete rationale
+object from the invalid candidate, and a non-empty operations list. Allowed
+operations are replace_detail and replace_summary. Modify at most three Detail
+paragraphs; Summary should normally remain unchanged.
+"""
 
     return f"""You are EvolAgent's Strategy Optimization Agent.
 
-Write one complete candidate replacement for strategy.md. The batch Analysis Agent supplied several evidenced problems and coherent candidate plans. Use the analysis and verified knowledge as proposals and factual support, then make the final strategic judgment. Do not modify runtime code.
+Select one evidenced candidate plan and return a small paragraph patch for strategy.md. Do not rewrite the complete file and do not modify runtime code. The host applies the patch to the fixed template and preserves every unselected paragraph verbatim.
 
 {RUNTIME_CONTRACT}
 
@@ -271,11 +366,13 @@ Write one complete candidate replacement for strategy.md. The batch Analysis Age
 
 Rules:
 - The sole optimization objective is higher expected match win rate. Do not add units, upgrades, buildings, scouting rules, or safety clauses merely to make the strategy look comprehensive.
+- The external evaluator promotes candidates only from accumulated wins, draws, and losses. Intermediate predictions are diagnostic hypotheses, not alternative acceptance criteria.
 - Preserve strategy_contract.identity, core_commitments, and winning_mechanism unless the evidence clearly requires replacing one of them.
-- Select one self-contained candidate plan by default. Combine a dependent change from another plan only when it is indispensable to make the selected plan executable or internally consistent; do not merge independent improvements merely because each is individually plausible. Every applied change must be listed in selected_changes with its source plan and evidence-supported role.
-- Multiple dependent deterministic changes are allowed. Keep unrelated Detail bullets unchanged; do not bundle independent speculative improvements merely because they sound useful.
+- Select exactly one self-contained candidate plan. Its dependent economy, production, and readiness changes must be included in that plan; do not combine plans. Every applied change must be listed in selected_changes with that single source plan and its evidence-supported role.
+- Multiple dependent deterministic changes are allowed, but modify at most three Detail paragraphs and only when they implement the same causal plan. Keep unrelated paragraphs unchanged.
+- Make the smallest complete text delta required by the selected plan. Preserve unchanged numeric targets, priorities, and Detail bullets verbatim whenever possible so the experiment tests one coherent cause.
 - Changes must be reusable across matches. Do not encode one opponent, one recorded match, map-specific zone IDs, group IDs, or exact timestamps copied from the evidence.
-- Do not add an enemy-observation-conditioned branch: no new rule of the form "if/when scouting, scanning, detection, defenses, or enemy state says X, then change attack timing, objective, production, or priority." Use the fixed candidate_rule from the hypothesis instead. Fixed numerical readiness thresholds and fixed times are allowed.
+- A bounded information-conditioned branch is allowed only when it is part of the selected plan, uses a current observation or explicit scout/scan result, has a deterministic default path, and maps to available controls. Do not use Replay truth or create an open-ended condition tree.
 - Preserve pre-existing generic recovery, safety, or scouting conditions unless the selected plan explicitly changes them; do not turn them into new opponent-dependent strategic choices.
 - Preserve successful power timing unless the evidence supports changing it. If army size, composition, or technology increases, jointly check the fixed economy, gas, production capacity, supply, and timing needed to reach it; do not raise an attack threshold in isolation.
 - Check the candidate's survival path before its main power stage. If the records show earlier enemy pressure, ensure the revised fixed build priorities produce enough completed fighting units and required technology before that pressure window. Delay or reduce competing economy, technology, upgrades, support units, or final targets when necessary; do not rely on the enemy waiting for the final composition.
@@ -287,6 +384,7 @@ Rules:
 - Express required macro outcomes as absolute targets. Attack-readiness counts must refer to completed, living units gathered in the persistent main force, not requested production targets, units still training, or distant reinforcements.
 - Use verified knowledge only as factual support. It cannot prove an optimal ratio, timing, or win probability.
 - Every instruction must be executable through current Macro, Army, scout, scan, and wake controls. Leave micro to the runtime.
+- capability_mapping.macro_actions must list the executable actions needed by the complete candidate strategy, including preserved economy and production foundations. capability_mapping.changed_macro_actions must list only actions introduced or materially changed by the selected candidate plan. Do not compare or confuse these two sets.
 - Keep the complete strategy internally consistent and keep explicit end-state supply at or below 200.
 - After editing, ensure the complete strategy has a credible path through economy, production capacity, force preparation, engagement, reinforcement, recovery after losses, and eventual destruction of remaining enemy structures.
 - Do not copy generic Commander runtime protocol into strategy.md. Write only strategy-specific targets, priorities, timings, readiness, objectives, reinforcement, recovery, and information requirements.
@@ -296,8 +394,11 @@ Knowledge mode: {knowledge_mode}
 Strategy: {strategy_name}
 Race: {race}
 
-Current strategy.md:
-{render_skill_context(skill_texts)}
+Executor capability manifest:
+{json.dumps(capability_manifest or {}, ensure_ascii=False, indent=2)}
+
+Current strategy paragraph catalog (stable id, parent hash, and value):
+{patch_context}
 
 Batch analysis and candidate plans:
 {render_battle_analysis(battle_analysis)}
@@ -305,16 +406,22 @@ Batch analysis and candidate plans:
 Verified knowledge results:
 {render_sc2_knowledge(tool_observations)}
 
-Current invalid candidate, if this is a retry:
-{candidate_text}
-
-Basic validator feedback:
-{errors}
-
 Return one JSON object only:
 {{
   "action": "draft_candidate",
   "rationale": {{
+    "hypothesis":"one causal claim tested by this candidate",
+    "primary_lever":"one primary lever from the selected plan",
+    "predictions":["observable candidate-match prediction"],
+    "disproof_conditions":["observable condition that rejects the hypothesis"],
+    "capability_mapping":{{
+      "macro_actions":["exact available action names"],
+      "changed_macro_actions":["exact available action names changed by the selected plan"],
+      "army_controls":["exact available army controls"],
+      "information_controls":[],
+      "runtime_dependencies":[],
+      "unsupported_dependencies":[]
+    }},
     "preserved_strength":"winning mechanism kept intact",
     "selected_plan_ids":["D1"],
     "overall_assessment":"concise evidence-based assessment",
@@ -325,12 +432,17 @@ Return one JSON object only:
     "expected_effect":"expected match effect",
     "main_risk":"possible regression to evaluate in games"
   }},
-  "files": {{
-    "strategy.md": "# Summary\\n...\\n\\n# Details\\n* Opening: ...\\n* Main Attack Gate: ..."
-  }}
+  "operations": [
+    {{
+      "op":"replace_detail",
+      "target":"main_attack_gate",
+      "expected_old_hash":"copy the exact hash from the paragraph catalog",
+      "value":"replacement instruction only; do not include the bullet title"
+    }}
+  ]
 }}
 
-After basic validator feedback, use action="revise_candidate" with the same complete schema.
+Use replace_summary only when the selected plan genuinely changes the strategy identity. Do not add, delete, rename, or reorder Detail paragraphs.
 """
 
 

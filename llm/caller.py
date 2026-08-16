@@ -323,7 +323,11 @@ def call_openai_detailed(
             error="missing_openai_sdk",
         )
 
-    client_kwargs: Dict[str, Any] = {"api_key": final_api_key}
+    # Keep retries at the caller layer, where failures are recorded and the
+    # evolution checkpoint can recover deterministically.  The OpenAI SDK's
+    # implicit retries can otherwise turn one bounded request into several
+    # consecutive long socket waits with no observable progress.
+    client_kwargs: Dict[str, Any] = {"api_key": final_api_key, "max_retries": 0}
     if final_base_url is not _MISSING and final_base_url:
         client_kwargs["base_url"] = _normalize_openai_base_url(str(final_base_url))
     if final_timeout is not _MISSING and final_timeout is not None:

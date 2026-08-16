@@ -13,6 +13,7 @@ from .types import BattleAnalysis, GameDigest, ToolObservation
 from ..sc2_data_agent.bridge import is_knowledge_run_verified
 
 CHECKPOINT_SCHEMA = "evol_agent_checkpoint.v2"
+PIPELINE_VERSION = "deterministic_features_v1_paragraph_patch_v1"
 
 STAGE_ORDER = (
     "created",
@@ -297,6 +298,7 @@ def create_checkpoint(
     (run_dir / "knowledge").mkdir(parents=True, exist_ok=True)
     meta = {
         "schema": CHECKPOINT_SCHEMA,
+        "pipeline_version": PIPELINE_VERSION,
         "stage": "created",
         "created": datetime.now().isoformat(),
         "updated": datetime.now().isoformat(),
@@ -338,6 +340,11 @@ def validate_checkpoint_fingerprint(
 ) -> None:
     meta = checkpoint.meta
     errors: list[str] = []
+    if str(meta.get("pipeline_version") or "") != PIPELINE_VERSION:
+        errors.append(
+            "pipeline_version mismatch: checkpoint predates deterministic match "
+            "features and paragraph patches; start a new EvolAgent run"
+        )
     if str(meta.get("strategy_name") or "") != strategy_name:
         errors.append(
             f"strategy_name mismatch: checkpoint={meta.get('strategy_name')} current={strategy_name}"

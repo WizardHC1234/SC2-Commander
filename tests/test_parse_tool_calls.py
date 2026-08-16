@@ -35,17 +35,15 @@ class ParseToolCallsFromContentTests(unittest.TestCase):
         text = (
             "Assault the main.\n\n"
             '{"tool_calls":['
-            '{"name":"move_group","arguments":{"group_id":"group_0",'
-            '"destination_zone_id":"zone_15","movement_mode":"assault"}},'
-            '{"name":"move_group","arguments":{"group_id":"group_1",'
-            '"destination_zone_id":"zone_15","movement_mode":"assault"}},'
+            '{"name":"army_intent","arguments":{"mode":"attack",'
+            '"zone_id":"zone_15"}},'
             '{"name":"set_wake_event","arguments":{"logic":"any","conditions":'
             '[{"type":"game_time_at_least","seconds":1438}}]}}]}'
         )
         calls = parse_tool_calls_from_content(text)
         self.assertEqual(
             [c["name"] for c in calls],
-            ["move_group", "move_group", "set_wake_event"],
+            ["army_intent", "set_wake_event"],
         )
         wake = calls[-1]["arguments"]
         self.assertEqual(wake["conditions"][0]["seconds"], 1438)
@@ -54,15 +52,15 @@ class ParseToolCallsFromContentTests(unittest.TestCase):
         text = (
             "Continue assault.\n\n"
             '{"tool_calls":['
-            '{"name":"move_group","arguments":{"group_id":"group_0",'
-            '"destination_zone_id":"zone_15","movement_mode":"assault"}},'
+            '{"name":"army_intent","arguments":{"mode":"attack",'
+            '"zone_id":"zone_15"}},'
             '{"name":"set_wake_event","arguments":{"logic":"any","conditions":'
             '[{"type":"game_time_at_least","seconds":1498}}]}]}'
         )
         calls = parse_tool_calls_from_content(text)
         self.assertEqual(
             [c["name"] for c in calls],
-            ["move_group", "set_wake_event"],
+            ["army_intent", "set_wake_event"],
         )
 
 

@@ -2,8 +2,8 @@
 
 Follows the shape of Sharpy's native ``PlanZoneAttack`` retreat logic
 (front-runner local battle ratio, arrival-stop, time-based recovery). The
-threshold travels with each ``move_group`` command (``retreat_ratio``);
-there is no global persistent policy.
+threshold travels with each runtime-generated group command; the model cannot
+tune it through the whole-army intent.
 """
 
 from dataclasses import dataclass
@@ -11,7 +11,7 @@ from typing import Optional
 
 from commander.combat_policy import ArmyGroupCommand
 
-# --- retreat_ratio range and default (move_group parameter) ---
+# --- runtime retreat-ratio range and default ---
 RETREAT_MIN = 0.3
 RETREAT_MAX = 1.5
 DEFAULT_RETREAT_RATIO = 0.6

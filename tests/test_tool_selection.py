@@ -224,6 +224,7 @@ def test_merge_drops_unknown_and_keeps_army_tools():
         selected_tools=["train_marine", "not_a_real_tool"],
     )
     assert "train_marine" in space
-    assert "move_group" in space
+    assert "army_intent" in space
+    assert "move_group" not in space
     assert "set_wake_event" in space
     assert "not_a_real_tool" not in space

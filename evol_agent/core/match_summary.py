@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .config import MATCH_SUBAGENT_ENABLE_REASONING
-from .llm import call_json_llm
 from .loop_helpers import analysis_from_json, evidence_digest
-from .prompts import build_fixed_match_summary_prompt
 from .types import BattleAnalysis, GameDigest
 from ..analysis.match_record import MatchRecordReader
 
@@ -47,69 +44,17 @@ def run_fixed_match_summary(
     model: str,
     prefix: str,
 ) -> tuple[GameDigest, BattleAnalysis, bool, list[str], list[dict[str, Any]]]:
-    """Summarize one complete fixed timeline with one structured LLM call."""
+    """Extract one complete factual match summary without an LLM call."""
     record_id = f"match_{game_index:03d}"
     record_reader = MatchRecordReader(record.file)
     manifest = record_reader.manifest(record_id)
-    timeline = record_reader.fixed_timeline()
-    row_count = sum(1 for line in timeline.splitlines() if line.startswith("R "))
+    payload = record_reader.deterministic_features(record_id)
+    row_count = int((payload.get("decision_metrics") or {}).get("commander_rows") or 0)
     print(
         f"{prefix}MatchSummary {game_index}: {manifest['result']} "
-        f"{manifest['duration']} ({row_count} Commander rows, fixed timeline)",
+        f"{manifest['duration']} ({row_count} Commander rows, deterministic features)",
         flush=True,
     )
-
-    result = call_json_llm(
-        build_fixed_match_summary_prompt(
-            strategy_name=strategy_name,
-            race=race,
-            record_manifest=manifest,
-            match_timeline=timeline,
-        ),
-        model=model,
-        is_reasoning=MATCH_SUBAGENT_ENABLE_REASONING,
-    )
-    if isinstance(result, dict) and isinstance(result.get("analysis"), dict):
-        # Accept old action-wrapped output during migration without another LLM call.
-        result = result["analysis"]
-
-    errors: list[str] = []
-    if isinstance(result, dict) and result:
-        payload = dict(result)
-        selection = manifest.get("action_space_selection")
-        if isinstance(selection, dict) and selection:
-            payload["action_space_selection_summary"] = dict(selection)
-        analysis = analysis_from_json(
-            strategy_name=strategy_name,
-            race=race,
-            records=[record],
-            data=payload,
-        )
-        digest = evidence_digest(record, game_index)
-        digest.summary = str(
-            payload.get("outcome_summary") or "Single-match analysis completed."
-        )
-        digest.raw["analysis"] = analysis.raw
-        digest.raw["summary_input"] = {
-            "format": "fixed_match_timeline_v2",
-            "commander_rows": row_count,
-            "characters": len(timeline),
-        }
-        events = [
-            {
-                "step": 1,
-                "action": "finish_match_summary",
-                "input_format": "fixed_match_timeline_v2",
-                "commander_rows": row_count,
-                "input_characters": len(timeline),
-                "summary": analysis.raw,
-            }
-        ]
-        return digest, analysis, True, errors, events
-
-    failure_reason = f"{record_id} fixed-timeline summary returned no JSON object"
-    errors.append(failure_reason)
-    payload = _degraded_payload(manifest, failure_reason)
     analysis = analysis_from_json(
         strategy_name=strategy_name,
         race=race,
@@ -119,15 +64,18 @@ def run_fixed_match_summary(
     digest = evidence_digest(record, game_index)
     digest.summary = payload["outcome_summary"]
     digest.raw["analysis"] = analysis.raw
-    digest.raw["summary_quality"] = "degraded"
+    digest.raw["summary_quality"] = "deterministic"
+    digest.raw["summary_input"] = {
+        "format": "deterministic_match_features_v1",
+        "commander_rows": row_count,
+    }
     events = [
         {
             "step": 1,
             "action": "finish_match_summary",
-            "input_format": "fixed_match_timeline_v2",
-            "summary_quality": "degraded",
-            "error": failure_reason,
+            "input_format": "deterministic_match_features_v1",
+            "summary_quality": "deterministic",
             "summary": analysis.raw,
         }
     ]
-    return digest, analysis, False, errors, events
+    return digest, analysis, True, [], events

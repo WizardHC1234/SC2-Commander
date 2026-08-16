@@ -31,7 +31,7 @@ DESTINATION_TYPES = frozenset({"destination_reached"})
 SCOUT_TYPES = frozenset({"scout_result_is", "scout_just_finished"})
 # Rejected as wake conditions:
 # - scout_*: SCV scouts often killed en route (unreliable timers).
-# - movement_mode_*: modes only change via Commander move_group (circular).
+# - movement_mode_*: modes only change via Commander army_intent (circular).
 # - army_group_count_*: after the first group appears, at_least is usually already
 #   true; less_than has no practical progress-wake use.
 # - objective_status_is: level check; if already true at arm, rising-edge never
@@ -431,9 +431,9 @@ def format_wake_reflection_feedback(
         [
             "",
             "Rules:",
-            "- When army_groups is non-empty, emit exactly one move_group for every "
-            "group_id in this cycle (hold at a safe defensive zone is fine before "
-            "the attack gate). Do not omit army tools while waiting on production.",
+            "- Emit exactly one army_intent with mode=hold|attack|regroup|cleanup and a "
+            "current zone_id, even before combat units exist. The runtime controls "
+            "all groups and sends reinforcements to the live main force.",
             "- Emit one valid JSON object with a tool_calls array. Do not add extra "
             "closing braces (bad: \"seconds\":30}}]; good: \"seconds\":30}]).",
             "- set_wake_event is required and must be reachable from the macro tools "

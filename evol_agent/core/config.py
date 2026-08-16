@@ -20,7 +20,7 @@ DEFAULT_OPTIMIZATION_MODEL = DEFAULT_MODEL
 
 MATCH_SUBAGENT_ENABLE_REASONING = False
 ANALYSIS_ENABLE_REASONING = True
-OPTIMIZATION_ENABLE_REASONING = True
+OPTIMIZATION_ENABLE_REASONING = False
 
 DEFAULT_KNOWLEDGE_MODE = "enabled"
 KNOWLEDGE_MODES = ("enabled", "disabled")
@@ -38,17 +38,23 @@ def resolve_model(explicit: str = "", *, role: str = "default") -> str:
 
 
 # JSON transport retries happen inside call_json_llm.
-LLM_CALL_MAX_ATTEMPTS = 3
+LLM_CALL_MAX_ATTEMPTS = 2
 LLM_CALL_RETRY_DELAYS_SECONDS = (2.0, 5.0)
+# Bound each provider request so a live process cannot wait forever on a
+# half-open connection. Large batch-analysis prompts can legitimately take
+# several minutes on reasoning models, so keep this above Commander turn time.
+# Bound each provider request so a live process cannot wait forever on a
+# half-open connection. Large batch-analysis prompts can legitimately take
+# several minutes on reasoning models, so keep this above Commander turn time.
+LLM_CALL_TIMEOUT_SECONDS = 300.0
 
 # Match summaries are independent and can be produced concurrently.
 MAX_CONCURRENT_MATCH_SUBAGENTS = 3
 
-# Knowledge-enabled evolution uses at least five focused deterministic SC2
-# questions. One optional sixth question is allowed when it covers a distinct
-# decision-relevant fact.
-MIN_KNOWLEDGE_QUERIES = 5
-MAX_KNOWLEDGE_QUERIES = 6
+# Knowledge lookup is optional: match evidence drives the analysis, and static
+# SC2 facts are queried only when they can change a candidate decision.
+MIN_KNOWLEDGE_QUERIES = 0
+MAX_KNOWLEDGE_QUERIES = 4
 
 # Candidate retries are only for basic strategy.md validation failures.
-MAX_VALIDATION_RETRIES = 3
+MAX_VALIDATION_RETRIES = 1

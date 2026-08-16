@@ -15,13 +15,20 @@ from evol_agent.analysis.record_reader import (
 from evol_agent.core import config
 from evol_agent.core.analysis_agent_loop import _normalize_batch_analysis
 from evol_agent.core.checkpoint import EvolCheckpoint
+from evol_agent.core.candidate_critic import critique_candidate_contract
+from evol_agent.core.capabilities import build_executor_capability_manifest
 from evol_agent.core.loop_helpers import normalize_strategy_contract
+from evol_agent.core.optimization_agent_loop import run_optimization_agent_loop
 from evol_agent.core.prompts import (
     build_batch_analysis_prompt,
     build_candidate_prompt,
 )
 from evol_agent.core.types import BattleAnalysis
 from evol_agent.optimization.snapshot import save_snapshot
+from evol_agent.optimization.strategy_document import (
+    StrategyDocument,
+    paragraph_hash,
+)
 from evol_agent.sc2_data_agent.bridge import (
     KNOWLEDGE_VERIFICATION_SCHEMA,
     run_knowledge_query,
@@ -308,12 +315,15 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
     assert '"action": "analyze_batch"' in batch_prompt
     assert '"problems"' in batch_prompt
     assert '"candidate_plans"' in batch_prompt
-    assert "five or six focused, non-overlapping knowledge_questions" in batch_prompt
+    assert "zero to four focused, non-overlapping knowledge_questions" in batch_prompt
     assert "requested command is not proof" in batch_prompt.lower()
     assert "likely effect on match outcomes" in batch_prompt
     assert "strengthening the existing core through relevant upgrades" in batch_prompt
     assert "Static defenses are not a default" in batch_prompt
     assert "force-readiness curve against actual enemy pressure" in batch_prompt
+    assert "commander_execution, runtime_execution, or observation_limited" in batch_prompt
+    assert "Unit composition and upgrade changes are first-class plans" in batch_prompt
+    assert "experiment_evidence when present" in batch_prompt
     assert "unable to survive until that power stage" in batch_prompt
     assert "full dependency chain, not from final costs alone" in batch_prompt
     assert "cannot plausibly complete before" in batch_prompt
@@ -322,15 +332,16 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
     assert "Stimpack" not in batch_prompt
     assert '"action": "draft_candidate"' in candidate_prompt
     assert "gathered push" in candidate_prompt
-    assert "Select one self-contained candidate plan by default" in candidate_prompt
-    assert "only when it is indispensable" in candidate_prompt
+    assert "Select exactly one self-contained candidate plan" in candidate_prompt
     assert "Multiple dependent deterministic changes are allowed" in candidate_prompt
     assert "credible path through economy, production capacity" in candidate_prompt
-    assert "enemy-observation-conditioned branch" in candidate_prompt
+    assert "bounded information-conditioned branch" in candidate_prompt
     assert "sole optimization objective is higher expected match win rate" in candidate_prompt
     assert "Add static defense only when" in candidate_prompt
     assert "survival path before its main power stage" in candidate_prompt
     assert "candidate's critical path" in candidate_prompt
+    assert '"hypothesis"' in candidate_prompt
+    assert '"capability_mapping"' in candidate_prompt
 
 
 def test_match_summary_prompt_keeps_batch_stable_prefix_before_record_data() -> None:
@@ -374,7 +385,7 @@ def test_strategy_contract_normalizes_legacy_checkpoints() -> None:
     }
 
 
-def test_batch_analysis_keeps_multiple_plans_and_at_least_five_knowledge_questions() -> None:
+def test_batch_analysis_keeps_one_plan_and_only_linked_knowledge_questions() -> None:
     payload, error = _normalize_batch_analysis(
         {
             "strategy_contract": {"identity": "two-base tank timing"},
@@ -427,9 +438,9 @@ def test_batch_analysis_keeps_multiple_plans_and_at_least_five_knowledge_questio
     assert error == ""
     assert payload is not None
     assert payload["primary_problem"]["problem_id"] == "P1"
-    assert len(payload["candidate_plans"]) == 3
-    assert len(payload["optimization_targets"]) == 3
-    assert len(payload["knowledge_questions"]) == 5
+    assert len(payload["candidate_plans"]) == 1
+    assert len(payload["optimization_targets"]) == 1
+    assert len(payload["knowledge_questions"]) == 2
     assert all(question["problem_ids"] == ["P1"] for question in payload["knowledge_questions"])
     assert all(question["plan_ids"] for question in payload["knowledge_questions"])
 
@@ -461,6 +472,180 @@ def test_candidate_semantics_are_not_hard_coded_in_basic_validation() -> None:
         files={"strategy.md": summary_conditional},
         race="terran",
     ).ok
+
+
+def test_strategy_document_applies_only_selected_paragraphs() -> None:
+    document = StrategyDocument.parse(VALID_STRATEGY)
+    gate = next(item for item in document.details if item.id == "main_attack_gate")
+    candidate, changes = document.apply_patch(
+        [
+            {
+                "op": "replace_detail",
+                "target": gate.id,
+                "expected_old_hash": paragraph_hash(gate.value),
+                "value": "Gather 40 Marines and 8 Siege Tanks before attacking.",
+            }
+        ]
+    )
+
+    assert changes == [{"op": "replace_detail", "target": "main_attack_gate"}]
+    assert "Gather 40 Marines and 8 Siege Tanks before attacking." in candidate
+    assert "Build workers, supply, production, gas" in candidate
+    assert validate_strategy_markdown(candidate, race="terran") is None
+
+
+def test_deterministic_match_features_expose_runtime_classification(tmp_path: Path) -> None:
+    record = _current_record()
+    record["interactions"][-1]["accepted"] = False
+    record["interactions"][-1]["issues"] = ["army command was rejected"]
+    record_path = tmp_path / "match.json"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    features = MatchRecordReader(record_path).deterministic_features("match_001")
+
+    assert features["summary_quality"] == "deterministic"
+    assert features["decision_metrics"]["commander_rows"] == 1
+    assert features["runtime_assessment"]["contaminated"] is True
+    assert features["runtime_assessment"]["classification"] == "runtime_contaminated"
+
+
+def test_batch_analysis_can_route_runtime_work_without_a_candidate() -> None:
+    payload, error = _normalize_batch_analysis(
+        {
+            "next_action": "inspect_runtime",
+            "action_reason": "most losses contain rejected army commands",
+            "problems": [
+                {
+                    "problem": "Sharpy repeatedly rejects group movement",
+                    "control_class": "runtime_execution",
+                    "strategy_fixable": False,
+                    "evidence": ["Match 1", "Match 2"],
+                }
+            ],
+            "candidate_plans": [],
+        },
+        strategy_name="tank",
+        knowledge_mode="enabled",
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["next_action"] == "inspect_runtime"
+    assert payload["candidate_plans"] == []
+
+
+def test_complete_analysis_plan_is_applied_without_second_llm_call(monkeypatch) -> None:
+    manifest = build_executor_capability_manifest("terran")
+    analysis = BattleAnalysis(
+        strategy_name="tank",
+        race="terran",
+        sample_size=2,
+        record_mix="1W/1L",
+        raw={
+            "next_action": "propose_strategy_patch",
+            "action_reason": "the attack gate is repeatedly late",
+            "winning_mechanism": "one gathered timing attack",
+            "candidate_plans": [
+                {
+                    "id": "D1",
+                    "name": "lower the gathered attack threshold",
+                    "hypothesis": "an earlier gathered force converts before scaling",
+                    "primary_lever": "attack_timing",
+                    "addresses_problem_ids": ["P1"],
+                    "changes": [
+                        {
+                            "target_paragraph_id": "main_attack_gate",
+                            "candidate_rule": "Gather 40 Marines and 8 Siege Tanks before attacking.",
+                            "why_required": "the old force arrives after enemy scaling",
+                        }
+                    ],
+                    "predictions": ["the first attack command occurs earlier"],
+                    "disproof_conditions": ["attack timing does not improve"],
+                    "capability_mapping": {
+                        "macro_actions": ["train_marine", "train_siege_tank"],
+                        "army_controls": ["hold_or_gather", "push_or_assault"],
+                        "unsupported_dependencies": [],
+                    },
+                    "expected_benefit": "an earlier first engagement",
+                    "risk_to_winning_mechanism": "the force may be too small",
+                }
+            ],
+        },
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("a complete analyzed plan must not call the optimizer LLM")
+
+    monkeypatch.setattr(
+        "evol_agent.core.optimization_agent_loop.call_json_llm", fail_if_called
+    )
+    result, improvement, _observations, errors, events = run_optimization_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=analysis,
+        skill_texts={"strategy.md": VALID_STRATEGY},
+        initial_tool_observations=[],
+        capability_manifest=manifest,
+    )
+
+    assert result.ok
+    assert errors == []
+    assert improvement is not None
+    assert "Gather 40 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
+    assert events[0]["llm_calls"] == 0
+
+def test_executor_manifest_and_candidate_critic_share_action_vocabulary() -> None:
+    manifest = build_executor_capability_manifest("terran")
+    assert "train_siege_tank" in manifest["macro_contract"]["available_actions"]
+    valid = {
+        "hypothesis": "more completed Tanks improve the first engagement",
+        "primary_lever": "composition",
+        "predictions": ["first contact has more living Siege Tanks"],
+        "disproof_conditions": ["Tank count does not improve"],
+        "capability_mapping": {
+            "macro_actions": ["train_siege_tank"],
+            "army_controls": ["main_force_reinforcement"],
+            "unsupported_dependencies": [],
+        },
+    }
+    assert critique_candidate_contract(valid, capability_manifest=manifest) == []
+    valid["capability_mapping"]["macro_actions"] = ["micro_every_tank"]
+    assert "unknown macro actions" in critique_candidate_contract(
+        valid, capability_manifest=manifest
+    )[0]
+
+
+def test_candidate_critic_compares_only_changed_actions_with_plan_delta() -> None:
+    manifest = build_executor_capability_manifest("terran")
+    rationale = {
+        "hypothesis": "Stimpack improves the first engagement",
+        "primary_lever": "upgrade",
+        "predictions": ["the first force retains more Marines"],
+        "disproof_conditions": ["the upgraded force still collapses"],
+        "selected_plan_ids": ["D1"],
+        "selected_changes": [{"source_plan_id": "D1"}],
+        "capability_mapping": {
+            "macro_actions": [
+                "research_stimpack",
+                "train_scv",
+                "build_gas",
+                "expand",
+            ],
+            "changed_macro_actions": ["research_stimpack"],
+            "unsupported_dependencies": [],
+        },
+    }
+    plan = {
+        "id": "D1",
+        "primary_lever": "upgrade",
+        "capability_mapping": {"macro_actions": ["research_stimpack"]},
+    }
+
+    assert critique_candidate_contract(
+        rationale,
+        capability_manifest=manifest,
+        selected_plan=plan,
+    ) == []
 
 
 def test_strategy_supply_budget_rejects_end_state_over_200() -> None:
@@ -497,7 +682,7 @@ def test_only_current_deterministic_knowledge_is_treated_as_verified(tmp_path: P
     assert checkpoint.completed_knowledge_ids() == {"Q1"}
 
 
-def test_deterministic_strategy_knowledge_is_compact_and_action_grounded() -> None:
+def test_deterministic_strategy_knowledge_is_complete_and_action_grounded() -> None:
     item = {
         "id": "Q1",
         "problem_ids": ["P1"],
@@ -516,7 +701,7 @@ def test_deterministic_strategy_knowledge_is_compact_and_action_grounded() -> No
     assert "train_medivac: 100M/100G/2S; 30.0s" in run["answer"]
     assert "Medivac synergizes_with Marine" in run["answer"]
     assert "BanelingBurrowed" not in run["answer"]
-    assert len(run["answer"]) < 4_000
+    assert "Medivac AI handles attack commands differently" in run["answer"]
 
 
 def test_knowledge_question_fields_and_text_fallback_resolve_the_same_entities() -> None:

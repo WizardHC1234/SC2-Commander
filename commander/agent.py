@@ -12,7 +12,6 @@ from commander.prompts import build_commander_messages
 from commander.tools import (
     _macro_keys,
     apply_tool_calls,
-    army_group_ids_from_observation,
     parse_tool_calls_from_content,
     validate_army_tools_for_cycle,
 )
@@ -73,6 +72,14 @@ def _pack_outcome(
     accepted: bool = True,
 ) -> Dict[str, Any]:
     army_summary = {
+        "intent": (
+            {
+                "mode": policy.army_intent.mode,
+                "zone_id": policy.army_intent.zone_id,
+            }
+            if policy.army_intent is not None
+            else None
+        ),
         "commands": [
             {
                 "group_id": c.group_id,
@@ -173,12 +180,7 @@ def _blocking_decision_issues(
         apply_issues=apply_issues,
         legal_macro_keys=legal_macro_keys,
     )
-    blocking.extend(
-        validate_army_tools_for_cycle(
-            policy,
-            required_group_ids=army_group_ids_from_observation(full_observation),
-        )
-    )
+    blocking.extend(validate_army_tools_for_cycle(policy))
     return blocking
 
 

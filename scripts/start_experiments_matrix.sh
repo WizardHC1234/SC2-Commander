@@ -37,16 +37,17 @@ FORCE_STRATEGY="tank"
 # 2. Commander model (must exist in llm/config.json -> llm_agents_pool)
 # =============================================================================
 # COMMANDER_MODEL="qwen3.5-9b"
-COMMANDER_MODEL="qwen3.5-27b"
+# COMMANDER_MODEL="qwen3.5-27b"
 # COMMANDER_MODEL="kimi-k2.5"
 # COMMANDER_MODEL="deepseek-v4-flash"
+COMMANDER_MODEL="qwen3.5-9b-lora"
 # COMMANDER_MODEL="qwen3-32b-reasoning"
 
 # =============================================================================
 # 3. Run control
 # =============================================================================
 DEFAULT_MATCHES_PER_EXPERIMENT=10
-CONCURRENCY=10
+CONCURRENCY=5
 
 # =============================================================================
 # 4. Experiment list
@@ -59,18 +60,23 @@ EXPERIMENTS=(
   # "terran|veryeasy|macro|tank|20|"
   # "terran|veryeasy|macro|battlecruiser|20|"
 
-  "terran|mediumhard|macro|marine|20|"
-  "terran|mediumhard|macro|tank|20|"
-  "terran|mediumhard|macro|battlecruiser|20|"
-  "terran|hard|macro|marine|20|"
-  "terran|hard|macro|tank|20|"
-  "terran|hard|macro|battlecruiser|20|"
-  "terran|harder|macro|marine|20|"
-  "terran|harder|macro|tank|20|"
-  "terran|harder|macro|battlecruiser|20|"
-  "terran|veryhard|macro|marine|20|"
-  "terran|veryhard|macro|tank|20|"
-  "terran|veryhard|macro|battlecruiser|20|"
+  # "terran|mediumhard|macro|marine|20|"
+  # "terran|mediumhard|macro|tank|20|"
+  # "terran|mediumhard|macro|battlecruiser|20|"
+  # "terran|hard|macro|marine|20|"
+  # "terran|hard|macro|tank|20|"
+  # "terran|hard|macro|battlecruiser|20|"
+  # "terran|harder|macro|marine|20|"
+  # "terran|harder|macro|tank|20|"
+  # "terran|harder|macro|battlecruiser|20|"
+  # "terran|veryhard|macro|marine|20|"
+  # "terran|veryhard|macro|tank|20|"
+  # "terran|veryhard|macro|battlecruiser|20|"
+
+    "terran|mediumhard|macro|tank|20|"
+    # "terran|hard|macro|tank|20|"
+    # "terran|veryhard|macro|tank|20|"
+    # "terran|harder|macro|tank|20|"
 )
 
 safe_name() {

@@ -159,7 +159,12 @@ def _normalise_previous_decision(raw: Any) -> Optional[Dict[str, Any]]:
         for item in _list(state.get("army_commands"))
         if isinstance(item, dict) and item.get("group_id")
     ]
-    if not macro_commands and not army_commands and not state.get("wake_event"):
+    if (
+        not macro_commands
+        and not army_commands
+        and not state.get("army_intent")
+        and not state.get("wake_event")
+    ):
         return None
     try:
         game_time = float(state.get("game_time_seconds"))
@@ -171,6 +176,7 @@ def _normalise_previous_decision(raw: Any) -> Optional[Dict[str, Any]]:
         ),
         "macro_commands": macro_commands,
         "army_commands": army_commands,
+        "army_intent": _dict(state.get("army_intent")) or None,
         "scan_zone_id": state.get("scan_zone_id"),
         "scout_zone_id": state.get("scout_zone_id"),
         "wake_event": deepcopy(_dict(state.get("wake_event"))) or None,
@@ -1182,6 +1188,7 @@ def _previous_decision_lines(execution: Dict[str, Any]) -> List[str]:
         else:
             macro_bits.append(f"{name}->{item.get('to_count')}")
     army_bits = []
+    intent = _dict(previous.get("army_intent"))
     for item in _list(previous.get("army_commands")):
         item = _dict(item)
         ratio = item.get("retreat_ratio")
@@ -1215,6 +1222,12 @@ def _previous_decision_lines(execution: Dict[str, Any]) -> List[str]:
         f"game_time_seconds={_value(previous.get('game_time_seconds'))}",
         f"macro_commands={_items(macro_bits)}",
         f"army_commands={_items(army_bits)}",
+        (
+            f"army_intent={_value(intent.get('mode'))}->"
+            f"{_value(intent.get('zone_id'))}"
+            if intent
+            else "army_intent=none"
+        ),
         f"scan_zone_id={_value(previous.get('scan_zone_id'))}",
         f"scout_zone_id={_value(previous.get('scout_zone_id'))}",
         f"wake_event={wake_text}",

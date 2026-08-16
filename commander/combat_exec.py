@@ -13,11 +13,16 @@ from sharpy.plans.tactics.terran.scan_enemy import ScanEnemy
 
 from commander.combat_policy import (
     MOVE_TYPE_BY_MOVEMENT_MODE,
+    ArmyIntent,
     ArmyControlPolicy,
     ArmyGroupCommand,
     InjectedArmyPolicyProvider,
 )
-from commander.combat_state import _nearest_zone_name, _total_power, _unit_counts
+from commander.combat_state import (
+    _nearest_zone_name,
+    _total_power,
+    _unit_counts,
+)
 from commander.retreat_policy import (
     ARRIVAL_RADIUS,
     DEFAULT_RETREAT_RATIO,
@@ -126,85 +131,11 @@ class CombatControlAct(ActBase):
                 getattr(self.ai, "time", 0.0)
             )
         self._execute_scout_control()
-        # Refresh groups every frame so newly produced units become group_1
-        # before we apply (and sync) the last LLM policy.
+        # Refresh groups every frame before expanding the persistent intent, so
+        # newly produced units immediately become following reinforcements.
         self._update_groups(self._select_main_army_units())
-        policy = self._sync_policy_with_groups(policy)
         self._execute_policy(policy)
         return False
-
-    def _sync_policy_with_groups(
-        self, policy: ArmyControlPolicy
-    ) -> ArmyControlPolicy:
-        """Keep every live group commanded between LLM decisions.
-
-        Cached LLM policies go stale when reinforcement (group_1) disappears
-        and later reappears: the old group_1 order (often regroup-at-home)
-        remains in the policy and would strand newly produced units away from
-        an already-committed main-force offensive. Every frame, drop commands
-        for groups that no longer exist and make non-main groups follow the
-        main force's current objective/mode.
-        """
-        if not self._current_groups or not policy.commands:
-            return policy
-
-        by_id = {command.group_id: command for command in policy.commands}
-        main_id = self._main_group_id or self.MAIN_GROUP_ID
-        source = by_id.get(main_id)
-        if source is None:
-            source = next(iter(policy.commands), None)
-        if source is None:
-            return policy
-
-        synced: List[ArmyGroupCommand] = []
-        # Always keep the live main-force order first when present.
-        if main_id in self._current_groups:
-            main_command = by_id.get(main_id, source)
-            if main_command.group_id != main_id:
-                main_command = ArmyGroupCommand(
-                    group_id=main_id,
-                    destination_zone_id=source.destination_zone_id,
-                    movement_mode=source.movement_mode,
-                    move_type=MOVE_TYPE_BY_MOVEMENT_MODE[source.movement_mode],
-                    retreat_ratio=source.retreat_ratio,
-                )
-            synced.append(main_command)
-            follow = main_command
-        else:
-            follow = source
-
-        for group_id in sorted(
-            self._current_groups,
-            key=lambda value: int(value.removeprefix("group_")),
-        ):
-            if group_id == main_id:
-                continue
-            # Reinforcements always chase the main objective between decisions.
-            synced.append(
-                ArmyGroupCommand(
-                    group_id=group_id,
-                    destination_zone_id=follow.destination_zone_id,
-                    movement_mode=follow.movement_mode,
-                    move_type=MOVE_TYPE_BY_MOVEMENT_MODE[follow.movement_mode],
-                    retreat_ratio=follow.retreat_ratio,
-                )
-            )
-
-        if (
-            len(synced) == len(policy.commands)
-            and all(
-                a.group_id == b.group_id
-                and a.destination_zone_id == b.destination_zone_id
-                and a.movement_mode == b.movement_mode
-                for a, b in zip(synced, policy.commands)
-            )
-        ):
-            return policy
-        return ArmyControlPolicy(
-            commands=synced,
-            scan_zone_id=policy.scan_zone_id,
-            scout_zone_id=policy.scout_zone_id,
-        )
     def _update_production_rallies(self) -> None:
         target = getattr(self.gather_manager, "gather_point", None)
         if target is None:
@@ -353,6 +284,8 @@ class CombatControlAct(ActBase):
             "last_result_seconds_ago": result_age,
         }
     def _execute_policy(self, policy: ArmyControlPolicy) -> None:
+        if policy.army_intent is not None:
+            policy = self._materialize_army_intent(policy)
         search_command = next(
             (
                 command
@@ -375,7 +308,9 @@ class CombatControlAct(ActBase):
             effective = self._advance_retreat_state(command, units)
             if effective.movement_mode == "regroup":
                 target = self._resolve_regroup_target(
-                    effective.destination_zone_id, units
+                    effective.destination_zone_id,
+                    units,
+                    group_id=effective.group_id,
                 )
             elif effective.movement_mode in {"push", "assault", "harass"}:
                 target = self._resolve_target(
@@ -433,10 +368,54 @@ class CombatControlAct(ActBase):
                 ),
             }
 
+    def _materialize_army_intent(
+        self, policy: ArmyControlPolicy
+    ) -> ArmyControlPolicy:
+        """Expand one persistent whole-army intent into live group commands.
+
+        Main force holds or assaults the objective. Reinforcements regroup to
+        it first; once they join, ``_update_groups`` promotes them into the
+        main force automatically. Retreat remains a runtime concern because
+        it can rewrite these commands every frame.
+        """
+        intent: ArmyIntent = policy.army_intent
+        mode = intent.mode
+        main_mode = {
+            "hold": "hold",
+            "attack": "assault",
+            "regroup": "regroup",
+            "cleanup": "search_and_destroy",
+        }[mode]
+        commands: List[ArmyGroupCommand] = []
+        main_id = self._main_group_id or self.MAIN_GROUP_ID
+        for group_id in sorted(
+            self._current_groups,
+            key=lambda value: int(value.removeprefix("group_")),
+        ):
+            group_mode = (
+                main_mode
+                if group_id == main_id or mode == "cleanup"
+                else "regroup"
+            )
+            commands.append(
+                ArmyGroupCommand(
+                    group_id=group_id,
+                    destination_zone_id=intent.zone_id,
+                    movement_mode=group_mode,
+                    move_type=MOVE_TYPE_BY_MOVEMENT_MODE[group_mode],
+                )
+            )
+        return ArmyControlPolicy(
+            commands=commands,
+            scan_zone_id=policy.scan_zone_id,
+            scout_zone_id=policy.scout_zone_id,
+            army_intent=intent,
+        )
+
     # ------------------------------------------------------------------
     # auto-retreat state machine (native PlanZoneAttack-style: front-runner
-    # local ratio, arrival-stop, hysteresis + time-based recovery). The
-    # threshold travels with each move_group command (retreat_ratio).
+    # local ratio, arrival-stop, hysteresis + time-based recovery). Each
+    # generated group command carries the runtime retreat threshold.
     # ------------------------------------------------------------------
 
     def _advance_retreat_state(
@@ -453,8 +432,8 @@ class CombatControlAct(ActBase):
         state = self._retreat_states.setdefault(group_id, GroupRetreatState())
         now = float(getattr(self.ai, "time", 0.0))
 
-        # The model issued a different command than the one we interrupted:
-        # respect the new intent and re-evaluate from scratch.
+        # A newly applied intent generated a different command than the one we
+        # interrupted: respect it and re-evaluate from scratch.
         if (
             state.state != STATE_ACTIVE
             and state.original_command is not None
@@ -646,7 +625,7 @@ class CombatControlAct(ActBase):
                     if same_command and "issued_at" in previous
                     else now
                 ),
-                "source": "llm",
+                "source": "commander_cleanup",
             }
 
         idle_units = units.filter(
@@ -1129,7 +1108,15 @@ class CombatControlAct(ActBase):
         self,
         destination_zone_id: str,
         units: Units,
+        *,
+        group_id: str,
     ) -> Optional[Point2]:
+        main_id = self._main_group_id or self.MAIN_GROUP_ID
+        if group_id != main_id:
+            main_units = self._current_groups.get(main_id)
+            if main_units is not None and main_units.exists:
+                return self._group_center(main_units)
+
         zones = list(self.knowledge.zone_manager.expansion_zones)
         zone = self._zone_by_id(zones, destination_zone_id)
         if zone is None or getattr(zone, "is_ours", False):

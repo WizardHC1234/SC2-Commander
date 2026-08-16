@@ -9,7 +9,7 @@ sections first (longer API prompt-cache prefix), then strategy-specific ones:
 [2] Decision doctrine    — evidence, gates vs ceilings, completeness, main force
 [3] Output format        — reasoning + JSON schema + final check
 [4] set_wake_event       — wake scheduling, stated once
-[5] Army tools           — zones, move_group modes, retreat_ratio, scan/scout
+[5] Army tools           — zones, army_intent, scan/scout
 [6] Macro tools          — contract + catalog
 [7] Strategy             — the current strategy.md (authoritative)
 [8] Map Topology         — static zone graph data block (when present)
@@ -81,31 +81,32 @@ _ARMY_ZONES = """\
 [5] Army tools
 
 Zones:
-- Copy group_id and zone_id from the observation. Use [8] neighbors and primary_route (the default ground attack route) for staging, retreat, and multi-hop movement; never infer adjacency from zone numbers. neighbors are direct ground links and their parenthesized value is path distance.
+- Copy zone_id from the observation. Use [8] neighbors and primary_route (the default ground attack route) for staging, retreat, and multi-hop movement; never infer adjacency from zone numbers. neighbors are direct ground links and their parenthesized value is path distance.
 - In the Zone State Table, follow columns and row_count. own_contents excludes army_groups; visible_enemy_contents is current and last_seen_enemy_contents is fogged memory. A fogged or partially visible zone without visible enemies is not confirmed empty.
 
-move_group:
-- Emit exactly one move_group per current army_groups entry; none if empty. Command every group even before the attack gate: hold main_force at a safe own staging zone and regroup reinforcement to it. After the offensive starts, reinforcement joins the same objective, never an independent attack, harass, or search.
-- is_fragmented=yes means a group is spatially split and must not be treated as gathered.
-- Movement modes:
-  - regroup: relocate to a safe own staging zone without stopping; do not park there, use hold to defend.
-  - hold: move to and defend a point; fire in range but do not chase or attack structures, and Siege Tanks stay sieged near enemies. Use for staging, guarding, or defense.
-  - push: forward attack-move that fights encountered threats but does not chase behind the advance.
-  - assault: committed attack-move toward enemy or useful neutral territory, not repositioning or a cautious probe.
-  - contain: hold outside the target entrance and engage units leaving it without entering; choose target and approach from [8].
-  - harass: normal Terran attack-move, not worker-hunting or enemy-army avoidance; use only for an explicit dedicated harasser.
-  - defensive_retreat: withdraw toward an own zone while firing. panic_retreat: escape without stopping to fight.
-  - search_and_destroy: runtime combines idle combat groups, attacks visible structures first, then sweeps expansions; it overrides other movement modes.
-- Optional retreat_ratio=0.3-1.5 (default 0.6) for assault/push/harass/contain: lower accepts more losses, higher disengages earlier. Runtime withdraws a losing group to safety and resumes after recovery; it never overrides explicit hold, regroup, or retreat. After an automatic retreat, do not repeat the same losing assault unchanged.
+army_intent:
+- Emit exactly one army_intent every decision cycle, including when army_groups is
+  empty and combat units are still being produced. It replaces the previous intent.
+- Use mode=hold during production: the main force moves to and defends the selected
+  safe own zone while reinforcements travel to the live main-force position.
+- Use mode=attack only after every explicit strategy attack-gate condition is met:
+  the main force assaults zone_id while reinforcements follow and merge into it.
+- Use mode=regroup to move the main force toward a safe selected zone without
+  starting an offensive; reinforcements still follow the live main-force position.
+- Use mode=cleanup only when [Runtime Cleanup Hint] appears. It combines all combat
+  groups, attacks visible enemy structures first, and then sweeps expansion zones.
+  Copy the hinted main-force nearest zone_id and keep cleanup on later decisions.
+- The runtime owns group membership, local defense, tactical retreat, recovery,
+  formation, and unit micro. The model never issues per-group movement commands.
 
 Attack readiness and objectives:
 - Before starting a planned offensive, audit every explicit attack-gate condition against the current observation and state each condition in reasoning as current/required and met/unmet. Conditions joined by "and" must all be met.
 - Only completed, living, and gathered main_force units count toward combat-unit conditions. Training, queued, pending, separated, missing, or inferred units do not count; near-readiness, estimated advantage, and previous commands cannot override an unmet condition.
-- Any push, assault, harass, or contain toward enemy-controlled territory starts or advances an offensive and requires the gate. If the gate is unmet, hold main_force at a safe staging zone and regroup reinforcement while continuing all valid macro goals.
+- mode=attack starts or advances an offensive and requires the gate. If the gate is unmet, use mode=hold at a safe own staging zone while continuing all valid macro goals.
 - Once an offensive begins, continue or recover from current progress and the strategy's recovery conditions; do not reapply the opening gate after every loss unless the strategy explicitly requires rebuilding it.
 - Clear local advantage at the active enemy objective is evidence that the forward group can still make progress; maintain its pressure while reinforcements travel forward.
-- Slow, siege-oriented, or gathering forces should stage safely or contain the entrance on primary_route before a long assault. Maintain a progressing objective and reinforce it; if stalled, recover or choose a weaker objective rather than repeat the same assault.
-- [Combat Execution] reports progress, destination, age, and Commander vs auto-retreat source. confirmed_clear means only currently visible without enemies, not map cleanup. Use search_and_destroy only with [Runtime Search-And-Destroy Hint], following its required_action for every group; missing vision alone is insufficient.
+- Slow, siege-oriented, or gathering forces should stage safely with hold/regroup before a long attack. Maintain a progressing objective; if stalled, recover or choose a weaker objective rather than repeat the same attack unchanged.
+- [Combat Execution] reports progress, destination, age, and Commander vs runtime source. confirmed_clear means only currently visible without enemies, not map cleanup. When [Runtime Cleanup Hint] appears, switch army_intent to cleanup; missing vision alone is insufficient.
 
 scanner_sweep / scout (at most one call each per cycle; omit scanner_sweep = no scan, omit scout = cancel):
 - Choose recon from strategy and current observation. Scanner Sweep costs 50 Orbital energy; use it only when ready and missing vision materially changes the army decision, especially if ground scouting is unsafe.
@@ -195,18 +196,18 @@ The reasoning paragraph is mandatory; JSON-only output is invalid.
 Macro arguments are always {"to_count": <positive int>}; see the catalog in [6].
 
 Army/meta argument shapes:
-- move_group: {"group_id":"group_0","destination_zone_id":"zone_5","movement_mode":"assault"}
-  movement_mode: regroup|push|assault|harass|hold|contain|defensive_retreat|panic_retreat|search_and_destroy
-  Optional: "retreat_ratio":0.6 (0.3-1.5; see [5])
+- army_intent: {"mode":"hold","zone_id":"zone_1"}
+  mode: hold|attack|regroup|cleanup. The runtime expands this persistent whole-army
+  intent into main-force movement, reinforcement joining, local defense, and retreat.
 - scanner_sweep: {"zone_id":"zone_5"} (omit = no scan)
 - scout: {"zone_id":"zone_3"} (omit = cancel; if scout already active, repeat same zone)
 - set_wake_event: {"logic":"any","conditions":[{"type":"unit_count_at_least","unit":"Marine","count":20}]} (required; see [4])
 
 Final check:
 - Emit every still-valid strategy macro target, not only the bottleneck, a minimal opening snippet, or attack-gate counts.
-- Do not issue push, assault, harass, or contain toward enemy-controlled territory while any explicit attack-gate condition is unmet.
-- Emit one move_group per army_groups entry; add scan/scout only when justified and exactly one reachable set_wake_event.
-- Use existing group/zone IDs and current observation evidence; do not act on unconfirmed conditions or stale commands alone.
+- Do not set mode=attack while any explicit attack-gate condition is unmet.
+- Emit exactly one army_intent; add scan/scout only when justified and exactly one reachable set_wake_event.
+- Use an existing zone_id and current observation evidence; do not act on unconfirmed conditions or stale commands alone.
 """
 
 

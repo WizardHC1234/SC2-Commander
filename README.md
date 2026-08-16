@@ -7,7 +7,7 @@
 - 单 Agent，**事件驱动决策**（开局 bootstrap + 模型 `set_wake_event`；漏写则 now+60 弱保底；另有独立 now+60 截止保险丝）
 - 可执行命令均为 tool（训练/建造/研究/扩张/调兵/扫描/探图/唤醒条件）
 - 每轮**整表替换**活跃目标；tool 顺序即资源优先级
-- 军队侧：`move_group`（zone + movement mode）+ `scanner_sweep` / `scout`；微操在 Python
+- 军队侧：`army_intent`（hold / attack / regroup / cleanup + zone）+ `scanner_sweep` / `scout`；分组、增援集结、撤退、清图和微操在 Python
 - Demo：Kairos Junction + `tank` + 内置 AI
 - 内置人族策略：`marine`、`tank`、`battlecruiser`（旧名 `early_marine` / `mid_tank` / `late_battlecruiser` 仍作别名）
 

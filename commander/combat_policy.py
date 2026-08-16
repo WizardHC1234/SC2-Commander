@@ -42,10 +42,24 @@ class ArmyGroupCommand:
 
 
 @dataclass(frozen=True)
+class ArmyIntent:
+    """Persistent high-level army intent owned by the Commander.
+
+    The combat act expands this into per-group commands every frame.  The
+    model therefore chooses only the strategic stance and zone; it does not
+    micromanage group membership.
+    """
+
+    mode: str
+    zone_id: str
+
+
+@dataclass(frozen=True)
 class ArmyControlPolicy:
     commands: List[ArmyGroupCommand] = field(default_factory=list)
     scan_zone_id: Optional[str] = None
     scout_zone_id: Optional[str] = None
+    army_intent: Optional[ArmyIntent] = None
 
 
 class InjectedArmyPolicyProvider:

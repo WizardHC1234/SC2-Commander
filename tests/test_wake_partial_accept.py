@@ -32,6 +32,7 @@ def _decision_kwargs() -> Dict[str, Any]:
         action_space={
             "train_scv": "Set absolute SCV target",
             "build_gas": "Set refinery target",
+            "army_intent": "Set persistent whole-army stance and zone",
         },
         model_key="test-model-json",
         full_observation=None,
@@ -46,6 +47,7 @@ def test_wake_only_failure_applies_tools_with_fallback_wake() -> None:
         "reasoning paragraph\n\n"
         '{"tool_calls": ['
         '{"name": "train_scv", "arguments": {"to_count": 22}}, '
+        '{"name": "army_intent", "arguments": {"mode": "hold", "zone_id": "zone_0"}}, '
         '{"name": "set_wake_event", "arguments": {"logic": "any", "conditions": '
         '[{"type": "unit_count_at_least", "unit": "CommandCenter", "count": 2}]}}]}'
     )

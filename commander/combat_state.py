@@ -1,7 +1,7 @@
 """Army observation state + cleanup runtime hints for Commander.
 
 Collects live combat/zone/scout state for observations and wake polling.
-Emits optional [Runtime Search-And-Destroy Hint] when cleanup conditions hold.
+Emits an optional [Runtime Cleanup Hint] when cleanup conditions hold.
 """
 
 from __future__ import annotations
@@ -119,10 +119,9 @@ def build_cleanup_runtime_hint(
     *,
     game_time_seconds: Optional[float] = None,
 ) -> str:
-    """Inject an explicit map-clear cue only while cleanup conditions hold now.
+    """Inject an explicit map-clear cue while cleanup conditions hold now.
 
-    Program-side situation check only; does not rewrite Army commands.
-    Do not inject this block when conditions are not currently satisfied.
+    Program-side situation check only; the Commander explicitly selects cleanup.
     Normal cleanup requires reached enemy main and cleared known bases.
     Endgame cleanup fires in the final minutes as a settlement fallback.
     """
@@ -154,15 +153,11 @@ def build_cleanup_runtime_hint(
     known_enemy_bases = int(state.get("known_enemy_bases", 0) or 0)
     visible_enemy_power = float(state.get("visible_enemy_power", 0.0) or 0.0)
     remaining = max(0.0, limit - float(game_time_seconds or 0.0))
-    reason = (
-        "normal_cleanup"
-        if normal_cleanup
-        else "endgame_time_limit"
-    )
+    reason = "normal_cleanup" if normal_cleanup else "endgame_time_limit"
     return chr(10).join(
         [
-            "[Runtime Search-And-Destroy Hint]",
-            "search_and_destroy_recommended=yes",
+            "[Runtime Cleanup Hint]",
+            "cleanup_recommended=yes",
             f"reason={reason}",
             f"known_enemy_bases={known_enemy_bases}",
             f"peak_known_enemy_bases={peak}",
@@ -171,13 +166,10 @@ def build_cleanup_runtime_hint(
             f"visible_enemy_army_power={visible_enemy_power:.2f}",
             f"army_nearest_zone={nearest}",
             f"seconds_remaining={remaining:.1f}",
-            "required_action=Order every combat-bearing army_group to "
-            "movement_mode=search_and_destroy starting from that group's "
-            "current nearest_zone_id (or army_nearest_zone if needed). "
-            "Do not keep push/assault/harass on empty former enemy zones. "
-            ""
-            "Once search_and_destroy has started, keep all combat groups in "
-            "search_and_destroy for the rest of the game.",
+            "required_action=Emit army_intent with mode=cleanup and use the main "
+            "force's current nearest zone_id. Keep mode=cleanup on later decisions "
+            "until the game ends; the runtime combines all groups, attacks visible "
+            "structures first, and then sweeps expansion zones.",
         ]
     )
 

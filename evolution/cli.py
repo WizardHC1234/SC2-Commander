@@ -17,11 +17,21 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--map", dest="map_name", default="KairosJunctionLE")
     parser.add_argument("--difficulties", default=",".join(DEFAULT_DIFFICULTIES))
     parser.add_argument("--matches", type=int, default=10)
+    parser.add_argument("--candidate-initial-matches", type=int, default=6)
+    parser.add_argument("--candidate-max-matches", type=int, default=10)
+    parser.add_argument("--candidate-step-matches", type=int, default=2)
+    parser.add_argument("--candidate-accept-probability", type=float, default=0.80)
+    parser.add_argument("--candidate-reject-probability", type=float, default=0.20)
     parser.add_argument("--concurrency", type=int, default=5)
     parser.add_argument("--pass-score", type=float, default=0.8)
     parser.add_argument("--max-generations", type=int, default=10)
     parser.add_argument("--knowledge-mode", choices=("enabled", "disabled"), default="enabled")
     parser.add_argument("--run-dir", default="", help="Existing run directory to resume")
+    parser.add_argument(
+        "--baseline-batch-dir",
+        default="",
+        help="Seed a new run from one already-completed champion batch",
+    )
     parser.add_argument("--real-time", action="store_true")
     return parser
 
@@ -39,11 +49,17 @@ def main() -> None:
         map_name=args.map_name,
         difficulties=difficulties,
         matches_per_batch=args.matches,
+        candidate_initial_matches=args.candidate_initial_matches,
+        candidate_max_matches=args.candidate_max_matches,
+        candidate_step_matches=args.candidate_step_matches,
+        candidate_accept_probability=args.candidate_accept_probability,
+        candidate_reject_probability=args.candidate_reject_probability,
         concurrency=args.concurrency,
         pass_score=args.pass_score,
         max_generations=args.max_generations,
         knowledge_mode=args.knowledge_mode,
         real_time=args.real_time,
+        baseline_batch_dir=args.baseline_batch_dir,
     )
     runner = EvolutionRunner(config, run_dir=Path(args.run_dir) if args.run_dir else None)
     state = runner.run()

@@ -6,6 +6,7 @@ from typing import Optional
 
 from .core.config import REQUIRED_TOP_HEADINGS
 from .core.types import ValidationResult
+from .optimization.strategy_document import StrategyDocument
 
 
 # Only reject instructions that the current strategy interface genuinely
@@ -211,6 +212,10 @@ def validate_strategy_markdown(content: str, *, race: str = "") -> Optional[str]
     style_error = validate_strategy_house_style(text)
     if style_error:
         return style_error
+    try:
+        StrategyDocument.parse(text)
+    except ValueError as exc:
+        return str(exc)
     for pattern, message in _UNEXECUTABLE_STRATEGY_PATTERNS:
         if pattern.search(text):
             return message

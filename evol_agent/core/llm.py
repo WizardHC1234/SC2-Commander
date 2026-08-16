@@ -6,7 +6,11 @@ import re
 import time
 from typing import Any, Optional
 
-from .config import LLM_CALL_MAX_ATTEMPTS, LLM_CALL_RETRY_DELAYS_SECONDS
+from .config import (
+    LLM_CALL_MAX_ATTEMPTS,
+    LLM_CALL_RETRY_DELAYS_SECONDS,
+    LLM_CALL_TIMEOUT_SECONDS,
+)
 from .run_recorder import append_run_event
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,7 @@ def call_json_llm(
                 model_key=model,
                 is_reasoning=is_reasoning,
                 response_format={"type": "json_object"},
+                timeout=LLM_CALL_TIMEOUT_SECONDS,
             )
             response = str(response_data.get("content") or "")
             if response_data.get("error"):

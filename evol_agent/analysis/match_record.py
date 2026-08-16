@@ -6,6 +6,7 @@ from typing import Any
 
 from ..analysis.fixed_timeline import build_fixed_match_timeline
 from ..analysis.get_chunk import extract_chunks
+from ..analysis.match_features import extract_match_features
 
 
 class MatchRecordReader:
@@ -136,4 +137,10 @@ class MatchRecordReader:
             action_space_selection=self.action_space_selection_summary(),
             file_name=self.record_path.name,
             opponent_truth=self._load_enemy_truth(),
+        )
+
+    def deterministic_features(self, record_id: str) -> dict[str, Any]:
+        return extract_match_features(
+            chunks=self._chunks(),
+            manifest=self.manifest(record_id),
         )

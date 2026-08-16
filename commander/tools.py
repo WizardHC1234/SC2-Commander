@@ -5,16 +5,15 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from commander.combat_policy import (
-    ALLOWED_MOVEMENT_MODES,
-    MOVE_TYPE_BY_MOVEMENT_MODE,
+    ArmyIntent,
     ArmyControlPolicy,
-    ArmyGroupCommand,
 )
-from commander.retreat_policy import clamp_retreat_ratio
 from commander.wake_events import normalize_wake_event
 
 # Must match race action-registry entries with type == "army" / "meta".
-ARMY_TOOL_NAMES = frozenset({"move_group", "scanner_sweep", "scout"})
+ARMY_TOOL_NAMES = frozenset(
+    {"army_intent", "scanner_sweep", "scout"}
+)
 META_TOOL_NAMES = frozenset({"set_wake_event"})
 NON_MACRO_TOOL_NAMES = ARMY_TOOL_NAMES | META_TOOL_NAMES
 
@@ -139,51 +138,15 @@ def parse_tool_calls_from_content(text: str) -> List[Dict[str, Any]]:
     return normalized
 
 
-def army_group_ids_from_observation(
-    full_observation: Optional[Dict[str, Any]],
-) -> List[str]:
-    """Extract current army_groups ids from the canonical full observation."""
-    if not isinstance(full_observation, dict):
-        return []
-    army = full_observation.get("army_control")
-    if not isinstance(army, dict):
-        return []
-    ids: List[str] = []
-    for group in army.get("groups") or []:
-        if not isinstance(group, dict):
-            continue
-        group_id = str(group.get("group_id") or "").strip()
-        if group_id:
-            ids.append(group_id)
-    return ids
-
-
 def validate_army_tools_for_cycle(
     policy: ArmyControlPolicy,
-    *,
-    required_group_ids: Sequence[str],
 ) -> List[str]:
-    """Blocking army issues: every observed group must receive move_group."""
-    required = [str(gid).strip() for gid in required_group_ids if str(gid).strip()]
-    if not required:
+    """Require one whole-army intent, including before combat units exist."""
+    if policy.army_intent is not None:
         return []
-    commanded = {
-        str(command.group_id).strip()
-        for command in (policy.commands or [])
-        if getattr(command, "group_id", None)
-    }
-    missing = [gid for gid in required if gid not in commanded]
-    if not missing:
-        return []
-    if len(missing) == len(required):
-        return [
-            "army_move_group:missing — army_groups is non-empty so emit exactly "
-            f"one move_group per group_id ({', '.join(required)}); typically "
-            "hold at a safe defensive zone while production continues"
-        ]
     return [
-        "army_move_group:incomplete — missing move_group for "
-        f"{', '.join(missing)} (required: {', '.join(required)})"
+        "army_intent:missing — emit exactly one army_intent every decision "
+        "cycle, including while the army is still being produced"
     ]
 
 
@@ -199,7 +162,8 @@ def apply_tool_calls(
     """
     issues: List[str] = []
     macro_by_key: Dict[str, int] = {}
-    group_commands: Dict[str, ArmyGroupCommand] = {}
+    army_intent: Optional[ArmyIntent] = None
+    army_intent_count = 0
     scan_zone_id: Optional[str] = None
     scout_zone_id: Optional[str] = None
     saw_scan = False
@@ -231,13 +195,12 @@ def apply_tool_calls(
             macro_by_key[name] = to_count
             continue
 
-        if name == "move_group":
+        if name == "army_intent":
+            army_intent_count += 1
             try:
-                cmd = _parse_move_group(args)
+                army_intent = _parse_army_intent(args)
             except ValueError as exc:
-                issues.append(f"move_group:{exc}")
-                continue
-            group_commands[cmd.group_id] = cmd
+                issues.append(f"army_intent:{exc}")
             continue
 
         if name == "scanner_sweep":
@@ -277,42 +240,27 @@ def apply_tool_calls(
         for key, count in macro_by_key.items()
     ]
 
+    if army_intent_count > 1:
+        issues.append("army_intent:duplicate")
+        army_intent = None
+
     policy = ArmyControlPolicy(
-        commands=list(group_commands.values()),
+        commands=[],
+        army_intent=army_intent,
         scan_zone_id=scan_zone_id if saw_scan else None,
         scout_zone_id=scout_zone_id if saw_scout else None,
     )
     return tasks, policy, issues, wake_event
 
 
-def _parse_move_group(args: Dict[str, Any]) -> ArmyGroupCommand:
-    group_id = str(args.get("group_id") or "").strip()
-    zone_id = str(args.get("destination_zone_id") or "").strip()
-    mode = str(args.get("movement_mode") or "").strip()
-    if not group_id.startswith("group_") or not group_id[6:].isdigit():
-        raise ValueError("bad_group_id")
-    if not zone_id.startswith("zone_") or not zone_id[5:].isdigit():
+def _parse_army_intent(args: Dict[str, Any]) -> ArmyIntent:
+    mode = str(args.get("mode") or args.get("intent") or "").strip().lower()
+    if mode not in {"hold", "attack", "regroup", "cleanup"}:
+        raise ValueError("bad_mode")
+    zone_id = _optional_zone(args.get("zone_id"))
+    if zone_id is None:
         raise ValueError("bad_zone_id")
-    if mode not in ALLOWED_MOVEMENT_MODES:
-        raise ValueError("bad_movement_mode")
-    return ArmyGroupCommand(
-        group_id=group_id,
-        destination_zone_id=zone_id,
-        movement_mode=mode,
-        move_type=MOVE_TYPE_BY_MOVEMENT_MODE[mode],
-        retreat_ratio=_parse_retreat_ratio(args.get("retreat_ratio")),
-    )
-
-
-def _parse_retreat_ratio(value: Any) -> Optional[float]:
-    """Soft-parse: a bad value falls back to the runtime default instead of
-    dropping the whole move_group command."""
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return round(clamp_retreat_ratio(float(value)), 2)
-    except (TypeError, ValueError):
-        return None
+    return ArmyIntent(mode=mode, zone_id=zone_id)
 
 
 def _optional_zone(value: Any) -> Optional[str]:

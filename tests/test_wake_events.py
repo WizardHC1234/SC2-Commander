@@ -6,10 +6,9 @@ import unittest
 
 from commander.tools import (
     apply_tool_calls,
-    army_group_ids_from_observation,
     validate_army_tools_for_cycle,
 )
-from commander.combat_policy import ArmyControlPolicy, ArmyGroupCommand
+from commander.combat_policy import ArmyControlPolicy, ArmyIntent
 from commander.wake_events import (
     build_wake_snapshot,
     evaluate_wake_event,
@@ -286,7 +285,7 @@ class ValidateWakeForCycleTests(unittest.TestCase):
         self.assertIn("[Decision Validation Failed", text)
         self.assertIn("Marine", text)
         self.assertIn("train_scv", text)
-        self.assertIn("move_group", text)
+        self.assertIn("army_intent", text)
 
 
 class EvaluateWakeEventTests(unittest.TestCase):
@@ -637,74 +636,89 @@ class ApplyToolCallsWakeTests(unittest.TestCase):
 
 
 class ArmyToolValidationTests(unittest.TestCase):
-    def test_missing_move_group_blocks(self):
+    def test_missing_army_intent_blocks(self):
         policy = ArmyControlPolicy(commands=[])
-        blocking = validate_army_tools_for_cycle(
-            policy, required_group_ids=["group_0"]
-        )
-        self.assertTrue(any("army_move_group:missing" in item for item in blocking))
+        blocking = validate_army_tools_for_cycle(policy)
+        self.assertTrue(any("army_intent:missing" in item for item in blocking))
 
-    def test_incomplete_move_group_blocks(self):
+    def test_army_intent_ok(self):
         policy = ArmyControlPolicy(
-            commands=[
-                ArmyGroupCommand(
-                    group_id="group_0",
-                    destination_zone_id="zone_1",
-                    movement_mode="regroup",
-                    move_type="ReGroup",
-                )
-            ]
+            army_intent=ArmyIntent(mode="hold", zone_id="zone_1")
         )
-        blocking = validate_army_tools_for_cycle(
-            policy, required_group_ids=["group_0", "group_1"]
-        )
-        self.assertTrue(any("army_move_group:incomplete" in item for item in blocking))
-        self.assertTrue(any("group_1" in item for item in blocking))
+        self.assertEqual(validate_army_tools_for_cycle(policy), [])
 
-    def test_complete_move_groups_ok(self):
-        policy = ArmyControlPolicy(
-            commands=[
-                ArmyGroupCommand(
-                    group_id="group_0",
-                    destination_zone_id="zone_1",
-                    movement_mode="regroup",
-                    move_type="ReGroup",
-                ),
-                ArmyGroupCommand(
-                    group_id="group_1",
-                    destination_zone_id="zone_2",
-                    movement_mode="push",
-                    move_type="Push",
-                ),
-            ]
+    def test_empty_groups_still_require_army_intent(self):
+        blocking = validate_army_tools_for_cycle(ArmyControlPolicy(commands=[]))
+        self.assertTrue(any("army_intent:missing" in item for item in blocking))
+
+    def test_apply_parses_army_intent(self):
+        _tasks, policy, issues, _wake = apply_tool_calls(
+            [
+                {
+                    "name": "army_intent",
+                    "arguments": {"mode": "attack", "zone_id": "zone_4"},
+                },
+                {
+                    "name": "set_wake_event",
+                    "arguments": {
+                        "logic": "any",
+                        "conditions": [
+                            {"type": "game_time_at_least", "seconds": 120}
+                        ],
+                    },
+                },
+            ],
+            legal_action_keys=set(),
         )
+        self.assertEqual(issues, [])
         self.assertEqual(
-            validate_army_tools_for_cycle(
-                policy, required_group_ids=["group_0", "group_1"]
-            ),
-            [],
+            policy.army_intent,
+            ArmyIntent(mode="attack", zone_id="zone_4"),
         )
 
-    def test_empty_groups_do_not_require_army(self):
+    def test_apply_parses_cleanup_intent(self):
+        _tasks, policy, issues, _wake = apply_tool_calls(
+            [
+                {
+                    "name": "army_intent",
+                    "arguments": {"mode": "cleanup", "zone_id": "zone_15"},
+                },
+                {
+                    "name": "set_wake_event",
+                    "arguments": {
+                        "logic": "any",
+                        "conditions": [
+                            {"type": "game_time_at_least", "seconds": 120}
+                        ],
+                    },
+                },
+            ],
+            legal_action_keys=set(),
+        )
+        self.assertEqual(issues, [])
         self.assertEqual(
-            validate_army_tools_for_cycle(
-                ArmyControlPolicy(commands=[]), required_group_ids=[]
-            ),
-            [],
+            policy.army_intent,
+            ArmyIntent(mode="cleanup", zone_id="zone_15"),
         )
 
-    def test_group_ids_from_observation(self):
-        ids = army_group_ids_from_observation(
-            {
-                "army_control": {
-                    "groups": [
-                        {"group_id": "group_0"},
-                        {"group_id": "group_1"},
-                    ]
-                }
-            }
+    def test_removed_move_group_is_rejected(self):
+        _tasks, _policy, issues, _wake = apply_tool_calls(
+            [{"name": "move_group", "arguments": {"group_id": "group_0"}}],
+            legal_action_keys=set(),
         )
-        self.assertEqual(ids, ["group_0", "group_1"])
+        self.assertIn("unknown_tool:move_group", issues)
+
+    def test_duplicate_army_intent_is_rejected(self):
+        _tasks, policy, issues, _wake = apply_tool_calls(
+            [
+                {"name": "army_intent", "arguments": {"mode": "hold", "zone_id": "zone_1"}},
+                {"name": "army_intent", "arguments": {"mode": "attack", "zone_id": "zone_4"}},
+            ],
+            legal_action_keys=set(),
+        )
+        self.assertIsNone(policy.army_intent)
+        self.assertIn("army_intent:duplicate", issues)
+        self.assertTrue(validate_army_tools_for_cycle(policy))
 
 
 class TriggerHintTests(unittest.TestCase):

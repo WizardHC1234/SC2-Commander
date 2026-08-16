@@ -20,9 +20,6 @@ DEFAULT_DATA_PATH = DEFAULT_DATABASE_PATH
 
 
 KNOWLEDGE_PACKET_SCHEMA = "strategy_knowledge.v2"
-MAX_ENTITIES = 6
-MAX_RELATIONS = 8
-MAX_DESCRIPTIONS_PER_ENTITY = 1
 GENERIC_COMMAND_ABILITIES = {
     "attackattack",
     "holdpositionhold",
@@ -197,8 +194,6 @@ def resolve_knowledge_entities(
                 "race": item.get("race"),
             }
         )
-        if len(resolved) >= MAX_ENTITIES:
-            break
     return resolved
 
 
@@ -227,8 +222,8 @@ def _relevant_descriptions(
         folded = row.casefold()
         normalized = normalize_key(row)
         score = sum(1 for token in tokens if token and (token in folded or token in normalized))
-        ranked.append((-score, index, row[:450]))
-    return [row for _, _, row in sorted(ranked)[:MAX_DESCRIPTIONS_PER_ENTITY]]
+        ranked.append((-score, index, row))
+    return [row for _, _, row in sorted(ranked)]
 
 
 def _entity_fact(
@@ -261,7 +256,7 @@ def _entity_fact(
             if entity.get(key) is not None
         }
         weapons = []
-        for weapon in (entity.get("weapons") or [])[:2]:
+        for weapon in entity.get("weapons") or []:
             weapons.append(
                 {
                     key: weapon.get(key)
@@ -291,7 +286,7 @@ def _entity_fact(
         fact["descriptions"] = descriptions
     chains = _clean_strings(entity.get("tech_chain"))
     if chains and "requirements" in needs:
-        fact["tech_chain"] = chains[:2]
+        fact["tech_chain"] = chains
     return fact
 
 
@@ -364,7 +359,7 @@ def _production_facts(
             continue
         for item in store.production_sources(
             entity["section"], entity["name"], race=race
-        )[:3]:
+        ):
             producer = item.get("producer") or {}
             requirements = item.get("requirements") or []
             required_addon = next(
@@ -413,10 +408,10 @@ def _ability_facts(
                     "unit": entity["name"],
                     "ability": ability.get("name"),
                     **structured,
-                    "description": [descriptions[0][:350]] if descriptions else [],
+                    "description": descriptions,
                 }
             )
-    return rows[:12]
+    return rows
 
 
 def _relation_facts(
@@ -458,15 +453,10 @@ def _relation_facts(
                     "subject": relation.get("subject_name"),
                     "relation": relation_name,
                     "object": relation.get("object_name"),
-                    "description": [
-                        description[:450]
-                        for description in _clean_strings(relation.get("description"))[:1]
-                    ],
+                    "description": _clean_strings(relation.get("description")),
                     "relation_id": relation_id,
                 }
             )
-            if len(rows) >= MAX_RELATIONS:
-                return rows
     return rows
 
 
@@ -476,7 +466,7 @@ def build_strategy_knowledge(
     race: str = "",
     data_path: str | Path = DEFAULT_DATA_PATH,
 ) -> dict[str, Any]:
-    """Build one bounded knowledge packet without an LLM planning loop."""
+    """Build one complete knowledge packet without an LLM planning loop."""
     question = str(item.get("question") or "").strip()
     needs = infer_knowledge_needs(question, item.get("needs"))
     entities = resolve_knowledge_entities(

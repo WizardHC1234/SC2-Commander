@@ -33,7 +33,7 @@ from ..sc2_data_agent import (
 )
 
 
-_ANALYSIS_ATTEMPTS = 3
+_ANALYSIS_ATTEMPTS = 2
 _KNOWLEDGE_NEEDS = {"effects", "synergy", "counters", "requirements"}
 
 
@@ -53,11 +53,22 @@ def _normalize_batch_analysis(
     """Normalize the intentionally small batch-analysis schema.
 
     Optional bookkeeping is repaired locally. At least one strategy-fixable
-    problem, several coherent deterministic plans, and five plan-linked
-    knowledge questions are required in knowledge-enabled runs. Semantic
-    question quality is guided by the prompt rather than rejected here.
+    problem and several coherent deterministic plans are required. Knowledge
+    questions are optional and capped; semantic quality is guided by the
+    prompt rather than rejected here.
     """
     payload = dict(raw)
+    valid_next_actions = {
+        "propose_strategy_patch",
+        "request_more_matches",
+        "inspect_runtime",
+        "stop",
+    }
+    next_action = str(payload.get("next_action") or "propose_strategy_patch").strip()
+    if next_action not in valid_next_actions:
+        next_action = "propose_strategy_patch"
+    payload["next_action"] = next_action
+    payload["action_reason"] = str(payload.get("action_reason") or "").strip()
     payload["strategy_contract"] = normalize_strategy_contract(
         payload.get("strategy_contract"), strategy_name=strategy_name
     )
@@ -85,14 +96,24 @@ def _normalize_batch_analysis(
     if not raw_problems and isinstance(payload.get("primary_problem"), dict):
         raw_problems = [payload["primary_problem"]]
     problems: list[dict[str, Any]] = []
+    valid_control_classes = {
+        "strategy_fixable",
+        "commander_execution",
+        "runtime_execution",
+        "observation_limited",
+    }
     for item in raw_problems:
         if not isinstance(item, dict):
             continue
         problem = str(item.get("problem") or item.get("cause") or "").strip()
+        control_class = str(item.get("control_class") or "").strip().lower()
         fixable = item.get("strategy_fixable")
         if not isinstance(fixable, bool):
             fixable = str(fixable).strip().lower() in {"1", "true", "yes"}
-        if not problem or not fixable:
+        if control_class not in valid_control_classes:
+            control_class = "strategy_fixable" if fixable else "runtime_execution"
+        fixable = control_class == "strategy_fixable"
+        if not problem:
             continue
         problems.append(
             {
@@ -100,19 +121,36 @@ def _normalize_batch_analysis(
                 "problem": problem,
                 "evidence": _clean_strings(item.get("evidence"), limit=4),
                 "consequence": str(item.get("consequence") or "").strip(),
-                "strategy_fixable": True,
+                "strategy_fixable": fixable,
+                "control_class": control_class,
                 "confidence": str(item.get("confidence") or "medium").strip().lower(),
             }
         )
         if len(problems) >= 5:
             break
-    if not problems:
-        return None, "analysis.problems must contain at least one strategy-fixable problem"
     payload["problems"] = problems
-    payload["primary_problem"] = problems[0]
-    valid_problem_ids = {item["problem_id"] for item in problems}
+    strategy_problems = [problem for problem in problems if problem["strategy_fixable"]]
+    if next_action == "propose_strategy_patch" and not strategy_problems:
+        next_action = (
+            "inspect_runtime"
+            if any(problem["control_class"] == "runtime_execution" for problem in problems)
+            else "request_more_matches"
+        )
+        payload["next_action"] = next_action
+        if not payload["action_reason"]:
+            payload["action_reason"] = (
+                "No strategy-fixable problem is supported by the current evidence."
+            )
+    payload["primary_problem"] = (
+        strategy_problems[0] if strategy_problems else problems[0] if problems else {}
+    )
+    valid_problem_ids = {
+        item["problem_id"] for item in problems if item["strategy_fixable"]
+    }
 
-    raw_plans = payload.get("candidate_plans") or payload.get("candidate_directions") or []
+    raw_plans = (
+        payload.get("candidate_plans") or payload.get("candidate_directions") or []
+    ) if valid_problem_ids and next_action == "propose_strategy_patch" else []
     plans: list[dict[str, Any]] = []
     for item in raw_plans:
         if not isinstance(item, dict):
@@ -126,7 +164,13 @@ def _normalize_batch_analysis(
             if problem_id.upper() in valid_problem_ids
         ]
         if not addressed:
-            addressed = [problems[0]["problem_id"]]
+            addressed = [
+                next(
+                    problem["problem_id"]
+                    for problem in problems
+                    if problem["strategy_fixable"]
+                )
+            ]
         changes: list[dict[str, str]] = []
         raw_changes = item.get("changes") or []
         if not raw_changes and (item.get("baseline_rule") or item.get("candidate_rule")):
@@ -139,6 +183,9 @@ def _normalize_batch_analysis(
             if baseline_rule and candidate_rule:
                 changes.append(
                     {
+                        "target_paragraph_id": str(
+                            change.get("target_paragraph_id") or ""
+                        ).strip(),
                         "baseline_rule": baseline_rule,
                         "candidate_rule": candidate_rule,
                         "why_required": str(
@@ -154,18 +201,31 @@ def _normalize_batch_analysis(
             {
                 "id": f"D{len(plans) + 1}",
                 "name": name,
+                "hypothesis": str(item.get("hypothesis") or name).strip(),
+                "primary_lever": str(item.get("primary_lever") or "other").strip().lower(),
                 "addresses_problem_ids": list(dict.fromkeys(addressed)),
                 "changes": changes,
+                "predictions": _clean_strings(item.get("predictions"), limit=5),
+                "disproof_conditions": _clean_strings(
+                    item.get("disproof_conditions"), limit=5
+                ),
+                "capability_mapping": (
+                    dict(item.get("capability_mapping"))
+                    if isinstance(item.get("capability_mapping"), dict)
+                    else {}
+                ),
                 "expected_benefit": str(item.get("expected_benefit") or "").strip(),
                 "risk_to_winning_mechanism": str(
                     item.get("risk_to_winning_mechanism") or ""
                 ).strip(),
             }
         )
-        if len(plans) >= 5:
+        if len(plans) >= 1:
             break
-    if len(plans) < 2:
-        return None, "analysis.candidate_plans must contain at least two complete coherent plans"
+    if next_action == "propose_strategy_patch" and not plans:
+        return None, "analysis.candidate_plans must contain one complete coherent plan"
+    if next_action != "propose_strategy_patch":
+        plans = []
     payload["candidate_plans"] = plans
     payload.pop("candidate_directions", None)
     valid_plan_ids = {item["id"] for item in plans}
@@ -232,7 +292,8 @@ def _normalize_batch_analysis(
             "cause": problem["problem"],
             "consequence": problem["consequence"],
             "seen_in": problem["evidence"],
-            "strategy_fixable": True,
+            "strategy_fixable": problem["strategy_fixable"],
+            "control_class": problem["control_class"],
             "confidence": problem["confidence"],
         }
         for problem in problems
@@ -448,6 +509,7 @@ def run_analysis_agent_loop(
     prefix: str = "  ",
     checkpoint: EvolCheckpoint | None = None,
     prior_experiences: list[Any] | None = None,
+    capability_manifest: dict[str, Any] | None = None,
 ) -> AnalysisPipelineResult:
     model = str(model or "").strip() or DEFAULT_ANALYSIS_MODEL
     if not records:
@@ -542,6 +604,7 @@ def run_analysis_agent_loop(
                     validation_errors=schema_errors,
                     knowledge_mode=knowledge_mode,
                     prior_experiences=prior_experiences or [],
+                    capability_manifest=capability_manifest or {},
                 ),
                 model=model,
                 is_reasoning=ANALYSIS_ENABLE_REASONING,

@@ -945,13 +945,13 @@ ACTION_SPECS: Dict[str, ActionSpec] = {
     ),
 
     # Army control
-    "move_group": control_action(
-        "Command one army_group to a destination zone with a movement mode. Call "
-        "exactly once per group_id present in this cycle's army_groups (no duplicates, "
-        "no omitted groups). When army_groups is empty, do not call move_group. Copy "
-        "group_id and destination_zone_id from the observation; do not invent ids. "
-        "movement_mode must be one of: regroup, push, assault, hold, contain, harass, "
-        "defensive_retreat, panic_retreat, search_and_destroy.",
+    "army_intent": control_action(
+        "Required every decision cycle, including before combat units exist: set the "
+        "persistent stance for the whole army. Use exactly one of "
+        "mode=hold|attack|regroup|cleanup and copy zone_id from the observation. "
+        "Use cleanup only when the Runtime Cleanup Hint appears. The runtime "
+        "moves the main force, sends reinforcements to the live main-force position, "
+        "and handles local defense, retreat, and re-gathering.",
         "army",
     ),
     "scanner_sweep": control_action(

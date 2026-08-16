@@ -444,7 +444,7 @@ class CommanderBot(KnowledgeBot):
             army_groups=army_state.get("army_groups") or [],
             available_zones=army_state.get("available_zones") or [],
             scan_ready=int(army_state.get("scan_ready") or 0) > 0,
-            cleanup_hint_present="[Runtime Search-And-Destroy Hint]"
+            cleanup_hint_present="[Runtime Cleanup Hint]"
             in cleanup_hint,
             baseline_objective_status=self._wake_baseline_objective_status,
         )
@@ -629,6 +629,7 @@ class CommanderBot(KnowledgeBot):
                 for c in list(army_summary.get("commands") or [])
                 if isinstance(c, dict)
             ],
+            "army_intent": army_summary.get("intent"),
             "scan_zone_id": army_summary.get("scan_zone_id"),
             "scout_zone_id": army_summary.get("scout_zone_id"),
             "wake_event": wake_event,
@@ -664,6 +665,12 @@ class CommanderBot(KnowledgeBot):
         else:
             self._emit("  macro=(none)")
         army = self._last_army_summary
+        if army.get("intent"):
+            self._emit(
+                "  army_intent=%s->%s",
+                army["intent"].get("mode"),
+                army["intent"].get("zone_id"),
+            )
         if army.get("commands"):
             self._emit(
                 "  army=%s",

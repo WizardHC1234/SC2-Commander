@@ -111,7 +111,7 @@ def test_rejected_candidate_is_saved_as_experience(tmp_path: Path) -> None:
 
     assert state["status"] == "budget_exhausted"
     assert state["champion"] == "tank"
-    assert state["games_used"] == 40
+    assert state["games_used"] == 20
     assert len(state["failed_experiences"]) == 1
     experience = state["failed_experiences"][0]
     assert experience["primary_change"] == "lower the attack threshold"
@@ -120,13 +120,17 @@ def test_rejected_candidate_is_saved_as_experience(tmp_path: Path) -> None:
     assert experience["selected_changes"][0]["change"] == "attack with 40 instead of 45 Marines"
     assert experience["parent_score"] == 0.5
     assert experience["candidate_score"] == 0.4
-    assert experience["games_per_strategy"] == 20
+    assert experience["champion_games"] == 10
+    assert experience["candidate_games"] == 10
+    assert round(
+        experience["experiment_evidence"]["candidate_minus_parent"]["score_delta"], 4
+    ) == -0.1
 
 
-def test_close_result_runs_confirmation_for_both_and_uses_cumulative_score(
+def test_candidate_evaluation_never_replays_the_champion(
     tmp_path: Path,
 ) -> None:
-    results = {"tank": [5, 8], "tank_opt1": [6, 4]}
+    results = {"tank": [5], "tank_opt1": [6]}
     calls = {"tank": 0, "tank_opt1": 0}
 
     def play(strategy: str, difficulty: str) -> BatchResult:
@@ -153,18 +157,19 @@ def test_close_result_runs_confirmation_for_both_and_uses_cumulative_score(
     )
     state = runner.run()
 
-    assert calls == {"tank": 2, "tank_opt1": 2}
-    assert state["games_used"] == 40
+    assert calls == {"tank": 1, "tank_opt1": 1}
+    assert state["games_used"] == 20
     assert state["champion"] == "tank"
     decision = __import__("json").loads(
         (tmp_path / "run" / "generation_000" / "decision.json").read_text(
             encoding="utf-8"
         )
     )
-    assert decision["comparison_games_per_strategy"] == 20
-    assert decision["parent_score"] == 0.65
-    assert decision["candidate_score"] == 0.5
-    assert decision["confirmation"] is not None
+    assert decision["champion_evidence_games"] == 10
+    assert decision["candidate_evidence_games"] == 10
+    assert decision["parent_score"] == 0.5
+    assert decision["candidate_score"] == 0.6
+    assert decision["confirmation"] is None
 
 
 def test_close_batch_results_uses_one_outcome_point_threshold(tmp_path: Path) -> None:
@@ -189,3 +194,77 @@ def test_completed_record_count_ignores_autosaves(tmp_path: Path) -> None:
     )
 
     assert completed_record_count(batch, strategy="tank") == 1
+
+
+def test_candidate_generation_failure_retries_without_crashing(tmp_path: Path) -> None:
+    attempts = 0
+
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 5 if strategy == "tank" else 8, tmp_path)
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return EvolRunResult(ok=False, message="candidate contract rejected")
+        candidate = tmp_path / "skills" / "terran" / "tank_opt1"
+        candidate.mkdir(parents=True, exist_ok=True)
+        return EvolRunResult(ok=True, message="OK", output_dir=candidate)
+
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_generations=2,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    )
+
+    state = runner.run()
+
+    assert state["status"] == "completed"
+    assert attempts == 2
+    assert state["candidate_generation_failures"][0]["message"] == (
+        "candidate contract rejected"
+    )
+
+
+def test_runtime_action_pauses_without_candidate_retries(tmp_path: Path) -> None:
+    attempts = 0
+
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 5, tmp_path)
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        nonlocal attempts
+        attempts += 1
+        return EvolRunResult(
+            ok=True,
+            message="runtime commands are unstable",
+            decision_action="inspect_runtime",
+            action_reason="repeated rejected group commands",
+        )
+
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_generations=2,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    )
+
+    state = runner.run()
+
+    assert attempts == 1
+    assert state["status"] == "runtime_attention_required"
+    assert state["last_agent_decision"]["action"] == "inspect_runtime"
+    assert state.get("candidate_generation_failures") == []
