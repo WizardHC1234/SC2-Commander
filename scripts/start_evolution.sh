@@ -33,9 +33,7 @@ COMMANDER_MODEL="kimi-k2.5"
 EVOLUTION_MODEL="kimi-k2.5"     # 空 = 与 commander 相同
 DIFFICULTIES="harder,veryhard,cheatvision,cheatmoney,cheatinsane"
 MATCHES=10
-CANDIDATE_INITIAL_MATCHES=6
-CANDIDATE_MAX_MATCHES=10
-CANDIDATE_STEP_MATCHES=2
+CANDIDATE_MATCHES=10
 CONCURRENCY=5
 MAX_GENERATIONS=10
 RUN_DIR=""                      # 续跑时填 evolution_runs/... 路径
@@ -54,10 +52,8 @@ Options:
   --commander-model KEY
   --evolution-model KEY   默认与 commander-model 相同（由 evolution 模块处理）
   --difficulties LIST     逗号分隔
-  --matches N             新难度冠军基线局数
-  --candidate-initial-matches N  候选首轮局数
-  --candidate-max-matches N      候选最多局数
-  --candidate-step-matches N     结果不确定时追加局数
+  --matches N             Champion / Candidate evaluation batch size
+  --candidate-matches N   Candidate evaluation games (default 10)
   --concurrency N         并发
   --max-generations N     最大代数
   --run-dir PATH          已有 run 目录，用于 resume
@@ -73,9 +69,7 @@ while [[ $# -gt 0 ]]; do
     --evolution-model) EVOLUTION_MODEL="$2"; shift 2 ;;
     --difficulties) DIFFICULTIES="$2"; shift 2 ;;
     --matches) MATCHES="$2"; shift 2 ;;
-    --candidate-initial-matches) CANDIDATE_INITIAL_MATCHES="$2"; shift 2 ;;
-    --candidate-max-matches) CANDIDATE_MAX_MATCHES="$2"; shift 2 ;;
-    --candidate-step-matches) CANDIDATE_STEP_MATCHES="$2"; shift 2 ;;
+    --candidate-matches) CANDIDATE_MATCHES="$2"; shift 2 ;;
     --concurrency) CONCURRENCY="$2"; shift 2 ;;
     --max-generations) MAX_GENERATIONS="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
@@ -138,7 +132,7 @@ echo "Commander    : ${COMMANDER_MODEL}"
 [[ -n "${EVOLUTION_MODEL}" ]] && echo "Evolution    : ${EVOLUTION_MODEL}"
 echo "Difficulties : ${DIFFICULTIES}"
 echo "Matches/gen  : ${MATCHES}, concurrency=${CONCURRENCY}, max_gen=${MAX_GENERATIONS}"
-echo "Candidate    : ${CANDIDATE_INITIAL_MATCHES} initial, +${CANDIDATE_STEP_MATCHES}, max ${CANDIDATE_MAX_MATCHES}"
+echo "Candidate    : ${CANDIDATE_MATCHES} evaluation games"
 
 ARGS=(
   -m evolution
@@ -146,9 +140,7 @@ ARGS=(
   --commander-model "${COMMANDER_MODEL}"
   --difficulties "${DIFFICULTIES}"
   --matches "${MATCHES}"
-  --candidate-initial-matches "${CANDIDATE_INITIAL_MATCHES}"
-  --candidate-max-matches "${CANDIDATE_MAX_MATCHES}"
-  --candidate-step-matches "${CANDIDATE_STEP_MATCHES}"
+  --candidate-matches "${CANDIDATE_MATCHES}"
   --concurrency "${CONCURRENCY}"
   --max-generations "${MAX_GENERATIONS}"
 )

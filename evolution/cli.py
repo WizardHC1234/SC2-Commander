@@ -17,9 +17,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--map", dest="map_name", default="KairosJunctionLE")
     parser.add_argument("--difficulties", default=",".join(DEFAULT_DIFFICULTIES))
     parser.add_argument("--matches", type=int, default=10)
-    parser.add_argument("--candidate-initial-matches", type=int, default=6)
-    parser.add_argument("--candidate-max-matches", type=int, default=10)
-    parser.add_argument("--candidate-step-matches", type=int, default=2)
+    parser.add_argument("--candidate-matches", type=int, default=10)
     parser.add_argument("--candidate-accept-probability", type=float, default=0.80)
     parser.add_argument("--candidate-reject-probability", type=float, default=0.20)
     parser.add_argument("--concurrency", type=int, default=5)
@@ -49,9 +47,7 @@ def main() -> None:
         map_name=args.map_name,
         difficulties=difficulties,
         matches_per_batch=args.matches,
-        candidate_initial_matches=args.candidate_initial_matches,
-        candidate_max_matches=args.candidate_max_matches,
-        candidate_step_matches=args.candidate_step_matches,
+        candidate_matches=args.candidate_matches,
         candidate_accept_probability=args.candidate_accept_probability,
         candidate_reject_probability=args.candidate_reject_probability,
         concurrency=args.concurrency,

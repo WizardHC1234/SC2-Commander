@@ -24,6 +24,21 @@ def aggregate_outcomes(items: Iterable[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def decide_candidate_outcome(
+    *,
+    probability: float,
+    candidate_score: float,
+    champion_score: float,
+    accept_probability: float,
+    reject_probability: float,
+) -> str:
+    if probability >= accept_probability and candidate_score > champion_score:
+        return "accepted"
+    if probability <= reject_probability:
+        return "rejected"
+    return "inconclusive"
+
+
 def posterior_probability_better(
     candidate: dict[str, Any],
     champion: dict[str, Any],
@@ -68,4 +83,9 @@ def posterior_probability_better(
     return min(1.0, max(0.0, probability))
 
 
-__all__ = ["aggregate_outcomes", "outcome_score", "posterior_probability_better"]
+__all__ = [
+    "aggregate_outcomes",
+    "decide_candidate_outcome",
+    "outcome_score",
+    "posterior_probability_better",
+]

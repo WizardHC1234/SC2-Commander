@@ -108,18 +108,21 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
     for item in prior_experiences or []:
         if isinstance(item, dict):
             keep = (
+                "experiment_id",
                 "generation",
                 "difficulty",
-                "primary_change",
-                "primary_lever",
+                "parent",
+                "candidate",
                 "hypothesis",
-                "predictions",
-                "disproof_conditions",
-                "selected_changes",
+                "plan_direction",
+                "patches",
+                "decision",
                 "parent_score",
                 "candidate_score",
                 "delta",
                 "posterior_probability_better",
+                "primary_change",
+                "primary_lever",
                 "lesson",
             )
             compact_item = {key: item.get(key) for key in keep if key in item}
@@ -172,8 +175,15 @@ Current strategy.md:
 Independent factual match summaries:
 {render_single_game_analyses(single_game_analyses)}
 
-Recent rejected-candidate experience:
-{_format_prior_experiences(prior_experiences)}"""
+Recent experiment history:
+{_format_prior_experiences(prior_experiences)}
+
+Experiment-history rules:
+- Accepted: positive empirical evidence in the tested context.
+- Rejected: evidence against materially equivalent hypotheses unless new evidence
+  provides a substantive reason to revisit.
+- Inconclusive: not proof for or against.
+- Same paragraph target is not the same experiment."""
 
 
 def build_cross_match_discovery_prompt(

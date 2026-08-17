@@ -18,7 +18,11 @@ from .feedback import (
     compare_batch_evidence,
     summarize_batch_evidence,
 )
-from .outcomes import aggregate_outcomes, posterior_probability_better
+from .outcomes import (
+    aggregate_outcomes,
+    decide_candidate_outcome,
+    posterior_probability_better,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -59,9 +63,7 @@ class EvolutionConfig:
     map_name: str = "KairosJunctionLE"
     difficulties: tuple[str, ...] = DEFAULT_DIFFICULTIES
     matches_per_batch: int = 10
-    candidate_initial_matches: int = 6
-    candidate_max_matches: int = 10
-    candidate_step_matches: int = 2
+    candidate_matches: int = 10
     candidate_accept_probability: float = 0.80
     candidate_reject_probability: float = 0.20
     concurrency: int = 5
@@ -82,13 +84,8 @@ class EvolutionConfig:
             raise ValueError("at least one difficulty is required")
         if self.matches_per_batch <= 0 or self.concurrency <= 0:
             raise ValueError("matches_per_batch and concurrency must be positive")
-        if not 0 < self.candidate_initial_matches <= self.candidate_max_matches:
-            raise ValueError(
-                "candidate_initial_matches must be positive and no greater than "
-                "candidate_max_matches"
-            )
-        if self.candidate_step_matches <= 0:
-            raise ValueError("candidate_step_matches must be positive")
+        if self.candidate_matches <= 0:
+            raise ValueError("candidate_matches must be positive")
         if not 0.5 < self.candidate_accept_probability <= 1.0:
             raise ValueError("candidate_accept_probability must be in (0.5, 1.0]")
         if not 0.0 <= self.candidate_reject_probability < 0.5:
@@ -273,7 +270,7 @@ class EvolutionRunner:
         *,
         run_dir: Path | None = None,
         project_root: Path = PROJECT_ROOT,
-        batch_executor: Callable[[str, str], BatchResult] | None = None,
+        batch_executor: Callable[..., BatchResult] | None = None,
         candidate_generator: Callable[[str, BatchResult, list[Any]], EvolRunResult] | None = None,
     ) -> None:
         config.validate()
@@ -289,7 +286,7 @@ class EvolutionRunner:
 
     def _new_state(self) -> dict[str, Any]:
         return {
-            "schema": "sc2_evolution.v2",
+            "schema": "sc2_evolution.v3",
             "status": "running",
             "config": {**asdict(self.config), "difficulties": list(self.config.difficulties)},
             "style": self.config.strategy,
@@ -299,7 +296,7 @@ class EvolutionRunner:
             "games_used": 0,
             "champion_batch": None,
             "pending_candidate": None,
-            "failed_experiences": [],
+            "experiment_history": [],
             "candidate_generation_failures": [],
             "evidence_pool": {},
             "updated_at": datetime.now().isoformat(),
@@ -310,12 +307,18 @@ class EvolutionRunner:
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
             saved = state.get("config") or {}
             current = {**asdict(self.config), "difficulties": list(self.config.difficulties)}
-            # Outcome-pool settings were added after v2 runs already existed.
-            # Missing new keys inherit the explicit resume configuration.
-            for key in (
+            legacy_candidate_matches = saved.get("candidate_max_matches")
+            for obsolete in (
                 "candidate_initial_matches",
                 "candidate_max_matches",
                 "candidate_step_matches",
+            ):
+                saved.pop(obsolete, None)
+            if "candidate_matches" not in saved:
+                saved["candidate_matches"] = int(
+                    legacy_candidate_matches or current["candidate_matches"]
+                )
+            for key in (
                 "candidate_accept_probability",
                 "candidate_reject_probability",
                 "baseline_batch_dir",
@@ -324,7 +327,8 @@ class EvolutionRunner:
             if saved != current:
                 raise ValueError("resume configuration does not match state.json")
             state["config"] = saved
-            changed = self._backfill_experiment_evidence(state)
+            changed = self._migrate_experiment_history(state)
+            changed = self._backfill_experiment_evidence(state) or changed
             changed = self._migrate_evidence_pool(state) or changed
             if changed:
                 self._save_state(state)
@@ -505,10 +509,111 @@ class EvolutionRunner:
         self._sync_games_used(state)
         return changed or int(state.get("games_used") or 0) != previous_games
 
+    def _migrate_experiment_history(self, state: dict[str, Any]) -> bool:
+        changed = False
+        if state.get("schema") != "sc2_evolution.v3":
+            state["schema"] = "sc2_evolution.v3"
+            changed = True
+        history = state.get("experiment_history")
+        if not isinstance(history, list):
+            history = []
+            changed = True
+        legacy = state.get("failed_experiences")
+        if isinstance(legacy, list) and legacy:
+            existing = {
+                (
+                    int(item.get("generation") or -1),
+                    str(item.get("candidate") or ""),
+                )
+                for item in history
+                if isinstance(item, dict)
+            }
+            for item in legacy:
+                if not isinstance(item, dict):
+                    continue
+                key = (
+                    int(item.get("generation") or -1),
+                    str(item.get("candidate") or ""),
+                )
+                if key in existing:
+                    continue
+                migrated = dict(item)
+                migrated.setdefault("decision", "rejected")
+                migrated["legacy"] = True
+                history.append(migrated)
+                existing.add(key)
+                changed = True
+        if "failed_experiences" in state:
+            del state["failed_experiences"]
+            changed = True
+        state["experiment_history"] = history
+        state.setdefault("candidate_generation_failures", [])
+        return changed
+
+    def _append_experiment_history(
+        self,
+        state: dict[str, Any],
+        record: dict[str, Any],
+    ) -> bool:
+        history = state.setdefault("experiment_history", [])
+        generation = int(record.get("generation") or -1)
+        candidate = str(record.get("candidate") or "")
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            if (
+                int(item.get("generation") or -1) == generation
+                and str(item.get("candidate") or "") == candidate
+            ):
+                return False
+        history.append(record)
+        return True
+
+    def _experiment_spec_from_rationale(self, rationale: dict[str, Any]) -> dict[str, Any]:
+        existing = rationale.get("experiment_spec")
+        spec = dict(existing) if isinstance(existing, dict) else {}
+        priority = rationale.get("priority_problem")
+        if "priority_problem" not in spec:
+            if isinstance(priority, dict):
+                spec["priority_problem"] = dict(priority)
+            elif str(priority or "").strip():
+                spec["priority_problem"] = {"problem": str(priority).strip()}
+            else:
+                spec["priority_problem"] = {}
+        spec.setdefault("hypothesis", str(rationale.get("hypothesis") or ""))
+        spec.setdefault(
+            "plan_direction",
+            str(
+                rationale.get("plan_direction")
+                or rationale.get("overall_assessment")
+                or rationale.get("primary_change")
+                or ""
+            ),
+        )
+        if "strengths_to_preserve" not in spec:
+            strengths = rationale.get("strengths_to_preserve")
+            spec["strengths_to_preserve"] = (
+                list(strengths) if isinstance(strengths, list) else []
+            )
+        if "patches" not in spec:
+            patches = rationale.get("patches")
+            if not isinstance(patches, list) or not patches:
+                patches = rationale.get("selected_changes")
+            spec["patches"] = _dict_list(patches)
+        spec.setdefault("expected_effect", str(rationale.get("expected_effect") or ""))
+        spec.setdefault("main_risk", str(rationale.get("main_risk") or ""))
+        return spec
+
+    def _evaluation_baseline(self, state: dict[str, Any]) -> BatchResult:
+        champion_batch = state.get("champion_batch")
+        if not isinstance(champion_batch, dict):
+            raise RuntimeError("champion evaluation baseline is missing")
+        return BatchResult.from_dict(champion_batch)
+
     def _backfill_experiment_evidence(self, state: dict[str, Any]) -> bool:
         """Enrich pre-v3 rejection memory from immutable decision/batch artifacts."""
         changed = False
-        experiences = state.get("failed_experiences")
+        experiences = state.get("experiment_history")
         if not isinstance(experiences, list):
             return False
         for experience in experiences:
@@ -580,7 +685,11 @@ class EvolutionRunner:
         target_games: int | None = None,
     ) -> BatchResult:
         if self._batch_executor is not None:
-            return self._batch_executor(strategy, difficulty)
+            expected_games = int(target_games or self.config.matches_per_batch)
+            try:
+                return self._batch_executor(strategy, difficulty, expected_games)
+            except TypeError:
+                return self._batch_executor(strategy, difficulty)
         expected_games = int(target_games or self.config.matches_per_batch)
         if expected_games <= 0:
             raise ValueError("target_games must be positive")
@@ -653,12 +762,12 @@ class EvolutionRunner:
         self,
         champion: str,
         champion_batch: BatchResult,
-        failed_experiences: list[Any],
+        prior_experiences: list[Any],
         *,
         evidence_batches: list[BatchResult] | None = None,
     ) -> EvolRunResult:
         if self._candidate_generator is not None:
-            return self._candidate_generator(champion, champion_batch, failed_experiences)
+            return self._candidate_generator(champion, champion_batch, prior_experiences)
         record_paths: list[Path] = []
         for batch in evidence_batches or [champion_batch]:
             record_paths.extend(find_record_jsons(batch.path))
@@ -669,7 +778,7 @@ class EvolutionRunner:
                 race=self.config.race,
                 model=self.config.evolution_model,
                 knowledge_mode=self.config.knowledge_mode,
-                prior_experiences=failed_experiences,
+                prior_experiences=prior_experiences,
             )
         )
 
@@ -760,12 +869,7 @@ class EvolutionRunner:
             if not champion_evidence_batches:
                 self._register_evidence(state, champion_batch)
                 champion_evidence_batches = [champion_batch]
-            comparison_champion = self._aggregate_evidence(
-                state,
-                difficulty=difficulty,
-                strategy=champion,
-            )
-            if comparison_champion.score >= self.config.pass_score:
+            if champion_batch.score >= self.config.pass_score:
                 self._advance_difficulty(state)
                 self._save_state(state)
                 continue
@@ -776,10 +880,7 @@ class EvolutionRunner:
                     candidate_result = self.generate_candidate(
                         champion,
                         champion_batch,
-                        [
-                            *list(state.get("failed_experiences") or []),
-                            *list(state.get("candidate_generation_failures") or []),
-                        ],
+                        list(state.get("experiment_history") or []),
                         evidence_batches=champion_evidence_batches,
                     )
                     if candidate_result.ok and (
@@ -833,7 +934,7 @@ class EvolutionRunner:
                             if comparison_champion.games < max_champion_evidence:
                                 next_more_target = min(
                                     self.config.matches_per_batch,
-                                    completed_more + self.config.candidate_step_matches,
+                                    completed_more + self.config.matches_per_batch,
                                 )
                                 more_batch = self.run_batch(
                                     champion,
@@ -891,10 +992,13 @@ class EvolutionRunner:
                     if candidate_result.improvement is not None
                     else {}
                 )
+                experiment_spec = self._experiment_spec_from_rationale(rationale)
                 pending = {
                     "strategy": candidate_result.output_dir.name,
                     "strategy_dir": str(candidate_result.output_dir),
                     "candidate_hash": candidate_result.candidate_hash,
+                    "experiment_spec": experiment_spec,
+                    "candidate_batch": None,
                     "primary_change": str(rationale.get("primary_change") or ""),
                     "selected_plan_ids": _string_list(
                         rationale.get("selected_plan_ids")
@@ -920,92 +1024,64 @@ class EvolutionRunner:
                 state["pending_candidate"] = pending
                 self._save_state(state)
             candidate = str(pending["strategy"])
-            candidate_batches = self._evidence_batches(
-                state,
-                difficulty=difficulty,
-                strategy=candidate,
-            )
-            candidate_games = sum(batch.games for batch in candidate_batches)
-            if candidate_games < self.config.candidate_initial_matches:
+            evaluation_games = self.config.candidate_matches
+            pending_batch = pending.get("candidate_batch")
+            candidate_games = 0
+            if isinstance(pending_batch, dict):
+                candidate_games = BatchResult.from_dict(pending_batch).games
+            if candidate_games < evaluation_games:
+                candidate_games = sum(
+                    batch.games
+                    for batch in self._evidence_batches(
+                        state,
+                        difficulty=difficulty,
+                        strategy=candidate,
+                    )
+                )
+            if candidate_games < evaluation_games:
                 candidate_batch = self.run_batch(
                     candidate,
                     difficulty,
                     generation=int(state["generation"]),
                     role="cand",
-                    target_games=self.config.candidate_initial_matches,
+                    target_games=evaluation_games,
                 )
                 self._register_evidence(state, candidate_batch)
                 self._sync_games_used(state)
                 pending["candidate_batch"] = candidate_batch.to_dict()
+                state["pending_candidate"] = pending
                 self._save_state(state)
-
-            evaluation_rounds: list[dict[str, Any]] = []
-            while True:
-                comparison_champion = self._aggregate_evidence(
-                    state,
-                    difficulty=difficulty,
-                    strategy=champion,
-                )
-                comparison_candidate = self._aggregate_evidence(
+            comparison_champion = self._evaluation_baseline(state)
+            if isinstance(pending.get("candidate_batch"), dict):
+                comparison_candidate = BatchResult.from_dict(pending["candidate_batch"])
+            else:
+                comparison_candidate = self._evidence_batches(
                     state,
                     difficulty=difficulty,
                     strategy=candidate,
+                )[-1]
+            if comparison_candidate.games < evaluation_games:
+                raise RuntimeError(
+                    f"candidate {candidate} has {comparison_candidate.games}/"
+                    f"{evaluation_games} evaluation games; it cannot be decided"
                 )
-                probability = posterior_probability_better(
-                    comparison_candidate.to_dict(),
-                    comparison_champion.to_dict(),
-                )
-                evaluation_rounds.append(
-                    {
-                        "candidate_games": comparison_candidate.games,
-                        "candidate_score": comparison_candidate.score,
-                        "champion_games": comparison_champion.games,
-                        "champion_score": comparison_champion.score,
-                        "posterior_probability_better": probability,
-                    }
-                )
-                enough_to_accept = (
-                    probability >= self.config.candidate_accept_probability
-                    and comparison_candidate.score > comparison_champion.score
-                )
-                enough_to_reject = (
-                    probability <= self.config.candidate_reject_probability
-                )
-                at_limit = (
-                    comparison_candidate.games >= self.config.candidate_max_matches
-                )
-                if enough_to_accept or enough_to_reject or at_limit:
-                    break
-                next_target = min(
-                    self.config.candidate_max_matches,
-                    comparison_candidate.games + self.config.candidate_step_matches,
-                )
-                previous_games = comparison_candidate.games
-                candidate_batch = self.run_batch(
-                    candidate,
-                    difficulty,
-                    generation=int(state["generation"]),
-                    role="cand",
-                    target_games=next_target,
-                )
-                self._register_evidence(state, candidate_batch)
-                self._sync_games_used(state)
-                pending["candidate_batch"] = candidate_batch.to_dict()
-                self._save_state(state)
-                if candidate_batch.games <= previous_games:
-                    # Test executors may return a fixed synthetic batch. Avoid
-                    # an infinite loop while preserving a deterministic reject.
-                    break
-
-            accepted = (
-                probability >= self.config.candidate_accept_probability
-                and comparison_candidate.score > comparison_champion.score
+            probability = posterior_probability_better(
+                comparison_candidate.to_dict(),
+                comparison_champion.to_dict(),
             )
-            candidate_batch = self._evidence_batches(
-                state,
-                difficulty=difficulty,
-                strategy=candidate,
-            )[-1]
+            outcome = decide_candidate_outcome(
+                probability=probability,
+                candidate_score=comparison_candidate.score,
+                champion_score=comparison_champion.score,
+                accept_probability=self.config.candidate_accept_probability,
+                reject_probability=self.config.candidate_reject_probability,
+            )
+            accepted = outcome == "accepted"
+            experiment_spec = (
+                dict(pending["experiment_spec"])
+                if isinstance(pending.get("experiment_spec"), dict)
+                else self._experiment_spec_from_rationale(pending)
+            )
             self._append_history(
                 state=state,
                 batch=comparison_candidate,
@@ -1020,18 +1096,28 @@ class EvolutionRunner:
                 "parent_score": comparison_champion.score,
                 "candidate_score": comparison_candidate.score,
                 "delta": comparison_candidate.score - comparison_champion.score,
+                "decision": outcome,
                 "accepted": accepted,
                 "posterior_probability_better": probability,
                 "accept_probability": self.config.candidate_accept_probability,
                 "reject_probability": self.config.candidate_reject_probability,
                 "champion_evidence_games": comparison_champion.games,
                 "candidate_evidence_games": comparison_candidate.games,
-                "evaluation_rounds": evaluation_rounds,
+                "evaluation_rounds": [
+                    {
+                        "candidate_games": comparison_candidate.games,
+                        "candidate_score": comparison_candidate.score,
+                        "champion_games": comparison_champion.games,
+                        "champion_score": comparison_champion.score,
+                        "posterior_probability_better": probability,
+                    }
+                ],
                 "candidate_hash": str(pending.get("candidate_hash") or ""),
                 "parent_batch": str(champion_batch.path),
-                "candidate_batch": str(candidate_batch.path),
-                "comparison_games_per_strategy": None,
+                "candidate_batch": str(comparison_candidate.path),
+                "comparison_games_per_strategy": evaluation_games,
                 "confirmation": None,
+                "experiment_spec": experiment_spec,
                 "candidate_strategy_dir": str(pending.get("strategy_dir") or ""),
                 "primary_change": str(pending.get("primary_change") or ""),
                 "selected_plan_ids": _string_list(pending.get("selected_plan_ids")),
@@ -1039,9 +1125,19 @@ class EvolutionRunner:
                     pending.get("overall_assessment") or ""
                 ),
                 "selected_changes": _dict_list(pending.get("selected_changes")),
-                "expected_effect": str(pending.get("expected_effect") or ""),
-                "main_risk": str(pending.get("main_risk") or ""),
-                "hypothesis": str(pending.get("hypothesis") or ""),
+                "expected_effect": str(
+                    experiment_spec.get("expected_effect")
+                    or pending.get("expected_effect")
+                    or ""
+                ),
+                "main_risk": str(
+                    experiment_spec.get("main_risk") or pending.get("main_risk") or ""
+                ),
+                "hypothesis": str(
+                    experiment_spec.get("hypothesis") or pending.get("hypothesis") or ""
+                ),
+                "plan_direction": str(experiment_spec.get("plan_direction") or ""),
+                "patches": _dict_list(experiment_spec.get("patches")),
                 "primary_lever": str(pending.get("primary_lever") or ""),
                 "predictions": _string_list(pending.get("predictions")),
                 "disproof_conditions": _string_list(
@@ -1057,81 +1153,78 @@ class EvolutionRunner:
             _write_json(generation_dir / "decision.json", decision)
             if accepted:
                 state["champion"] = candidate
-                state["champion_batch"] = candidate_batch.to_dict()
+                state["champion_batch"] = comparison_candidate.to_dict()
+            parent_evidence = {
+                **aggregate_outcomes([comparison_champion.to_dict()]),
+                "strategy": champion,
+                "difficulty": difficulty,
+            }
+            candidate_evidence = {
+                **aggregate_outcomes([comparison_candidate.to_dict()]),
+                "strategy": candidate,
+                "difficulty": difficulty,
+            }
+            if outcome == "accepted":
+                lesson = (
+                    "This hypothesis was supported by the 10-game evaluation at this "
+                    "difficulty."
+                )
+            elif outcome == "rejected":
+                lesson = (
+                    "This change combination was rejected. Do not repeat a materially "
+                    "equivalent combination unless new match evidence supports it and "
+                    "the new plan explains the substantive difference."
+                )
             else:
-                parent_evidence = {
-                    **aggregate_outcomes(
-                        item.to_dict()
-                        for item in self._evidence_batches(
-                            state, difficulty=difficulty, strategy=champion
+                lesson = (
+                    "The 10-game evaluation was inconclusive; it is not proof for or "
+                    "against this hypothesis."
+                )
+            experience = {
+                "experiment_id": (
+                    f"g{int(state['generation']):03d}_{candidate}"
+                ),
+                "generation": int(state["generation"]),
+                "difficulty": difficulty,
+                "parent": champion,
+                "candidate": candidate,
+                "hypothesis": str(decision.get("hypothesis") or ""),
+                "plan_direction": str(decision.get("plan_direction") or ""),
+                "patches": _dict_list(decision.get("patches")),
+                "decision": outcome,
+                "candidate_hash": str(decision.get("candidate_hash") or ""),
+                "primary_change": str(
+                    decision.get("primary_change") or "the candidate change"
+                ),
+                "selected_plan_ids": _string_list(
+                    decision.get("selected_plan_ids")
+                ),
+                "overall_assessment": str(
+                    decision.get("overall_assessment") or ""
+                ),
+                "selected_changes": _dict_list(decision.get("selected_changes")),
+                "expected_effect": str(decision.get("expected_effect") or ""),
+                "main_risk": str(decision.get("main_risk") or ""),
+                "parent_score": comparison_champion.score,
+                "candidate_score": comparison_candidate.score,
+                "delta": comparison_candidate.score - comparison_champion.score,
+                "champion_games": comparison_champion.games,
+                "candidate_games": comparison_candidate.games,
+                "posterior_probability_better": probability,
+                "experiment_evidence": {
+                    "parent_batch": parent_evidence,
+                    "candidate_batch": candidate_evidence,
+                    "candidate_minus_parent": {
+                        "score_delta": (
+                            comparison_candidate.score - comparison_champion.score
                         )
-                    ),
-                    "strategy": champion,
-                    "difficulty": difficulty,
-                }
-                candidate_evidence = {
-                    **aggregate_outcomes(
-                        item.to_dict()
-                        for item in self._evidence_batches(
-                            state, difficulty=difficulty, strategy=candidate
-                        )
-                    ),
-                    "strategy": candidate,
-                    "difficulty": difficulty,
-                }
-                experience = {
-                    "generation": int(state["generation"]),
-                    "difficulty": difficulty,
-                    "parent": champion,
-                    "candidate": candidate,
-                    "candidate_hash": str(decision.get("candidate_hash") or ""),
-                    "primary_change": str(
-                        decision.get("primary_change") or "the candidate change"
-                    ),
-                    "selected_plan_ids": _string_list(
-                        decision.get("selected_plan_ids")
-                    ),
-                    "overall_assessment": str(
-                        decision.get("overall_assessment") or ""
-                    ),
-                    "selected_changes": _dict_list(decision.get("selected_changes")),
-                    "expected_effect": str(decision.get("expected_effect") or ""),
-                    "main_risk": str(decision.get("main_risk") or ""),
-                    "hypothesis": str(decision.get("hypothesis") or ""),
-                    "primary_lever": str(decision.get("primary_lever") or ""),
-                    "predictions": _string_list(decision.get("predictions")),
-                    "disproof_conditions": _string_list(
-                        decision.get("disproof_conditions")
-                    ),
-                    "capability_mapping": (
-                        dict(decision.get("capability_mapping"))
-                        if isinstance(decision.get("capability_mapping"), dict)
-                        else {}
-                    ),
-                    "parent_score": comparison_champion.score,
-                    "candidate_score": comparison_candidate.score,
-                    "delta": comparison_candidate.score - comparison_champion.score,
-                    "champion_games": comparison_champion.games,
-                    "candidate_games": comparison_candidate.games,
-                    "posterior_probability_better": probability,
-                    "experiment_evidence": {
-                        "parent_batch": parent_evidence,
-                        "candidate_batch": candidate_evidence,
-                        "candidate_minus_parent": {
-                            "score_delta": (
-                                comparison_candidate.score - comparison_champion.score
-                            )
-                        },
-                        "comparison_used_confirmation": False,
-                        "confirmation_batches": None,
                     },
-                    "lesson": (
-                        "This change combination was rejected. Do not repeat a materially "
-                        "equivalent combination unless new match evidence supports it and "
-                        "the new plan explains the substantive difference."
-                    ),
-                }
-                state.setdefault("failed_experiences", []).append(experience)
+                    "comparison_used_confirmation": False,
+                    "confirmation_batches": None,
+                },
+                "lesson": lesson,
+            }
+            self._append_experiment_history(state, experience)
             state["generation"] += 1
             state["pending_candidate"] = None
             if accepted and comparison_candidate.score >= self.config.pass_score:
