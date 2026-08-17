@@ -35,7 +35,9 @@ DIFFICULTIES="harder,veryhard,cheatvision,cheatmoney,cheatinsane"
 MATCHES=10
 CANDIDATE_MATCHES=10
 CONCURRENCY=5
-MAX_GENERATIONS=10
+MAX_GENERATIONS=50
+MAX_GENERATIONS_PER_DIFFICULTY=10
+MASTERY_SCORE_THRESHOLD=0.90
 RUN_DIR=""                      # 续跑时填 evolution_runs/... 路径
 BASELINE_BATCH_DIR=""           # 新 run 可复用已完成的基线批次
 # =============================================================================
@@ -55,7 +57,10 @@ Options:
   --matches N             Champion / Candidate evaluation batch size
   --candidate-matches N   Candidate evaluation games (default 10)
   --concurrency N         并发
-  --max-generations N     最大代数
+  --max-generations N     全局最大实验代数
+  --max-total-generations N  同 --max-generations
+  --max-generations-per-difficulty N
+  --mastery-score-threshold X  Champion score 必须严格大于该值才能晋级
   --run-dir PATH          已有 run 目录，用于 resume
   --baseline-batch-dir PATH  新 run 复用一个已完成基线批次
   -h, --help
@@ -71,7 +76,9 @@ while [[ $# -gt 0 ]]; do
     --matches) MATCHES="$2"; shift 2 ;;
     --candidate-matches) CANDIDATE_MATCHES="$2"; shift 2 ;;
     --concurrency) CONCURRENCY="$2"; shift 2 ;;
-    --max-generations) MAX_GENERATIONS="$2"; shift 2 ;;
+    --max-generations|--max-total-generations) MAX_GENERATIONS="$2"; shift 2 ;;
+    --max-generations-per-difficulty) MAX_GENERATIONS_PER_DIFFICULTY="$2"; shift 2 ;;
+    --mastery-score-threshold) MASTERY_SCORE_THRESHOLD="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --baseline-batch-dir) BASELINE_BATCH_DIR="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -133,6 +140,7 @@ echo "Commander    : ${COMMANDER_MODEL}"
 echo "Difficulties : ${DIFFICULTIES}"
 echo "Matches/gen  : ${MATCHES}, concurrency=${CONCURRENCY}, max_gen=${MAX_GENERATIONS}"
 echo "Candidate    : ${CANDIDATE_MATCHES} evaluation games"
+echo "Mastery      : >${MASTERY_SCORE_THRESHOLD}, per-diff gens=${MAX_GENERATIONS_PER_DIFFICULTY}"
 
 ARGS=(
   -m evolution
@@ -142,7 +150,9 @@ ARGS=(
   --matches "${MATCHES}"
   --candidate-matches "${CANDIDATE_MATCHES}"
   --concurrency "${CONCURRENCY}"
-  --max-generations "${MAX_GENERATIONS}"
+  --max-total-generations "${MAX_GENERATIONS}"
+  --max-generations-per-difficulty "${MAX_GENERATIONS_PER_DIFFICULTY}"
+  --mastery-score-threshold "${MASTERY_SCORE_THRESHOLD}"
 )
 
 if [[ -n "${EVOLUTION_MODEL}" ]]; then

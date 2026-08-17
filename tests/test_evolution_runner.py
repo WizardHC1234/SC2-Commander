@@ -28,7 +28,7 @@ def _batch(strategy: str, difficulty: str, wins: int, root: Path) -> BatchResult
 
 
 def test_evolution_accepts_only_strict_improvement_and_advances(tmp_path: Path) -> None:
-    scores = {"tank": 5, "tank_opt1": 8}
+    scores = {"tank": 5, "tank_opt1": 10}
 
     def play(strategy: str, difficulty: str) -> BatchResult:
         return _batch(strategy, difficulty, scores[strategy], tmp_path)
@@ -42,7 +42,7 @@ def test_evolution_accepts_only_strict_improvement_and_advances(tmp_path: Path) 
         strategy="tank",
         commander_model="model",
         difficulties=("harder",),
-        max_generations=2,
+        max_total_generations=2,
     )
     runner = EvolutionRunner(
         config,
@@ -54,7 +54,9 @@ def test_evolution_accepts_only_strict_improvement_and_advances(tmp_path: Path) 
     state = runner.run()
 
     assert state["status"] == "completed"
+    assert state["completion_reason"] == "curriculum_mastered"
     assert state["champion"] == "tank_opt1"
+    assert state["mastered_difficulties"] == ["harder"]
     assert state["schema"] == "sc2_evolution.v3"
     assert state["games_used"] == 20
     assert state["experiment_history"][0]["decision"] == "accepted"
@@ -103,7 +105,7 @@ def test_rejected_candidate_is_saved_as_experience(tmp_path: Path) -> None:
         strategy="tank",
         commander_model="model",
         difficulties=("harder",),
-        max_generations=1,
+        max_total_generations=1,
     )
     runner = EvolutionRunner(
         config,
@@ -114,7 +116,7 @@ def test_rejected_candidate_is_saved_as_experience(tmp_path: Path) -> None:
     )
     state = runner.run()
 
-    assert state["status"] == "budget_exhausted"
+    assert state["status"] == "total_budget_exhausted"
     assert state["champion"] == "tank"
     assert state["games_used"] == 20
     assert len(state["experiment_history"]) == 1
@@ -154,7 +156,7 @@ def test_candidate_evaluation_never_replays_the_champion(
             strategy="tank",
             commander_model="model",
             difficulties=("harder",),
-            max_generations=1,
+            max_total_generations=1,
         ),
         run_dir=tmp_path / "run",
         project_root=tmp_path,
@@ -207,7 +209,7 @@ def test_candidate_generation_failure_retries_without_crashing(tmp_path: Path) -
     attempts = 0
 
     def play(strategy: str, difficulty: str) -> BatchResult:
-        return _batch(strategy, difficulty, 5 if strategy == "tank" else 8, tmp_path)
+        return _batch(strategy, difficulty, 5 if strategy == "tank" else 10, tmp_path)
 
     def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
         nonlocal attempts
@@ -223,7 +225,7 @@ def test_candidate_generation_failure_retries_without_crashing(tmp_path: Path) -
             strategy="tank",
             commander_model="model",
             difficulties=("harder",),
-            max_generations=2,
+            max_total_generations=2,
         ),
         run_dir=tmp_path / "run",
         project_root=tmp_path,
@@ -265,7 +267,7 @@ def test_runtime_action_pauses_without_candidate_retries(tmp_path: Path) -> None
             strategy="tank",
             commander_model="model",
             difficulties=("harder",),
-            max_generations=2,
+            max_total_generations=2,
         ),
         run_dir=tmp_path / "run",
         project_root=tmp_path,
@@ -308,7 +310,7 @@ def test_candidate_evaluation_requests_exactly_ten_games(tmp_path: Path) -> None
             strategy="tank",
             commander_model="model",
             difficulties=("harder",),
-            max_generations=2,
+            max_total_generations=1,
         ),
         run_dir=tmp_path / "run",
         project_root=tmp_path,
@@ -333,7 +335,7 @@ def test_equal_five_five_is_inconclusive(tmp_path: Path) -> None:
             strategy="tank",
             commander_model="model",
             difficulties=("harder",),
-            max_generations=1,
+            max_total_generations=1,
         ),
         run_dir=tmp_path / "run",
         project_root=tmp_path,
@@ -365,7 +367,7 @@ def test_champion_baseline_ignores_historical_pool_games(tmp_path: Path) -> None
             strategy="tank",
             commander_model="model",
             difficulties=("harder",),
-            max_generations=1,
+            max_total_generations=1,
         ),
         run_dir=tmp_path / "run",
         project_root=tmp_path,
@@ -399,7 +401,7 @@ def test_generation_failures_are_not_prior_experiences(tmp_path: Path) -> None:
     seen: list[list[object]] = []
 
     def play(strategy: str, difficulty: str) -> BatchResult:
-        return _batch(strategy, difficulty, 5 if strategy == "tank" else 8, tmp_path)
+        return _batch(strategy, difficulty, 5 if strategy == "tank" else 10, tmp_path)
 
     def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
         seen.append(list(experiences))
@@ -414,7 +416,7 @@ def test_generation_failures_are_not_prior_experiences(tmp_path: Path) -> None:
             strategy="tank",
             commander_model="model",
             difficulties=("harder",),
-            max_generations=2,
+            max_total_generations=2,
         ),
         run_dir=tmp_path / "run",
         project_root=tmp_path,
@@ -457,7 +459,7 @@ def test_resume_pending_candidate_does_not_regenerate(tmp_path: Path) -> None:
             strategy="tank",
             commander_model="model",
             difficulties=("harder",),
-            max_generations=1,
+            max_total_generations=1,
         ),
         run_dir=tmp_path / "run",
         project_root=tmp_path,
@@ -603,7 +605,7 @@ def test_six_patches_produce_one_experiment_record(tmp_path: Path) -> None:
             strategy="tank",
             commander_model="model",
             difficulties=("harder",),
-            max_generations=1,
+            max_total_generations=1,
         ),
         run_dir=tmp_path / "run",
         project_root=tmp_path,
@@ -655,3 +657,291 @@ def test_migrates_failed_experiences_into_experiment_history(tmp_path: Path) -> 
     assert loaded["experiment_history"][0]["legacy"] is True
     assert loaded["experiment_history"][0]["hypothesis"] == "legacy hypothesis"
     assert "candidate_matches" in loaded["config"]
+
+
+def test_nine_wins_one_loss_does_not_master_difficulty(tmp_path: Path) -> None:
+    evolve_calls = 0
+
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 9, tmp_path)
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        nonlocal evolve_calls
+        evolve_calls += 1
+        return EvolRunResult(
+            ok=True,
+            message="stop",
+            decision_action="stop",
+            action_reason="not enough improvement",
+        )
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder", "veryhard"),
+            max_total_generations=10,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert evolve_calls == 1
+    assert state["status"] == "stopped_no_actionable_improvement"
+    assert state["champion"] == "tank"
+    assert state["difficulty_index"] == 0
+    assert state["mastered_difficulties"] == []
+    assert state["champion_baseline"]["score"] == 0.9
+    assert state.get("experiment_history") == []
+    assert state["difficulty_generation"] == 0
+
+
+def test_nine_wins_one_draw_masters_difficulty(tmp_path: Path) -> None:
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return BatchResult(
+            name=f"{strategy}_{difficulty}",
+            path=tmp_path / f"{strategy}_{difficulty}",
+            strategy=strategy,
+            difficulty=difficulty,
+            wins=9,
+            draws=1,
+            losses=0,
+        )
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        raise AssertionError("0.95 champion must master without a candidate")
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert state["status"] == "completed"
+    assert state["mastered_difficulties"] == ["harder"]
+    assert state["champion_baseline"] is None
+
+
+def test_ten_wins_masters_each_difficulty_without_candidates(tmp_path: Path) -> None:
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return BatchResult(
+            name=f"{strategy}_{difficulty}",
+            path=tmp_path / f"{strategy}_{difficulty}",
+            strategy=strategy,
+            difficulty=difficulty,
+            wins=10,
+            draws=0,
+            losses=0,
+        )
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        raise AssertionError("mastered champion must not generate a candidate")
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder", "veryhard"),
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert state["status"] == "completed"
+    assert state["completion_reason"] == "curriculum_mastered"
+    assert state["champion"] == "tank"
+    assert state["mastered_difficulties"] == ["harder", "veryhard"]
+    assert state["games_used"] == 20
+    assert state["experiment_history"] == []
+
+
+def test_accepted_below_mastery_keeps_same_difficulty(tmp_path: Path) -> None:
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 5 if strategy == "tank" else 8, tmp_path)
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        candidate = tmp_path / "skills" / "terran" / "tank_opt1"
+        candidate.mkdir(parents=True, exist_ok=True)
+        return EvolRunResult(ok=True, message="OK", output_dir=candidate)
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder", "veryhard"),
+            max_total_generations=1,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert state["status"] == "total_budget_exhausted"
+    assert state["champion"] == "tank_opt1"
+    assert state["difficulty_index"] == 0
+    assert state["mastered_difficulties"] == []
+    assert state["champion_baseline"]["score"] == 0.8
+    assert state["experiment_history"][0]["decision"] == "accepted"
+
+
+def test_request_more_matches_adds_analysis_games_then_reruns(tmp_path: Path) -> None:
+    requested: list[tuple[str, int]] = []
+    evolve_calls = 0
+
+    def play(strategy: str, difficulty: str, target_games: int = 10) -> BatchResult:
+        requested.append((strategy, target_games))
+        index = len(requested)
+        wins = 5 if strategy == "tank" else 2
+        return BatchResult(
+            name=f"{strategy}_{index}",
+            path=tmp_path / f"{strategy}_{index}",
+            strategy=strategy,
+            difficulty=difficulty,
+            wins=wins,
+            draws=0,
+            losses=target_games - wins,
+        )
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        nonlocal evolve_calls
+        evolve_calls += 1
+        if evolve_calls == 1:
+            return EvolRunResult(
+                ok=True,
+                message="need more matches",
+                decision_action="request_more_matches",
+                action_reason="sparse fights",
+            )
+        candidate = tmp_path / "skills" / "terran" / "tank_opt1"
+        candidate.mkdir(parents=True, exist_ok=True)
+        return EvolRunResult(ok=True, message="OK", output_dir=candidate)
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_total_generations=1,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert evolve_calls == 2
+    assert requested == [("tank", 10), ("tank", 10), ("tank_opt1", 10)]
+    assert state["champion_baseline"]["games"] == 10
+    assert state["champion_baseline"]["score"] == 0.5
+    assert len(state["experiment_history"]) == 1
+    assert state["difficulty_generation"] == 1
+
+
+def test_request_more_matches_stops_after_analysis_cap(tmp_path: Path) -> None:
+    requested: list[tuple[str, int]] = []
+
+    def play(strategy: str, difficulty: str, target_games: int = 10) -> BatchResult:
+        requested.append((strategy, target_games))
+        index = len(requested)
+        return BatchResult(
+            name=f"tank_{index}",
+            path=tmp_path / f"tank_{index}",
+            strategy=strategy,
+            difficulty=difficulty,
+            wins=5,
+            draws=0,
+            losses=target_games - 5,
+        )
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        return EvolRunResult(
+            ok=True,
+            message="still not enough",
+            decision_action="request_more_matches",
+        )
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_total_generations=5,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert state["status"] == "insufficient_evidence"
+    assert requested == [("tank", 10), ("tank", 10)]
+    assert state.get("experiment_history") == []
+    assert state["difficulty_generation"] == 0
+    assert state["generation"] == 0
+
+
+def test_difficulty_budget_exhausted_does_not_skip_ahead(tmp_path: Path) -> None:
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 5 if strategy == "tank" else 2, tmp_path)
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        candidate = tmp_path / "skills" / "terran" / "tank_opt1"
+        candidate.mkdir(parents=True, exist_ok=True)
+        return EvolRunResult(ok=True, message="OK", output_dir=candidate)
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder", "veryhard"),
+            max_generations_per_difficulty=1,
+            max_total_generations=10,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert state["status"] == "difficulty_budget_exhausted"
+    assert state["failed_difficulty"] == "harder"
+    assert state["difficulty_index"] == 0
+    assert state["champion"] == "tank"
+    assert state["difficulty_generation"] == 1
+    assert len(state["experiment_history"]) == 1
+
+
+def test_experiment_id_uses_style_generation_difficulty_candidate(tmp_path: Path) -> None:
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 5 if strategy == "tank" else 2, tmp_path)
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        candidate = tmp_path / "skills" / "terran" / "tank_opt1"
+        candidate.mkdir(parents=True, exist_ok=True)
+        return EvolRunResult(ok=True, message="OK", output_dir=candidate)
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_total_generations=1,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert state["experiment_history"][0]["experiment_id"] == "tank:g000:harder:tank_opt1"

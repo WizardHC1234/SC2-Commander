@@ -21,8 +21,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-accept-probability", type=float, default=0.80)
     parser.add_argument("--candidate-reject-probability", type=float, default=0.20)
     parser.add_argument("--concurrency", type=int, default=5)
-    parser.add_argument("--pass-score", type=float, default=0.8)
-    parser.add_argument("--max-generations", type=int, default=10)
+    parser.add_argument("--mastery-score-threshold", type=float, default=0.90)
+    parser.add_argument("--analysis-batch-games", type=int, default=10)
+    parser.add_argument("--max-analysis-games-per-generation", type=int, default=20)
+    parser.add_argument("--max-generations-per-difficulty", type=int, default=10)
+    parser.add_argument("--max-total-generations", "--max-generations", type=int, default=50)
     parser.add_argument("--knowledge-mode", choices=("enabled", "disabled"), default="enabled")
     parser.add_argument("--run-dir", default="", help="Existing run directory to resume")
     parser.add_argument(
@@ -51,8 +54,11 @@ def main() -> None:
         candidate_accept_probability=args.candidate_accept_probability,
         candidate_reject_probability=args.candidate_reject_probability,
         concurrency=args.concurrency,
-        pass_score=args.pass_score,
-        max_generations=args.max_generations,
+        mastery_score_threshold=args.mastery_score_threshold,
+        analysis_batch_games=args.analysis_batch_games,
+        max_analysis_games_per_generation=args.max_analysis_games_per_generation,
+        max_generations_per_difficulty=args.max_generations_per_difficulty,
+        max_total_generations=args.max_total_generations,
         knowledge_mode=args.knowledge_mode,
         real_time=args.real_time,
         baseline_batch_dir=args.baseline_batch_dir,
