@@ -58,6 +58,7 @@ def test_evolution_accepts_only_strict_improvement_and_advances(tmp_path: Path) 
     assert state["champion"] == "tank_opt1"
     assert state["mastered_difficulties"] == ["harder"]
     assert state["schema"] == "sc2_evolution.v3"
+    assert state["selection_protocol"] == "score_only_v1"
     assert state["games_used"] == 20
     assert state["experiment_history"][0]["decision"] == "accepted"
     assert "failed_experiences" not in state
@@ -128,6 +129,10 @@ def test_rejected_candidate_is_saved_as_experience(tmp_path: Path) -> None:
     assert experience["selected_changes"][0]["change"] == "attack with 40 instead of 45 Marines"
     assert experience["parent_score"] == 0.5
     assert experience["candidate_score"] == 0.2
+    assert experience["score_delta"] == -0.3
+    assert experience["evaluation"]["decision"] == "rejected"
+    assert experience["evaluation"]["score_delta"] == -0.3
+    assert "posterior" in experience["evaluation"]
     assert experience["champion_games"] == 10
     assert experience["candidate_games"] == 10
     assert round(
@@ -167,13 +172,15 @@ def test_candidate_evaluation_never_replays_the_champion(
 
     assert calls == {"tank": 1, "tank_opt1": 1}
     assert state["games_used"] == 20
-    assert state["champion"] == "tank"
+    assert state["champion"] == "tank_opt1"
     decision = json.loads(
         (tmp_path / "run" / "generation_000" / "decision.json").read_text(
             encoding="utf-8"
         )
     )
-    assert decision["decision"] == "inconclusive"
+    assert decision["decision"] == "accepted"
+    assert decision["selection_rule"] == "candidate_score_strictly_greater"
+    assert round(decision["score_delta"], 4) == 0.1
     assert decision["champion_evidence_games"] == 10
     assert decision["candidate_evidence_games"] == 10
     assert decision["parent_score"] == 0.5
@@ -345,6 +352,8 @@ def test_equal_five_five_is_inconclusive(tmp_path: Path) -> None:
 
     assert state["champion"] == "tank"
     assert state["experiment_history"][0]["decision"] == "inconclusive"
+    assert state["experiment_history"][0]["score_delta"] == 0.0
+    assert state["experiment_history"][0]["evaluation"]["decision"] == "inconclusive"
     posterior = state["experiment_history"][0]["posterior_probability_better"]
     assert abs(posterior - 0.5) < 0.02
     assert abs(posterior_probability_better(
@@ -945,3 +954,37 @@ def test_experiment_id_uses_style_generation_difficulty_candidate(tmp_path: Path
     ).run()
 
     assert state["experiment_history"][0]["experiment_id"] == "tank:g000:harder:tank_opt1"
+
+
+def test_nine_vs_ten_is_accepted_and_masters(tmp_path: Path) -> None:
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 9 if strategy == "tank" else 10, tmp_path)
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        candidate = tmp_path / "skills" / "terran" / "tank_opt1"
+        candidate.mkdir(parents=True, exist_ok=True)
+        return EvolRunResult(ok=True, message="OK", output_dir=candidate)
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_total_generations=5,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    record = state["experiment_history"][0]
+    assert record["decision"] == "accepted"
+    assert round(record["score_delta"], 4) == 0.1
+    assert record["evaluation"]["champion"]["score"] == 0.9
+    assert record["evaluation"]["candidate"]["score"] == 1.0
+    assert "posterior" in record["evaluation"]
+    assert state["selection_protocol"] == "score_only_v1"
+    assert state["status"] == "completed"
+    assert state["champion"] == "tank_opt1"
+    assert state["mastered_difficulties"] == ["harder"]

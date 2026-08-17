@@ -18,8 +18,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--difficulties", default=",".join(DEFAULT_DIFFICULTIES))
     parser.add_argument("--matches", type=int, default=10)
     parser.add_argument("--candidate-matches", type=int, default=10)
-    parser.add_argument("--candidate-accept-probability", type=float, default=0.80)
-    parser.add_argument("--candidate-reject-probability", type=float, default=0.20)
     parser.add_argument("--concurrency", type=int, default=5)
     parser.add_argument("--mastery-score-threshold", type=float, default=0.90)
     parser.add_argument("--analysis-batch-games", type=int, default=10)
@@ -51,8 +49,6 @@ def main() -> None:
         difficulties=difficulties,
         matches_per_batch=args.matches,
         candidate_matches=args.candidate_matches,
-        candidate_accept_probability=args.candidate_accept_probability,
-        candidate_reject_probability=args.candidate_reject_probability,
         concurrency=args.concurrency,
         mastery_score_threshold=args.mastery_score_threshold,
         analysis_batch_games=args.analysis_batch_games,

@@ -121,6 +121,8 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
                 "candidate_score",
                 "delta",
                 "posterior_probability_better",
+                "score_delta",
+                "evaluation",
                 "primary_change",
                 "primary_lever",
                 "lesson",
@@ -179,10 +181,12 @@ Recent experiment history:
 {_format_prior_experiences(prior_experiences)}
 
 Experiment-history rules:
-- Accepted: positive empirical evidence in the tested context.
-- Rejected: evidence against materially equivalent hypotheses unless new evidence
-  provides a substantive reason to revisit.
-- Inconclusive: not proof for or against.
+- decision is the evolution selection result from fixed 10-game scores.
+- score_delta is the direct score change. posterior is statistical evidence
+  strength only; it is not a promotion gate.
+- Accepted: candidate score was strictly higher in the tested context.
+- Rejected: candidate score was strictly lower.
+- Inconclusive: the two scores were equal; not proof for or against.
 - Same paragraph target is not the same experiment."""
 
 

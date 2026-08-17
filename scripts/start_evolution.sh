@@ -140,7 +140,11 @@ echo "Commander    : ${COMMANDER_MODEL}"
 echo "Difficulties : ${DIFFICULTIES}"
 echo "Matches/gen  : ${MATCHES}, concurrency=${CONCURRENCY}, max_gen=${MAX_GENERATIONS}"
 echo "Candidate    : ${CANDIDATE_MATCHES} evaluation games"
-echo "Mastery      : >${MASTERY_SCORE_THRESHOLD}, per-diff gens=${MAX_GENERATIONS_PER_DIFFICULTY}"
+echo "Selection    : candidate score > champion score"
+echo "Tie          : inconclusive; Champion retained"
+echo "Mastery      : Champion score > ${MASTERY_SCORE_THRESHOLD}"
+echo "Posterior    : diagnostic only"
+echo "Budget       : per-diff gens=${MAX_GENERATIONS_PER_DIFFICULTY}, max_gen=${MAX_GENERATIONS}"
 
 ARGS=(
   -m evolution

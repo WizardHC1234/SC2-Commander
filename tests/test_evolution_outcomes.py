@@ -1,6 +1,6 @@
 from evolution.outcomes import (
     aggregate_outcomes,
-    decide_candidate_outcome,
+    decide_candidate,
     posterior_probability_better,
 )
 
@@ -33,32 +33,10 @@ def test_posterior_probability_tracks_win_rate_difference() -> None:
     ) < 0.2
 
 
-def test_decide_candidate_outcome_uses_three_states() -> None:
-    assert decide_candidate_outcome(
-        probability=0.90,
-        candidate_score=0.8,
-        champion_score=0.5,
-        accept_probability=0.80,
-        reject_probability=0.20,
-    ) == "accepted"
-    assert decide_candidate_outcome(
-        probability=0.90,
-        candidate_score=0.5,
-        champion_score=0.5,
-        accept_probability=0.80,
-        reject_probability=0.20,
-    ) == "inconclusive"
-    assert decide_candidate_outcome(
-        probability=0.10,
-        candidate_score=0.2,
-        champion_score=0.5,
-        accept_probability=0.80,
-        reject_probability=0.20,
-    ) == "rejected"
-    assert decide_candidate_outcome(
-        probability=0.50,
-        candidate_score=0.5,
-        champion_score=0.5,
-        accept_probability=0.80,
-        reject_probability=0.20,
-    ) == "inconclusive"
+def test_decide_candidate_uses_score_only() -> None:
+    assert decide_candidate(0.8, 0.5) == "accepted"
+    assert decide_candidate(0.5, 0.5) == "inconclusive"
+    assert decide_candidate(0.2, 0.5) == "rejected"
+    assert decide_candidate(1.0, 0.9) == "accepted"
+    assert decide_candidate(0.65, 0.70) == "rejected"
+    assert decide_candidate(0.70, 0.70) == "inconclusive"

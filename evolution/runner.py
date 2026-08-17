@@ -20,7 +20,7 @@ from .feedback import (
 )
 from .outcomes import (
     aggregate_outcomes,
-    decide_candidate_outcome,
+    decide_candidate,
     posterior_probability_better,
 )
 
@@ -64,8 +64,6 @@ class EvolutionConfig:
     difficulties: tuple[str, ...] = DEFAULT_DIFFICULTIES
     matches_per_batch: int = 10
     candidate_matches: int = 10
-    candidate_accept_probability: float = 0.80
-    candidate_reject_probability: float = 0.20
     concurrency: int = 5
     mastery_score_threshold: float = 0.90
     analysis_batch_games: int = 10
@@ -89,10 +87,6 @@ class EvolutionConfig:
             raise ValueError("matches_per_batch and concurrency must be positive")
         if self.candidate_matches <= 0:
             raise ValueError("candidate_matches must be positive")
-        if not 0.5 < self.candidate_accept_probability <= 1.0:
-            raise ValueError("candidate_accept_probability must be in (0.5, 1.0]")
-        if not 0.0 <= self.candidate_reject_probability < 0.5:
-            raise ValueError("candidate_reject_probability must be in [0.0, 0.5)")
         if not 0.0 <= self.mastery_score_threshold <= 1.0:
             raise ValueError("mastery_score_threshold must be between 0 and 1")
         if self.analysis_batch_games <= 0:
@@ -300,6 +294,12 @@ class EvolutionRunner:
             "schema": "sc2_evolution.v3",
             "status": "running",
             "config": {**asdict(self.config), "difficulties": list(self.config.difficulties)},
+            "selection_protocol": "score_only_v1",
+            "mastery_protocol": {
+                "metric": "outcome_score",
+                "operator": ">",
+                "threshold": self.config.mastery_score_threshold,
+            },
             "style": self.config.strategy,
             "champion": self.config.strategy,
             "difficulty_index": 0,
@@ -337,11 +337,14 @@ class EvolutionRunner:
                 saved["max_total_generations"] = current["max_total_generations"]
             if "mastery_score_threshold" not in saved:
                 saved["mastery_score_threshold"] = current["mastery_score_threshold"]
-            for obsolete in ("pass_score", "max_generations"):
-                saved.pop(obsolete, None)
-            for key in (
+            for obsolete in (
+                "pass_score",
+                "max_generations",
                 "candidate_accept_probability",
                 "candidate_reject_probability",
+            ):
+                saved.pop(obsolete, None)
+            for key in (
                 "baseline_batch_dir",
                 "analysis_batch_games",
                 "max_analysis_games_per_generation",
@@ -622,6 +625,17 @@ class EvolutionRunner:
             changed = True
         elif champion_batch is None and state.get("champion_baseline") is not None:
             state["champion_baseline"] = None
+            changed = True
+        if state.get("selection_protocol") != "score_only_v1":
+            state["selection_protocol"] = "score_only_v1"
+            changed = True
+        mastery_protocol = {
+            "metric": "outcome_score",
+            "operator": ">",
+            "threshold": self.config.mastery_score_threshold,
+        }
+        if state.get("mastery_protocol") != mastery_protocol:
+            state["mastery_protocol"] = mastery_protocol
             changed = True
         return changed
 
@@ -1290,14 +1304,12 @@ class EvolutionRunner:
             comparison_candidate.to_dict(),
             comparison_champion.to_dict(),
         )
-        outcome = decide_candidate_outcome(
-            probability=probability,
-            candidate_score=comparison_candidate.score,
-            champion_score=comparison_champion.score,
-            accept_probability=self.config.candidate_accept_probability,
-            reject_probability=self.config.candidate_reject_probability,
+        outcome = decide_candidate(
+            comparison_candidate.score,
+            comparison_champion.score,
         )
         accepted = outcome == "accepted"
+        score_delta = comparison_candidate.score - comparison_champion.score
         experiment_spec = (
             dict(pending["experiment_spec"])
             if isinstance(pending.get("experiment_spec"), dict)
@@ -1316,12 +1328,13 @@ class EvolutionRunner:
             "candidate": candidate,
             "parent_score": comparison_champion.score,
             "candidate_score": comparison_candidate.score,
-            "delta": comparison_candidate.score - comparison_champion.score,
+            "champion_score": comparison_champion.score,
+            "score_delta": score_delta,
+            "delta": score_delta,
             "decision": outcome,
             "accepted": accepted,
             "posterior_probability_better": probability,
-            "accept_probability": self.config.candidate_accept_probability,
-            "reject_probability": self.config.candidate_reject_probability,
+            "selection_rule": "candidate_score_strictly_greater",
             "champion_evidence_games": comparison_champion.games,
             "candidate_evidence_games": comparison_candidate.games,
             "evaluation_rounds": [
@@ -1394,8 +1407,8 @@ class EvolutionRunner:
             )
         else:
             lesson = (
-                "The 10-game evaluation was inconclusive; it is not proof for or "
-                "against this hypothesis."
+                "The 10-game evaluation scores were equal; this is not proof for "
+                "or against the hypothesis, and the Champion is unchanged."
             )
         experience = {
             "experiment_id": self._experiment_id(
@@ -1407,6 +1420,7 @@ class EvolutionRunner:
             "generation": int(state["generation"]),
             "difficulty": difficulty,
             "parent": champion,
+            "champion": champion,
             "candidate": candidate,
             "hypothesis": str(decision.get("hypothesis") or ""),
             "plan_direction": str(decision.get("plan_direction") or ""),
@@ -1423,10 +1437,30 @@ class EvolutionRunner:
             "main_risk": str(decision.get("main_risk") or ""),
             "parent_score": comparison_champion.score,
             "candidate_score": comparison_candidate.score,
-            "delta": comparison_candidate.score - comparison_champion.score,
+            "score_delta": score_delta,
+            "delta": score_delta,
             "champion_games": comparison_champion.games,
             "candidate_games": comparison_candidate.games,
             "posterior_probability_better": probability,
+            "evaluation": {
+                "champion": {
+                    "wins": comparison_champion.wins,
+                    "draws": comparison_champion.draws,
+                    "losses": comparison_champion.losses,
+                    "games": comparison_champion.games,
+                    "score": comparison_champion.score,
+                },
+                "candidate": {
+                    "wins": comparison_candidate.wins,
+                    "draws": comparison_candidate.draws,
+                    "losses": comparison_candidate.losses,
+                    "games": comparison_candidate.games,
+                    "score": comparison_candidate.score,
+                },
+                "score_delta": score_delta,
+                "posterior": probability,
+                "decision": outcome,
+            },
             "experiment_evidence": {
                 "parent_batch": parent_evidence,
                 "candidate_batch": candidate_evidence,
