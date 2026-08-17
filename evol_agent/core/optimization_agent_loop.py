@@ -11,8 +11,232 @@ from .llm import call_json_llm
 from .prompts import build_candidate_prompt
 from .candidate_critic import critique_candidate_contract
 from .types import BattleAnalysis, EvolImprovement, ToolObservation, ValidationResult
-from ..optimization.strategy_document import StrategyDocument, paragraph_hash
+from ..optimization.strategy_document import StrategyDocument
 from ..validation import validate_improvement
+
+
+def _unwrap_candidate(result: Any) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    raw = result.get("candidate") if isinstance(result.get("candidate"), dict) else result
+    return raw if isinstance(raw, dict) else None
+
+
+def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[str, Any]:
+    raw = dict(battle_analysis.raw or {})
+    plans = [item for item in (raw.get("candidate_plans") or []) if isinstance(item, dict)]
+    first_plan = plans[0] if plans else {}
+    priority = raw.get("priority_problem")
+    if isinstance(priority, str) and priority.strip():
+        priority = {"problem": priority.strip(), "evidence": []}
+    if not isinstance(priority, dict) or not str(priority.get("problem") or "").strip():
+        problems = raw.get("problems") or []
+        if problems and isinstance(problems[0], dict):
+            priority = problems[0]
+        else:
+            priority = {}
+    plan = raw.get("plan")
+    if isinstance(plan, str) and plan.strip():
+        plan = {"direction": plan.strip()}
+    if not isinstance(plan, dict):
+        plan = {}
+    direction = str(plan.get("direction") or first_plan.get("name") or "").strip()
+    plan = {**plan, "direction": direction}
+    hypothesis = str(raw.get("hypothesis") or first_plan.get("hypothesis") or "").strip()
+    strengths = raw.get("strengths_to_preserve")
+    if not isinstance(strengths, list):
+        strengths = raw.get("wins_to_preserve") if isinstance(raw.get("wins_to_preserve"), list) else []
+    knowledge_used = raw.get("knowledge_used") if isinstance(raw.get("knowledge_used"), list) else []
+    return {
+        "strengths_to_preserve": strengths,
+        "priority_problem": priority,
+        "hypothesis": hypothesis,
+        "plan": plan,
+        "next_action": str(raw.get("next_action") or ""),
+        "knowledge_used": knowledge_used,
+    }
+
+
+def _knowledge_runs_for_optimizer(
+    decision: dict[str, Any],
+    observations: list[ToolObservation],
+) -> list[dict[str, Any]]:
+    used = [item for item in (decision.get("knowledge_used") or []) if isinstance(item, dict)]
+    if used:
+        return [
+            {
+                "question_id": str(item.get("question_id") or ""),
+                "question": str(item.get("question") or ""),
+                "answer": str(item.get("finding") or item.get("answer") or ""),
+                "ok": True,
+            }
+            for item in used
+            if str(item.get("finding") or item.get("answer") or "").strip()
+        ]
+    runs: list[dict[str, Any]] = []
+    for observation in observations:
+        if not observation.ok:
+            continue
+        args = observation.args if isinstance(observation.args, dict) else {}
+        runs.append(
+            {
+                "question_id": str(args.get("question_id") or ""),
+                "question": str(args.get("question") or ""),
+                "answer": str(observation.summary or ""),
+                "ok": True,
+            }
+        )
+    return runs
+
+
+def _normalize_optimizer_candidate(
+    raw: dict[str, Any],
+    *,
+    parent_document: StrategyDocument,
+) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "optimizer returned no JSON object"
+    action = str(raw.get("action") or "draft_candidate").strip() or "draft_candidate"
+    if action not in {"draft_candidate", "revise_candidate"}:
+        return None, "action must be draft_candidate or revise_candidate"
+
+    patches = raw.get("patches")
+    if not isinstance(patches, list) or not patches:
+        return None, "optimizer patches must be a non-empty list"
+
+    detail_ids = {item.id for item in parent_document.details}
+    seen: set[str] = set()
+    normalized_patches: list[dict[str, str]] = []
+    for item in patches:
+        if not isinstance(item, dict):
+            return None, "each patch must be an object"
+        target = str(item.get("target") or "").strip()
+        replacement = str(item.get("replacement") or item.get("value") or "").strip()
+        why_required = str(item.get("why_required") or "").strip()
+        expected_old_hash = str(item.get("expected_old_hash") or "").strip()
+        if target in {"", "summary"} or str(item.get("op") or "") == "replace_summary":
+            return None, "Optimizer may not modify # Summary"
+        if not target:
+            return None, "each patch requires target"
+        if target in seen:
+            return None, f"candidate modifies paragraph {target!r} more than once"
+        seen.add(target)
+        if target not in detail_ids:
+            allowed = ", ".join(sorted(detail_ids))
+            return None, f"unknown strategy detail {target!r}; allowed targets: {allowed}"
+        if not expected_old_hash:
+            return None, f"patch {target!r} requires expected_old_hash"
+        if not replacement:
+            return None, f"patch {target!r} replacement must be a non-empty line"
+        if "\n" in replacement:
+            return None, f"candidate paragraph {target!r} must be one non-empty line"
+        if not why_required:
+            return None, f"patch {target!r} requires why_required"
+        normalized_patches.append(
+            {
+                "target": target,
+                "expected_old_hash": expected_old_hash,
+                "replacement": replacement,
+                "why_required": why_required,
+            }
+        )
+
+    preserved = [
+        str(item).strip()
+        for item in (raw.get("preserved_strengths") or [])
+        if str(item).strip()
+    ]
+    return (
+        {
+            "action": action,
+            "patches": normalized_patches,
+            "expected_effect": str(raw.get("expected_effect") or "").strip(),
+            "main_risk": str(raw.get("main_risk") or "").strip(),
+            "preserved_strengths": preserved,
+        },
+        "",
+    )
+
+
+def _patches_to_operations(patches: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            "op": "replace_detail",
+            "target": item["target"],
+            "expected_old_hash": item["expected_old_hash"],
+            "value": item["replacement"],
+        }
+        for item in patches
+    ]
+
+
+def _candidate_rationale(
+    *,
+    decision: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    priority = decision.get("priority_problem") or {}
+    problem = (
+        str(priority.get("problem") or "").strip()
+        if isinstance(priority, dict)
+        else str(priority).strip()
+    )
+    plan = decision.get("plan") if isinstance(decision.get("plan"), dict) else {}
+    direction = str(plan.get("direction") or "").strip()
+    hypothesis = str(decision.get("hypothesis") or "").strip()
+    expected_effect = str(candidate.get("expected_effect") or "").strip()
+    main_risk = str(candidate.get("main_risk") or "").strip()
+    strengths = []
+    for item in decision.get("strengths_to_preserve") or []:
+        if isinstance(item, dict) and str(item.get("pattern") or "").strip():
+            strengths.append(str(item.get("pattern") or "").strip())
+        elif str(item).strip():
+            strengths.append(str(item).strip())
+    patches = list(candidate.get("patches") or [])
+    return {
+        "hypothesis": hypothesis,
+        "priority_problem": problem,
+        "plan_direction": direction,
+        "primary_lever": "other",
+        "predictions": [expected_effect] if expected_effect else [
+            "candidate matches test the supplied hypothesis"
+        ],
+        "disproof_conditions": [main_risk] if main_risk else [
+            "match outcomes do not improve"
+        ],
+        "capability_mapping": {
+            "macro_actions": [],
+            "changed_macro_actions": [],
+            "army_controls": [],
+            "information_controls": [],
+            "runtime_dependencies": [],
+            "unsupported_dependencies": [],
+        },
+        "preserved_strength": strengths[0] if strengths else "",
+        "strengths_to_preserve": list(decision.get("strengths_to_preserve") or []),
+        "preserved_strengths": list(candidate.get("preserved_strengths") or strengths),
+        "selected_plan_ids": ["D1"],
+        "overall_assessment": direction,
+        "selected_changes": [
+            {
+                "source_plan_id": "D1",
+                "problem_id": "P1",
+                "target": item.get("target"),
+                "change": item.get("replacement"),
+                "why": item.get("why_required"),
+            }
+            for item in patches
+            if isinstance(item, dict)
+        ],
+        "primary_change": direction,
+        "expected_effect": expected_effect,
+        "main_risk": main_risk,
+        "patches": [
+            {"target": item.get("target"), "why_required": item.get("why_required")}
+            for item in patches
+            if isinstance(item, dict)
+        ],
+    }
 
 
 def run_optimization_agent_loop(
@@ -33,12 +257,7 @@ def run_optimization_agent_loop(
     list[str],
     list[dict[str, Any]],
 ]:
-    """Generate one strategy candidate and retry deterministic validation.
-
-    Strategic quality is intentionally not validated here. It is measured by
-    playing the candidate; this loop checks only that Commander can load and
-    execute the strategy document.
-    """
+    """Implement one Cross-match hypothesis as strategy.md paragraph patches."""
     model = str(model or "").strip() or DEFAULT_OPTIMIZATION_MODEL
     capability_manifest = capability_manifest or {}
     observations = list(initial_tool_observations)
@@ -46,16 +265,6 @@ def run_optimization_agent_loop(
     events: list[dict[str, Any]] = []
     candidate: dict[str, Any] | None = None
     last_improvement: EvolImprovement | None = None
-    valid_plan_ids = {
-        str(item.get("id") or "").strip()
-        for item in (battle_analysis.raw.get("candidate_plans") or [])
-        if isinstance(item, dict)
-    }
-    plans_by_id = {
-        str(item.get("id") or "").strip(): item
-        for item in (battle_analysis.raw.get("candidate_plans") or [])
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    }
     parent_text = str(skill_texts.get("strategy.md") or "")
     try:
         parent_document = StrategyDocument.parse(parent_text)
@@ -63,113 +272,20 @@ def run_optimization_agent_loop(
         error = f"parent strategy.md cannot be patched: {exc}"
         return ValidationResult(ok=False, error=error), None, observations, [error], events
 
-    # Normal path: the single cross-match reasoning call already selected one
-    # plan and supplied complete paragraph replacements. Apply it locally and
-    # avoid a second LLM call. Knowledge-dependent plans still use the fallback
-    # call below so verified facts can be incorporated.
-    plans = [
-        item
-        for item in (battle_analysis.raw.get("candidate_plans") or [])
-        if isinstance(item, dict)
-    ]
-    if len(plans) == 1 and not observations:
-        plan = plans[0]
-        details_by_id = {item.id: item for item in parent_document.details}
-        operations: list[dict[str, str]] = []
-        selected_changes: list[dict[str, str]] = []
-        for change in plan.get("changes") or []:
-            if not isinstance(change, dict):
-                continue
-            target = str(change.get("target_paragraph_id") or "").strip()
-            value = str(change.get("candidate_rule") or "").strip()
-            current = details_by_id.get(target)
-            if not target or not value or current is None:
-                operations = []
-                break
-            operations.append(
-                {
-                    "op": "replace_detail",
-                    "target": target,
-                    "expected_old_hash": paragraph_hash(current.value),
-                    "value": value,
-                }
-            )
-            selected_changes.append(
-                {
-                    "source_plan_id": str(plan.get("id") or "D1"),
-                    "problem_id": str(
-                        (plan.get("addresses_problem_ids") or ["P1"])[0]
-                    ),
-                    "change": value,
-                    "why": str(change.get("why_required") or ""),
-                }
-            )
-        if operations:
-            rationale = {
-                "hypothesis": str(plan.get("hypothesis") or plan.get("name") or ""),
-                "primary_lever": str(plan.get("primary_lever") or "other"),
-                "predictions": list(plan.get("predictions") or []),
-                "disproof_conditions": list(plan.get("disproof_conditions") or []),
-                "capability_mapping": dict(plan.get("capability_mapping") or {}),
-                "preserved_strength": str(battle_analysis.raw.get("winning_mechanism") or ""),
-                "selected_plan_ids": [str(plan.get("id") or "D1")],
-                "overall_assessment": str(battle_analysis.raw.get("action_reason") or ""),
-                "selected_changes": selected_changes,
-                "primary_change": str(plan.get("name") or "paragraph patch"),
-                "expected_effect": str(plan.get("expected_benefit") or ""),
-                "main_risk": str(plan.get("risk_to_winning_mechanism") or ""),
-            }
-            direct_candidate = {
-                "action": "apply_analyzed_plan",
-                "rationale": rationale,
-                "operations": operations,
-            }
-            direct_errors = critique_candidate_contract(
-                rationale,
-                capability_manifest=capability_manifest,
-                selected_plan=plan,
-            )
-            try:
-                patched_text, paragraph_changes = parent_document.apply_patch(operations)
-            except ValueError as exc:
-                direct_errors.append(str(exc))
-                patched_text, paragraph_changes = "", []
-            if not direct_errors:
-                direct_result = validate_improvement(
-                    files={"strategy.md": patched_text}, race=race
-                )
-                if direct_result.ok:
-                    direct_candidate["paragraph_changes"] = paragraph_changes
-                    direct_candidate["files"] = dict(direct_result.files or {})
-                    improvement = EvolImprovement(
-                        analysis=rationale,
-                        files=dict(direct_result.files or {}),
-                        raw=direct_candidate,
-                    )
-                    events.append(
-                        {
-                            "attempt": 0,
-                            "action": "apply_analyzed_plan",
-                            "valid": True,
-                            "llm_calls": 0,
-                            "paragraph_changes": paragraph_changes,
-                        }
-                    )
-                    print(
-                        f"{prefix}OptimizationAgent: applied analyzed paragraph patch locally",
-                        flush=True,
-                    )
-                    return direct_result, improvement, observations, [], events
-                direct_errors.append(direct_result.error)
-            candidate = direct_candidate
-            validation_errors.extend(direct_errors)
+    decision = extract_final_cross_match_decision(battle_analysis)
+    if not decision["hypothesis"] or not str((decision.get("plan") or {}).get("direction") or "").strip():
+        error = "Optimizer requires a Cross-match hypothesis and plan.direction"
+        return ValidationResult(ok=False, error=error), None, observations, [error], events
 
+    knowledge_runs = _knowledge_runs_for_optimizer(decision, observations)
     print(
-        f"{prefix}OptimizationAgent: generating one candidate for "
+        f"{prefix}OptimizationAgent: generating paragraph patches for "
         f"{race}/{strategy_name}",
         flush=True,
     )
+    llm_calls = 0
     for attempt in range(1, MAX_VALIDATION_RETRIES + 2):
+        llm_calls += 1
         action = call_json_llm(
             build_candidate_prompt(
                 strategy_name=strategy_name,
@@ -181,75 +297,46 @@ def run_optimization_agent_loop(
                 candidate=candidate,
                 knowledge_mode=knowledge_mode,
                 capability_manifest=capability_manifest,
+                decision=decision,
+                knowledge_runs=knowledge_runs,
             ),
             model=model,
             is_reasoning=OPTIMIZATION_ENABLE_REASONING,
         )
-        if not isinstance(action, dict):
+        raw = _unwrap_candidate(action)
+        if raw is None:
             error = "OptimizationAgent returned no JSON object"
             validation_errors.append(error)
-            events.append({"attempt": attempt, "action": "invalid", "error": error})
+            events.append({"attempt": attempt, "action": "invalid", "error": error, "llm_calls": llm_calls})
             continue
 
-        name = str(action.get("action") or "").strip()
-        operations = action.get("operations")
-        rationale = (
-            action.get("rationale")
-            if isinstance(action.get("rationale"), dict)
-            else action.get("analysis")
-            if isinstance(action.get("analysis"), dict)
-            else {}
+        normalized, error = _normalize_optimizer_candidate(
+            raw, parent_document=parent_document
         )
-        normalized = {
-            "action": name or "draft_candidate",
-            "rationale": dict(rationale),
-            "operations": operations if isinstance(operations, list) else [],
-        }
-        candidate = normalized
-
-        selected_plan_ids = [
-            str(value).strip()
-            for value in normalized["rationale"].get("selected_plan_ids") or []
-            if str(value).strip()
-        ]
-        if (
-            len(selected_plan_ids) != 1
-            or selected_plan_ids[0] not in valid_plan_ids
-        ):
-            error = (
-                "candidate rationale.selected_plan_ids must contain exactly one of: "
-                f"{', '.join(sorted(valid_plan_ids)) or '(none)'}"
-            )
+        if normalized is None:
+            candidate = raw
             validation_errors.append(error)
             events.append(
-                {"attempt": attempt, "action": name or "draft_candidate", "valid": False, "error": error}
+                {
+                    "attempt": attempt,
+                    "action": str(raw.get("action") or "draft_candidate"),
+                    "valid": False,
+                    "error": error,
+                    "llm_calls": llm_calls,
+                }
             )
             continue
 
+        operations = _patches_to_operations(normalized["patches"])
+        rationale = _candidate_rationale(decision=decision, candidate=normalized)
         critic_errors = critique_candidate_contract(
-            normalized["rationale"],
+            rationale,
             capability_manifest=capability_manifest,
-            selected_plan=plans_by_id.get(selected_plan_ids[0]),
+            selected_plan=None,
         )
-        selected_plan = plans_by_id.get(selected_plan_ids[0]) or {}
-        planned_targets = {
-            str(item.get("target_paragraph_id") or "").strip()
-            for item in selected_plan.get("changes") or []
-            if isinstance(item, dict)
-            and str(item.get("target_paragraph_id") or "").strip()
-        }
-        operation_targets = {
-            str(item.get("target") or "").strip()
-            for item in normalized["operations"]
-            if isinstance(item, dict) and str(item.get("target") or "").strip()
-        }
-        if planned_targets and operation_targets != planned_targets:
-            critic_errors.append(
-                "candidate operations must modify exactly the selected plan paragraphs: "
-                + ", ".join(sorted(planned_targets))
-            )
         if critic_errors:
             error = "; ".join(critic_errors)
+            candidate = normalized
             validation_errors.append(error)
             events.append(
                 {
@@ -257,6 +344,7 @@ def run_optimization_agent_loop(
                     "action": "candidate_critic",
                     "valid": False,
                     "error": error,
+                    "llm_calls": llm_calls,
                 }
             )
             if attempt <= MAX_VALIDATION_RETRIES:
@@ -268,11 +356,10 @@ def run_optimization_agent_loop(
             continue
 
         try:
-            patched_text, paragraph_changes = parent_document.apply_patch(
-                normalized["operations"],
-            )
+            patched_text, paragraph_changes = parent_document.apply_patch(operations)
         except ValueError as exc:
             error = str(exc)
+            candidate = normalized
             validation_errors.append(error)
             events.append(
                 {
@@ -280,18 +367,24 @@ def run_optimization_agent_loop(
                     "action": "apply_strategy_patch",
                     "valid": False,
                     "error": error,
+                    "llm_calls": llm_calls,
                 }
             )
             continue
 
-        normalized["paragraph_changes"] = paragraph_changes
-        normalized["files"] = {"strategy.md": patched_text}
+        payload = {
+            **normalized,
+            "rationale": rationale,
+            "operations": operations,
+            "paragraph_changes": paragraph_changes,
+            "files": {"strategy.md": patched_text},
+        }
+        candidate = payload
         last_improvement = EvolImprovement(
-            analysis=normalized["rationale"],
-            files=normalized["files"],
-            raw=normalized,
+            analysis=rationale,
+            files=payload["files"],
+            raw=payload,
         )
-
         result = validate_improvement(
             files=last_improvement.files,
             race=race,
@@ -299,9 +392,11 @@ def run_optimization_agent_loop(
         events.append(
             {
                 "attempt": attempt,
-                "action": name or "draft_candidate",
+                "action": normalized["action"],
                 "valid": result.ok,
                 "error": result.error,
+                "llm_calls": llm_calls,
+                "paragraph_changes": paragraph_changes,
             }
         )
         if result.ok:

@@ -44,111 +44,58 @@ def render_single_game_analyses(analyses: list[BattleAnalysis]) -> str:
 
 
 def render_batch_match_evidence(analyses: list[BattleAnalysis]) -> str:
-    """Render aggregate metrics and complete deterministic evidence for every match."""
-    if not analyses:
-        return "No completed single-game summaries."
+    """Pass complete single-game summaries through without recropping events."""
+    return render_single_game_analyses(analyses)
 
-    fields = (
-        "result",
-        "duration",
-        "outcome_summary",
-        "timing_checkpoints",
-        "final_metrics",
-        "peak_metrics",
-        "completion_milestones_s",
-        "upgrade_milestones_s",
-        "macro_target_history",
-        "milestone_snapshots",
-        "decision_metrics",
-        "runtime_assessment",
-        "action_space_selection_summary",
-        "evidence_limits",
-    )
 
-    entries: list[tuple[int, BattleAnalysis, dict[str, Any]]] = []
-    index_rows: list[dict[str, Any]] = []
-    for index, analysis in enumerate(analyses, 1):
-        raw = analysis.raw or analysis.__dict__
-        raw = raw if isinstance(raw, dict) else {}
-        result = str(raw.get("result") or "").strip()
-        if not result:
-            result = "Victory" if str(analysis.record_mix).startswith("1W/") else "Defeat"
-        entries.append((index, analysis, raw))
-        index_rows.append(
-            {
-                "match": index,
-                "result": result,
-                "duration": raw.get("duration"),
-                "timing": raw.get("timing_checkpoints") or {},
-                "final": raw.get("final_metrics") or {},
-                "peak": raw.get("peak_metrics") or {},
-                "runtime": (raw.get("runtime_assessment") or {}).get(
-                    "classification", "unknown"
-                ),
-            }
-        )
-
-    def median(values: list[Any]) -> int | float | None:
-        numeric = sorted(
-            float(value)
-            for value in values
-            if isinstance(value, (int, float))
-        )
-        if not numeric:
-            return None
-        middle = len(numeric) // 2
-        value = (
-            numeric[middle]
-            if len(numeric) % 2
-            else (numeric[middle - 1] + numeric[middle]) / 2
-        )
-        return int(value) if value.is_integer() else round(value, 2)
-
-    outcome_groups: dict[str, list[dict[str, Any]]] = {}
-    for row in index_rows:
-        outcome_groups.setdefault(str(row["result"]), []).append(row)
-    aggregate = {
-        "matches": len(index_rows),
-        "outcomes": {key: len(value) for key, value in outcome_groups.items()},
-        "runtime_classes": {
-            value: sum(row["runtime"] == value for row in index_rows)
-            for value in sorted({str(row["runtime"]) for row in index_rows})
-        },
-        "median_by_outcome": {
-            outcome: {
-                "first_attack_command_s": median(
-                    [row["timing"].get("first_attack_command_s") for row in rows]
-                ),
-                "first_enemy_threat_s": median(
-                    [row["timing"].get("first_enemy_threat_s") for row in rows]
-                ),
-                "peak_army_supply": median(
-                    [row["peak"].get("army_supply") for row in rows]
-                ),
-                "final_own_lost_minerals": median(
-                    [row["final"].get("own_lost_minerals") for row in rows]
-                ),
-            }
-            for outcome, rows in outcome_groups.items()
-        },
-    }
-
-    blocks = [
-        "### Batch Aggregate\n" + json_compact_block(aggregate),
-        "### All Match Index\n" + json_compact_block(index_rows),
-    ]
-    for index, analysis, raw in entries:
-        evidence = {
-            key: raw.get(key)
-            for key in fields
-            if key in raw
+def render_knowledge_results(runs: list[dict[str, Any]]) -> str:
+    """Compact knowledge answers for Cross-match Decision, without tool traces."""
+    rows: list[dict[str, Any]] = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        row: dict[str, Any] = {
+            "question_id": str(run.get("question_id") or run.get("id") or "").strip(),
+            "question": str(run.get("question") or "").strip(),
+            "ok": bool(run.get("ok")),
         }
-        blocks.append(
-            f"### Match Evidence {index}\n"
-            f"record_mix={analysis.record_mix}; sample_size={analysis.sample_size}\n"
-            f"{json_compact_block(evidence)}"
-        )
-    return "\n\n".join(blocks)
+        if row["ok"]:
+            row["answer"] = str(run.get("answer") or "").strip()
+        else:
+            row["error"] = str(run.get("error") or "knowledge query failed").strip()
+        rows.append(row)
+    if not rows:
+        return "[]"
+    return json_compact_block(rows)
+
+
+def render_optimizer_decision(decision: dict[str, Any]) -> str:
+    """Compact Cross-match Decision for the Optimizer; no match summaries."""
+    priority = decision.get("priority_problem") or {}
+    if not isinstance(priority, dict):
+        priority = {"problem": str(priority)}
+    plan = decision.get("plan") if isinstance(decision.get("plan"), dict) else {}
+    payload = {
+        "strengths_to_preserve": decision.get("strengths_to_preserve") or [],
+        "priority_problem": {
+            "problem": str(priority.get("problem") or "").strip(),
+            "evidence": list(priority.get("evidence") or [])[:4],
+            "control_class": str(priority.get("control_class") or "").strip(),
+        },
+        "hypothesis": str(decision.get("hypothesis") or "").strip(),
+        "plan": {"direction": str(plan.get("direction") or "").strip()},
+    }
+    return json_compact_block(payload)
+
+
+def render_discovery_findings(discovery: dict[str, Any]) -> str:
+    """Pass Round 1 findings to Round 2 as compact JSON, not scattered prose."""
+    payload = {
+        "strengths": discovery.get("strengths") or [],
+        "weaknesses": discovery.get("weaknesses") or [],
+        "unknowns": discovery.get("unknowns") or [],
+    }
+    return json_compact_block(payload)
 
 
 def render_sc2_knowledge(observations: list[ToolObservation]) -> str:
@@ -173,8 +120,6 @@ def render_sc2_knowledge(observations: list[ToolObservation]) -> str:
             header += f" problems={problem_ids}"
         if plan_ids:
             header += f" plans={plan_ids}"
-        # Pass through complete verified answers. Failed runs contribute only
-        # their error so fallback dumps cannot masquerade as usable knowledge.
         if observation.ok:
             body = observation.summary or json_block(observation.result)
         else:
@@ -188,6 +133,9 @@ __all__ = [
     "json_compact_block",
     "render_battle_analysis",
     "render_batch_match_evidence",
+    "render_discovery_findings",
+    "render_knowledge_results",
+    "render_optimizer_decision",
     "render_sc2_knowledge",
     "render_single_game_analyses",
     "render_skill_context",

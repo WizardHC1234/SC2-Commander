@@ -94,8 +94,6 @@ class StrategyDocument:
     def apply_patch(
         self,
         operations: Any,
-        *,
-        max_detail_sections: int = 3,
     ) -> tuple[str, list[dict[str, str]]]:
         if not isinstance(operations, list) or not operations:
             raise ValueError("candidate operations must be a non-empty list")
@@ -148,11 +146,6 @@ class StrategyDocument:
                 raise ValueError(f"paragraph {target!r} replacement is unchanged")
             replacements[target] = value
             changes.append({"op": operation, "target": target})
-
-        if len(replacements) > max_detail_sections:
-            raise ValueError(
-                f"candidate may modify at most {max_detail_sections} Detail paragraphs"
-            )
 
         patched = StrategyDocument(
             summary=summary_replacement or self.summary,

@@ -13,15 +13,20 @@ from evol_agent.analysis.record_reader import (
     is_completed_match_record,
 )
 from evol_agent.core import config
-from evol_agent.core.analysis_agent_loop import _normalize_batch_analysis
+from evol_agent.core.analysis_agent_loop import (
+    _normalize_batch_analysis,
+    _normalize_cross_match_decision,
+    _normalize_cross_match_discovery,
+)
 from evol_agent.core.checkpoint import EvolCheckpoint
 from evol_agent.core.candidate_critic import critique_candidate_contract
 from evol_agent.core.capabilities import build_executor_capability_manifest
 from evol_agent.core.loop_helpers import normalize_strategy_contract
 from evol_agent.core.optimization_agent_loop import run_optimization_agent_loop
 from evol_agent.core.prompts import (
-    build_batch_analysis_prompt,
     build_candidate_prompt,
+    build_cross_match_decision_prompt,
+    build_cross_match_discovery_prompt,
 )
 from evol_agent.core.types import BattleAnalysis
 from evol_agent.optimization.snapshot import save_snapshot
@@ -273,7 +278,7 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
             raw={"outcome_summary": "MATCH_RAW_LOSS_MARKER"},
         ),
     ]
-    batch_prompt = build_batch_analysis_prompt(
+    batch_prompt = build_cross_match_discovery_prompt(
         strategy_name="tank",
         race="terran",
         single_game_analyses=analyses,
@@ -288,6 +293,14 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
         record_mix="1W/1L",
         raw={
             "winning_mechanism": "gathered push",
+            "hypothesis": "regroup happens too late to convert the first fight",
+            "priority_problem": {
+                "problem": "late regroup",
+                "evidence": ["Game 2 @ 430s"],
+                "control_class": "strategy_fixable",
+            },
+            "plan": {"direction": "improve regroup timing"},
+            "strengths_to_preserve": [{"pattern": "gathered push", "evidence": ["Game 1 @ 180s"]}],
             "problems": [{"problem_id": "P1", "problem": "late regroup"}],
             "candidate_plans": [
                 {
@@ -312,36 +325,28 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
 
     assert "MATCH_RAW_WIN_MARKER" in batch_prompt
     assert "MATCH_RAW_LOSS_MARKER" in batch_prompt
-    assert '"action": "analyze_batch"' in batch_prompt
-    assert '"problems"' in batch_prompt
-    assert '"candidate_plans"' in batch_prompt
-    assert "zero to four focused, non-overlapping knowledge_questions" in batch_prompt
-    assert "requested command is not proof" in batch_prompt.lower()
-    assert "likely effect on match outcomes" in batch_prompt
-    assert "strengthening the existing core through relevant upgrades" in batch_prompt
-    assert "Static defenses are not a default" in batch_prompt
-    assert "force-readiness curve against actual enemy pressure" in batch_prompt
-    assert "commander_execution, runtime_execution, or observation_limited" in batch_prompt
-    assert "Unit composition and upgrade changes are first-class plans" in batch_prompt
-    assert "experiment_evidence when present" in batch_prompt
-    assert "unable to survive until that power stage" in batch_prompt
-    assert "full dependency chain, not from final costs alone" in batch_prompt
-    assert "cannot plausibly complete before" in batch_prompt
-    assert '"evidence_motivation"' in batch_prompt
-    assert '"decision_use"' in batch_prompt
+    assert "Cross-Match Discovery Agent" in batch_prompt
+    assert '"action": "discover_batch"' in batch_prompt
+    assert '"strengths"' in batch_prompt
+    assert '"weaknesses"' in batch_prompt
+    assert '"unknowns"' in batch_prompt
+    assert "Do not return next_action, candidate_plans, candidate_rule, or target_paragraph_id." in batch_prompt
+    schema = batch_prompt.split("Return one JSON object only:")[1]
+    assert "candidate_plans" not in schema
+    assert "target_paragraph_id" not in schema
+    assert "candidate_rule" not in schema
+    assert "query_knowledge" not in batch_prompt
+    assert "It is valid to return no knowledge questions" in batch_prompt or "empty list is valid" in batch_prompt
     assert "Stimpack" not in batch_prompt
     assert '"action": "draft_candidate"' in candidate_prompt
     assert "gathered push" in candidate_prompt
-    assert "Select exactly one self-contained candidate plan" in candidate_prompt
-    assert "Multiple dependent deterministic changes are allowed" in candidate_prompt
-    assert "credible path through economy, production capacity" in candidate_prompt
-    assert "bounded information-conditioned branch" in candidate_prompt
-    assert "sole optimization objective is higher expected match win rate" in candidate_prompt
-    assert "Add static defense only when" in candidate_prompt
-    assert "survival path before its main power stage" in candidate_prompt
-    assert "candidate's critical path" in candidate_prompt
-    assert '"hypothesis"' in candidate_prompt
-    assert '"capability_mapping"' in candidate_prompt
+    assert "improve regroup timing" in candidate_prompt
+    assert "Select exactly one self-contained candidate plan" not in candidate_prompt
+    assert "selected_plan_ids" not in candidate_prompt
+    assert "There is no fixed maximum number of paragraph patches" in candidate_prompt
+    assert "Do not modify # Summary" in candidate_prompt
+    assert "why_required" in candidate_prompt
+    assert "Independent factual match summaries" not in candidate_prompt
 
 
 def test_match_summary_prompt_keeps_batch_stable_prefix_before_record_data() -> None:
@@ -385,64 +390,159 @@ def test_strategy_contract_normalizes_legacy_checkpoints() -> None:
     }
 
 
-def test_batch_analysis_keeps_one_plan_and_only_linked_knowledge_questions() -> None:
-    payload, error = _normalize_batch_analysis(
+def test_discovery_does_not_require_a_plan() -> None:
+    payload, error = _normalize_cross_match_discovery(
         {
-            "strategy_contract": {"identity": "two-base tank timing"},
-            "winning_mechanism": "a concentrated timing push",
-            "wins_to_preserve": [{"pattern": "gather first", "evidence": ["Match 1"]}],
-            "problems": [
+            "strengths": [
+                {"pattern": "gathered push converts when the gate is reached", "evidence": ["Game 1 @ 180s"]}
+            ],
+            "weaknesses": [
                 {
-                    "problem": "the main force repeatedly attacks without enough preparation",
-                    "evidence": ["Match 2 before the first attack"],
-                    "strategy_fixable": True,
+                    "pattern": "first frontal fights lose more army",
+                    "evidence": ["Game 2 @ 430s", "Game 5 @ 510s"],
+                    "confidence": "high",
                 }
             ],
-            "candidate_plans": [
+            "unknowns": [
                 {
-                    "name": f"fixed correction {index}",
-                    "addresses_problem_ids": ["P1"],
-                    "changes": [
-                        {
-                            "baseline_rule": f"old fixed rule {index}",
-                            "candidate_rule": f"new fixed rule {index}",
-                            "why_required": "supports the complete force timing",
-                        }
-                    ],
-                    "risk_to_winning_mechanism": "could delay the timing",
+                    "unknown": "whether tank count is already near production cap",
+                    "why_it_matters": "it changes whether more factories are feasible",
+                    "evidence": ["Game 2 @ 430s"],
                 }
-                for index in range(3)
             ],
             "knowledge_questions": [
                 {
-                    "question": f"What effects distinguish unit {index}?",
-                    "evidence_motivation": f"Match {index + 1} exposed a missing fact",
-                    "decision_use": f"select or size plan {(index % 3) + 1}",
-                    "entities": [
-                        "Marine",
-                        "Siege Tank",
-                        "Barracks",
-                        "Factory",
-                        "Combat Shield",
-                    ][index:index + 1],
-                    "needs": ["effects"],
-                    "plan_ids": [f"D{(index % 3) + 1}"],
+                    "question": "What are Siege Tank production requirements?",
+                    "entities": ["Siege Tank"],
+                    "needs": ["requirements"],
                 }
-                for index in range(5)
             ],
         },
-        strategy_name="tank",
         knowledge_mode="enabled",
     )
 
     assert error == ""
     assert payload is not None
-    assert payload["primary_problem"]["problem_id"] == "P1"
-    assert len(payload["candidate_plans"]) == 1
-    assert len(payload["optimization_targets"]) == 1
-    assert len(payload["knowledge_questions"]) == 2
-    assert all(question["problem_ids"] == ["P1"] for question in payload["knowledge_questions"])
-    assert all(question["plan_ids"] for question in payload["knowledge_questions"])
+    assert "candidate_plans" not in payload
+    assert "target_paragraph_id" not in payload
+    assert "candidate_rule" not in payload
+    assert "plan_ids" not in payload["knowledge_questions"][0]
+    assert payload["knowledge_questions"][0]["id"] == "Q1"
+
+
+def test_discovery_allows_empty_knowledge_questions() -> None:
+    payload, error = _normalize_cross_match_discovery(
+        {
+            "strengths": [],
+            "weaknesses": [],
+            "unknowns": [],
+            "knowledge_questions": [],
+        },
+        knowledge_mode="enabled",
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["knowledge_questions"] == []
+
+
+def test_decision_propose_requires_hypothesis_and_plan_direction() -> None:
+    payload, error = _normalize_cross_match_decision(
+        {
+            "next_action": "propose_strategy_patch",
+            "action_reason": "the first fight is repeatedly too weak",
+            "strengths_to_preserve": [
+                {"pattern": "gathered push converts when the gate is reached", "evidence": ["Game 1 @ 180s"]}
+            ],
+            "priority_problem": {
+                "problem": "the first engagement is too weak",
+                "evidence": ["Game 2 @ 430s", "Game 5 @ 510s"],
+                "control_class": "strategy_fixable",
+            },
+            "hypothesis": "an earlier factory increases completed tanks before contact",
+            "plan": {"direction": "Prioritize a second Factory before marine scaling."},
+        },
+        strategy_name="tank",
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["priority_problem"]["problem"] == "the first engagement is too weak"
+    assert payload["hypothesis"].startswith("an earlier factory")
+    assert payload["plan"]["direction"].startswith("Prioritize a second Factory")
+    assert payload["candidate_plans"][0]["id"] == "D1"
+    assert payload["candidate_plans"][0]["changes"] == []
+    assert payload["knowledge_questions"] == []
+
+
+def test_decision_rejects_query_knowledge() -> None:
+    payload, error = _normalize_cross_match_decision(
+        {
+            "next_action": "query_knowledge",
+            "action_reason": "need more facts",
+        },
+        strategy_name="tank",
+    )
+
+    assert payload is None
+    assert "next_action must be" in error
+
+
+def test_decision_priority_problem_must_be_one_object() -> None:
+    payload, error = _normalize_cross_match_decision(
+        {
+            "next_action": "request_more_matches",
+            "action_reason": "two competing explanations remain",
+            "priority_problem": [
+                {"problem": "late tanks", "evidence": ["Game 2 @ 430s"]},
+                {"problem": "late attack", "evidence": ["Game 5 @ 510s"]},
+            ],
+        },
+        strategy_name="tank",
+    )
+
+    assert payload is None
+    assert "one object" in error
+
+
+def test_propose_runtime_problem_is_coerced_to_inspect_runtime() -> None:
+    payload, error = _normalize_cross_match_decision(
+        {
+            "next_action": "propose_strategy_patch",
+            "action_reason": "movement commands fail",
+            "priority_problem": {
+                "problem": "group movement is rejected",
+                "evidence": ["Game 1 @ 200s"],
+                "control_class": "runtime_execution",
+            },
+            "hypothesis": "rewrite the attack paragraph",
+            "plan": {"direction": "change the attack gate"},
+        },
+        strategy_name="tank",
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["next_action"] == "inspect_runtime"
+    assert payload["plan"] is None
+    assert payload["candidate_plans"] == []
+
+
+def test_request_more_matches_does_not_need_hypothesis() -> None:
+    payload, error = _normalize_cross_match_decision(
+        {
+            "next_action": "request_more_matches",
+            "action_reason": "the current batch cannot distinguish two explanations",
+        },
+        strategy_name="tank",
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["next_action"] == "request_more_matches"
+    assert payload["hypothesis"] == ""
+    assert payload["plan"] is None
+    assert payload["candidate_plans"] == []
 
 
 def test_candidate_semantics_are_not_hard_coded_in_basic_validation() -> None:
@@ -514,12 +614,10 @@ def test_batch_analysis_can_route_runtime_work_without_a_candidate() -> None:
         {
             "next_action": "inspect_runtime",
             "action_reason": "most losses contain rejected army commands",
-            "problems": [
+            "weaknesses": [
                 {
-                    "problem": "Sharpy repeatedly rejects group movement",
-                    "control_class": "runtime_execution",
-                    "strategy_fixable": False,
-                    "evidence": ["Match 1", "Match 2"],
+                    "pattern": "Sharpy repeatedly rejects group movement",
+                    "evidence": ["Game 1 @ 200s", "Game 2 @ 240s"],
                 }
             ],
             "candidate_plans": [],
@@ -534,8 +632,10 @@ def test_batch_analysis_can_route_runtime_work_without_a_candidate() -> None:
     assert payload["candidate_plans"] == []
 
 
-def test_complete_analysis_plan_is_applied_without_second_llm_call(monkeypatch) -> None:
+def test_optimizer_always_calls_llm_for_paragraph_patches(monkeypatch) -> None:
     manifest = build_executor_capability_manifest("terran")
+    parent = StrategyDocument.parse(VALID_STRATEGY)
+    gate = next(item for item in parent.details if item.id == "main_attack_gate")
     analysis = BattleAnalysis(
         strategy_name="tank",
         race="terran",
@@ -543,41 +643,38 @@ def test_complete_analysis_plan_is_applied_without_second_llm_call(monkeypatch) 
         record_mix="1W/1L",
         raw={
             "next_action": "propose_strategy_patch",
-            "action_reason": "the attack gate is repeatedly late",
-            "winning_mechanism": "one gathered timing attack",
-            "candidate_plans": [
-                {
-                    "id": "D1",
-                    "name": "lower the gathered attack threshold",
-                    "hypothesis": "an earlier gathered force converts before scaling",
-                    "primary_lever": "attack_timing",
-                    "addresses_problem_ids": ["P1"],
-                    "changes": [
-                        {
-                            "target_paragraph_id": "main_attack_gate",
-                            "candidate_rule": "Gather 40 Marines and 8 Siege Tanks before attacking.",
-                            "why_required": "the old force arrives after enemy scaling",
-                        }
-                    ],
-                    "predictions": ["the first attack command occurs earlier"],
-                    "disproof_conditions": ["attack timing does not improve"],
-                    "capability_mapping": {
-                        "macro_actions": ["train_marine", "train_siege_tank"],
-                        "army_controls": ["hold_or_gather", "push_or_assault"],
-                        "unsupported_dependencies": [],
-                    },
-                    "expected_benefit": "an earlier first engagement",
-                    "risk_to_winning_mechanism": "the force may be too small",
-                }
+            "hypothesis": "an earlier gathered force converts before scaling",
+            "priority_problem": {
+                "problem": "the attack gate is repeatedly late",
+                "evidence": ["Game 2 @ 430s"],
+                "control_class": "strategy_fixable",
+            },
+            "plan": {"direction": "lower the gathered attack threshold"},
+            "strengths_to_preserve": [
+                {"pattern": "one gathered timing attack", "evidence": ["Game 1 @ 180s"]}
             ],
         },
     )
+    prompts: list[str] = []
 
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("a complete analyzed plan must not call the optimizer LLM")
+    def fake_llm(prompt: str, **kwargs):
+        prompts.append(prompt)
+        return {
+            "action": "draft_candidate",
+            "patches": [
+                {
+                    "target": "main_attack_gate",
+                    "expected_old_hash": paragraph_hash(gate.value),
+                    "replacement": "Gather 40 Marines and 8 Siege Tanks before attacking.",
+                    "why_required": "This paragraph defines the readiness rule being tested.",
+                }
+            ],
+            "expected_effect": "the first attack command occurs earlier",
+            "main_risk": "the force may be too small",
+        }
 
     monkeypatch.setattr(
-        "evol_agent.core.optimization_agent_loop.call_json_llm", fail_if_called
+        "evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm
     )
     result, improvement, _observations, errors, events = run_optimization_agent_loop(
         strategy_name="tank",
@@ -589,10 +686,12 @@ def test_complete_analysis_plan_is_applied_without_second_llm_call(monkeypatch) 
     )
 
     assert result.ok
-    assert errors == []
     assert improvement is not None
+    assert len(prompts) == 1
+    assert events[0]["llm_calls"] == 1
     assert "Gather 40 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
-    assert events[0]["llm_calls"] == 0
+    assert improvement.analysis["hypothesis"] == "an earlier gathered force converts before scaling"
+    assert improvement.analysis["selected_plan_ids"] == ["D1"]
 
 def test_executor_manifest_and_candidate_critic_share_action_vocabulary() -> None:
     manifest = build_executor_capability_manifest("terran")
