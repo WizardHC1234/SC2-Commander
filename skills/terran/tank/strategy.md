@@ -4,11 +4,9 @@ A two-base Marine-Siege Tank strategy focused on a concentrated mid-game push. E
 
 # Details
 
-* Opening and Economy: Grow toward approximately 44 living SCVs and replace losses, but do not let Marine scaling delay the second base or the Factory-Siege Tank production chain.
-* Expansion: Treat the second Command Center as a mandatory opening priority and keep pursuing it until two active mineral-bearing bases are established. Remain on two bases until the main attack begins, then start the third Command Center.
-* Gas: Build exactly 2 Refineries on the first base. Until the second Command Center becomes active, the Refinery target is 2; afterward raise the target to a total of 4.
+* Opening and Economy: Build a total of 4 Refineries by taking both gas geysers at each of the first two bases, and grow to approximately 44 living SCVs. Replace lost SCVs as needed while preserving resources for Marine and Siege Tank production.
+* Expansion: Build an early second Command Center and remain on two bases until the main attack begins. Start the third Command Center after the attack has begun.
 * Production: Reach absolute counts of 3 Barracks and 2 Factories. Continuously produce Marines and Siege Tanks while maintaining the resources and supply required for both unit types.
-* Pre-Attack Production Priority: Before the first planned attack, prevent immediate supply blocks first, then prioritize the second Command Center, missing Factories and Factory Tech Labs, and continuous Siege Tank production ahead of additional Marine and SCV spending. Keep all currently applicable strategy targets active; this ordering controls resource priority only.
 * Technology: Equip 2 Barracks with Reactors, 1 Barracks with a Tech Lab, and both Factories with Tech Labs. Research Combat Shield. Keep the tech path on Barracks, Factories, and Combat Shield for the Marine-Siege Tank core.
 * Scouting: Send one early SCV to scout the enemy main base when the route is reasonably safe. Before the planned attack, update the enemy natural or intended first objective when its information is missing or stale; after an objective is cleared, scout the next relevant enemy base or neutral mineral expansion only when needed.
 * Scans: Upgrade useful Command Centers to Orbital Commands and request a Scanner Sweep when missing vision affects the attack, when necessary ground scouting is unsafe, or when cloaked or burrowed enemies require detection. Prefer scanning in parallel with a ready attack rather than holding the push for vision alone.

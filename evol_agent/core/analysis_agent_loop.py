@@ -11,7 +11,6 @@ from .config import (
     DEFAULT_ANALYSIS_MODEL,
     MAX_CONCURRENT_MATCH_SUBAGENTS,
     MAX_KNOWLEDGE_QUERIES,
-    MIN_KNOWLEDGE_QUERIES,
 )
 from .llm import call_json_llm
 from .loop_helpers import (
@@ -23,7 +22,10 @@ from .loop_helpers import (
     normalize_strategy_contract,
 )
 from .match_summary import run_fixed_match_summary
-from .prompts import build_batch_analysis_prompt
+from .prompts import (
+    build_cross_match_decision_prompt,
+    build_cross_match_discovery_prompt,
+)
 from .types import AnalysisPipelineResult, BattleAnalysis, GameDigest, ToolObservation
 from ..sc2_data_agent import (
     build_knowledge_query,
@@ -33,8 +35,35 @@ from ..sc2_data_agent import (
 )
 
 
-_ANALYSIS_ATTEMPTS = 3
+_ANALYSIS_ATTEMPTS = 2
 _KNOWLEDGE_NEEDS = {"effects", "synergy", "counters", "requirements"}
+_FINAL_NEXT_ACTIONS = frozenset(
+    {
+        "propose_strategy_patch",
+        "request_more_matches",
+        "inspect_runtime",
+        "stop",
+    }
+)
+_CONTROL_CLASSES = frozenset(
+    {
+        "strategy_fixable",
+        "commander_execution",
+        "runtime_execution",
+        "observation_limited",
+    }
+)
+_ASSESSMENTS = frozenset(
+    {
+        "plausible_primary",
+        "plausible",
+        "contributor_not_sufficient",
+        "weakly_supported",
+        "contradicted",
+        "runtime_likely",
+    }
+)
+_CONFIDENCE = frozenset({"low", "medium", "high"})
 
 
 def _clean_strings(value: Any, *, limit: int | None = None) -> list[str]:
@@ -44,212 +73,517 @@ def _clean_strings(value: Any, *, limit: int | None = None) -> list[str]:
     return result[:limit] if limit is not None else result
 
 
+def _unwrap_analysis(result: Any) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    raw = result.get("analysis") if isinstance(result.get("analysis"), dict) else result
+    return raw if isinstance(raw, dict) else None
+
+
+def _normalize_pattern_items(raw: Any, *, limit: int = 3) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in raw or []:
+        if isinstance(item, str):
+            pattern = item.strip()
+            evidence: list[str] = []
+            extra: dict[str, Any] = {}
+        elif isinstance(item, dict):
+            pattern = str(item.get("pattern") or item.get("problem") or "").strip()
+            evidence = _clean_strings(item.get("evidence"), limit=4)
+            extra = dict(item)
+        else:
+            continue
+        if not pattern:
+            continue
+        row = {"pattern": pattern, "evidence": evidence}
+        confidence = str(extra.get("confidence") or "").strip().lower()
+        if confidence in _CONFIDENCE:
+            row["confidence"] = confidence
+        items.append(row)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _normalize_unknowns(raw: Any, *, limit: int = 3) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in raw or []:
+        if isinstance(item, str):
+            unknown = item.strip()
+            why = ""
+            evidence: list[str] = []
+        elif isinstance(item, dict):
+            unknown = str(item.get("unknown") or item.get("pattern") or "").strip()
+            why = str(item.get("why_it_matters") or "").strip()
+            evidence = _clean_strings(item.get("evidence"), limit=4)
+        else:
+            continue
+        if not unknown:
+            continue
+        items.append({"unknown": unknown, "why_it_matters": why, "evidence": evidence})
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _normalize_knowledge_questions(raw: Any) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        entities = _clean_strings(item.get("entities"), limit=6)
+        needs = [
+            need.lower()
+            for need in _clean_strings(item.get("needs"), limit=4)
+            if need.lower() in _KNOWLEDGE_NEEDS
+        ]
+        if not question or not entities or not needs:
+            continue
+        questions.append(
+            {
+                "id": f"Q{len(questions) + 1}",
+                "question": question,
+                "entities": entities,
+                "needs": list(dict.fromkeys(needs)),
+            }
+        )
+        if len(questions) >= MAX_KNOWLEDGE_QUERIES:
+            break
+    return questions
+
+
+def _normalize_cross_match_discovery(
+    raw: dict[str, Any],
+    *,
+    knowledge_mode: str,
+) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "discovery returned no JSON object"
+    strengths = _normalize_pattern_items(raw.get("strengths"))
+    weaknesses = _normalize_pattern_items(raw.get("weaknesses"))
+    for item in weaknesses:
+        if "confidence" not in item:
+            item["confidence"] = "medium"
+    unknowns = _normalize_unknowns(raw.get("unknowns"))
+    questions = (
+        _normalize_knowledge_questions(raw.get("knowledge_questions"))
+        if knowledge_mode == "enabled"
+        else []
+    )
+    return (
+        {
+            "strengths": strengths,
+            "weaknesses": weaknesses,
+            "unknowns": unknowns,
+            "knowledge_questions": questions,
+        },
+        "",
+    )
+
+
+def _normalize_priority_problem(raw: Any) -> tuple[dict[str, Any] | None, str]:
+    if isinstance(raw, list):
+        return None, "priority_problem must be one object, not a list"
+    if isinstance(raw, str):
+        problem = raw.strip()
+        raw = {"problem": problem} if problem else {}
+    if not raw:
+        return {}, ""
+    if not isinstance(raw, dict):
+        return None, "priority_problem must be an object"
+    problem = str(raw.get("problem") or raw.get("pattern") or "").strip()
+    if not problem:
+        return {}, ""
+    control_class = str(raw.get("control_class") or "strategy_fixable").strip().lower()
+    if control_class not in _CONTROL_CLASSES:
+        control_class = "strategy_fixable"
+    confidence = str(raw.get("confidence") or "medium").strip().lower()
+    if confidence not in _CONFIDENCE:
+        confidence = "medium"
+    return (
+        {
+            "problem_id": "P1",
+            "problem": problem,
+            "evidence": _clean_strings(raw.get("evidence"), limit=4),
+            "control_class": control_class,
+            "strategy_fixable": control_class == "strategy_fixable",
+            "confidence": confidence,
+            "consequence": str(raw.get("consequence") or "").strip(),
+        },
+        "",
+    )
+
+
+def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
+    if raw in (None, "", []):
+        return None, ""
+    if isinstance(raw, str):
+        direction = raw.strip()
+        preserve: list[str] = []
+    elif isinstance(raw, dict):
+        direction = str(
+            raw.get("direction") or raw.get("name") or raw.get("plan") or ""
+        ).strip()
+        preserve = _clean_strings(raw.get("preserve"), limit=5)
+    else:
+        return None, "plan must be an object with direction"
+    if not direction:
+        return None, "plan.direction is required"
+    return {"direction": direction, "preserve": preserve}, ""
+
+
+def _normalize_mechanism_prediction(
+    raw: Any,
+) -> tuple[dict[str, str] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "mechanism_prediction must be an object"
+    fields = (
+        "expected_change",
+        "minimum_material_change",
+        "outcome_prediction",
+        "disproof_condition",
+    )
+    normalized = {field: str(raw.get(field) or "").strip() for field in fields}
+    missing = [field for field, value in normalized.items() if not value]
+    if missing:
+        return None, (
+            "mechanism_prediction requires " + ", ".join(missing)
+        )
+    return normalized, ""
+
+
+def _normalize_considered_explanations(raw: Any) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return items
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        explanation = str(item.get("explanation") or item.get("hypothesis") or "").strip()
+        if not explanation:
+            continue
+        control_class = str(item.get("control_class") or "strategy_fixable").strip().lower()
+        if control_class not in _CONTROL_CLASSES:
+            control_class = "strategy_fixable"
+        assessment = str(item.get("assessment") or "plausible").strip().lower()
+        if assessment not in _ASSESSMENTS:
+            assessment = "plausible"
+        items.append(
+            {
+                "explanation": explanation,
+                "supporting_evidence": _clean_strings(
+                    item.get("supporting_evidence") or item.get("evidence"),
+                    limit=4,
+                ),
+                "counterevidence": _clean_strings(item.get("counterevidence"), limit=4),
+                "control_class": control_class,
+                "assessment": assessment,
+            }
+        )
+        if len(items) >= 4:
+            break
+    return items
+
+
+def _adapt_decision_for_optimizer(
+    decision: dict[str, Any],
+    *,
+    strategy_name: str,
+) -> dict[str, Any]:
+    """Map the simplified Decision schema onto the current Optimizer payload."""
+    strengths = decision.get("strengths_to_preserve") or []
+    priority = decision.get("priority_problem") or {}
+    hypothesis = str(decision.get("hypothesis") or "").strip()
+    plan = decision.get("plan") if isinstance(decision.get("plan"), dict) else None
+    next_action = str(decision.get("next_action") or "")
+    payload = dict(decision)
+    payload["wins_to_preserve"] = [
+        {"pattern": item["pattern"], "evidence": item["evidence"], "why": ""}
+        for item in strengths
+        if isinstance(item, dict)
+    ]
+    payload["problems"] = [priority] if priority.get("problem") else []
+    payload["primary_problem"] = priority
+    payload["winning_mechanism"] = (
+        strengths[0]["pattern"] if strengths and isinstance(strengths[0], dict) else ""
+    )
+    payload["knowledge_questions"] = []
+    plans: list[dict[str, Any]] = []
+    if next_action == "propose_strategy_patch" and plan:
+        plans.append(
+            {
+                "id": "D1",
+                "name": str(plan.get("direction") or ""),
+                "hypothesis": hypothesis,
+                "primary_lever": "other",
+                "addresses_problem_ids": ["P1"],
+                "changes": [],
+                "predictions": [
+                    str(
+                        (decision.get("mechanism_prediction") or {}).get(
+                            "outcome_prediction"
+                        )
+                        or ""
+                    )
+                ],
+                "disproof_conditions": [
+                    str(
+                        (decision.get("mechanism_prediction") or {}).get(
+                            "disproof_condition"
+                        )
+                        or ""
+                    )
+                ],
+                "capability_mapping": {},
+                "expected_benefit": "",
+                "risk_to_winning_mechanism": "",
+                "preserve": list(plan.get("preserve") or []),
+            }
+        )
+    payload["candidate_plans"] = plans
+    payload["optimization_targets"] = [
+        {
+            "plan_id": item["id"],
+            "addresses_problem_ids": item["addresses_problem_ids"],
+            "strategy_change": item["name"],
+            "changes": item["changes"],
+        }
+        for item in plans
+    ]
+    payload["repeated_failures"] = [
+        {
+            "problem_id": priority.get("problem_id") or "P1",
+            "cause": priority.get("problem") or "",
+            "consequence": priority.get("consequence") or "",
+            "seen_in": priority.get("evidence") or [],
+            "strategy_fixable": bool(priority.get("strategy_fixable")),
+            "control_class": priority.get("control_class") or "",
+            "confidence": priority.get("confidence") or "medium",
+        }
+    ] if priority.get("problem") else []
+    payload["strategy_name"] = strategy_name
+    return payload
+
+
+def _normalize_cross_match_decision(
+    raw: dict[str, Any],
+    *,
+    strategy_name: str,
+) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "decision returned no JSON object"
+    next_action = str(raw.get("next_action") or "").strip()
+    if next_action not in _FINAL_NEXT_ACTIONS:
+        return None, (
+            "next_action must be propose_strategy_patch, request_more_matches, "
+            "inspect_runtime, or stop"
+        )
+    action_reason = str(raw.get("action_reason") or "").strip()
+    strengths = _normalize_pattern_items(
+        raw.get("strengths_to_preserve") or raw.get("strengths")
+    )
+    priority, priority_error = _normalize_priority_problem(raw.get("priority_problem"))
+    if priority_error:
+        return None, priority_error
+    hypothesis = str(raw.get("hypothesis") or "").strip()
+    plan, plan_error = _normalize_plan(raw.get("plan"))
+    mechanism_prediction, mechanism_error = _normalize_mechanism_prediction(
+        raw.get("mechanism_prediction")
+    )
+    if plan_error and next_action == "propose_strategy_patch":
+        return None, plan_error
+
+    if next_action == "propose_strategy_patch":
+        control = str((priority or {}).get("control_class") or "")
+        if control in {"runtime_execution", "commander_execution"}:
+            next_action = "inspect_runtime"
+            action_reason = action_reason or (
+                "Priority problem is an execution defect, not a strategy.md change."
+            )
+            plan = None
+            hypothesis = ""
+        elif not priority or not priority.get("problem") or not priority.get("evidence"):
+            return None, "propose_strategy_patch requires priority_problem with evidence"
+        elif not priority.get("strategy_fixable"):
+            return None, "propose_strategy_patch requires control_class=strategy_fixable"
+        elif not hypothesis:
+            return None, "propose_strategy_patch requires hypothesis"
+        elif not plan:
+            return None, "propose_strategy_patch requires plan.direction"
+        elif mechanism_error or not mechanism_prediction:
+            return None, mechanism_error or (
+                "propose_strategy_patch requires mechanism_prediction"
+            )
+    elif next_action in {"request_more_matches", "stop"}:
+        if not action_reason:
+            return None, f"{next_action} requires action_reason"
+        plan = None
+    else:
+        plan = None
+
+    decision = {
+        "strengths_to_preserve": strengths,
+        "priority_problem": priority or {},
+        "hypothesis": hypothesis,
+        "mechanism_prediction": mechanism_prediction or {},
+        "next_action": next_action,
+        "action_reason": action_reason,
+        "considered_explanations": _normalize_considered_explanations(
+            raw.get("considered_explanations")
+        ),
+        "plan": plan,
+        "evidence_limits": _clean_strings(raw.get("evidence_limits")),
+        "strategy_contract": normalize_strategy_contract(
+            raw.get("strategy_contract"), strategy_name=strategy_name
+        ),
+    }
+    return _adapt_decision_for_optimizer(decision, strategy_name=strategy_name), ""
+
+
 def _normalize_batch_analysis(
     raw: dict[str, Any],
     *,
     strategy_name: str,
-    knowledge_mode: str,
+    knowledge_mode: str = "enabled",
+    allow_query_knowledge: bool = False,
 ) -> tuple[dict[str, Any] | None, str]:
-    """Normalize the intentionally small batch-analysis schema.
+    """Compatibility wrapper: final schema is the Decision payload."""
+    del knowledge_mode, allow_query_knowledge
+    return _normalize_cross_match_decision(raw, strategy_name=strategy_name)
 
-    Optional bookkeeping is repaired locally. At least one strategy-fixable
-    problem, several coherent deterministic plans, and five plan-linked
-    knowledge questions are required in knowledge-enabled runs. Semantic
-    question quality is guided by the prompt rather than rejected here.
-    """
-    payload = dict(raw)
-    payload["strategy_contract"] = normalize_strategy_contract(
-        payload.get("strategy_contract"), strategy_name=strategy_name
+
+def _run_analysis_json(
+    *,
+    build_prompt,
+    model: str,
+    normalizer,
+    events: list[dict[str, Any]],
+    label: str,
+) -> tuple[dict[str, Any] | None, list[str], int]:
+    schema_errors: list[str] = []
+    payload: dict[str, Any] | None = None
+    calls = 0
+    for attempt in range(1, _ANALYSIS_ATTEMPTS + 1):
+        calls += 1
+        result = call_json_llm(
+            build_prompt(schema_errors),
+            model=model,
+            is_reasoning=ANALYSIS_ENABLE_REASONING,
+        )
+        raw = _unwrap_analysis(result)
+        if raw is None:
+            error = f"{label} returned no analysis object"
+            normalized = None
+        else:
+            normalized, error = normalizer(raw)
+        events.append({"attempt": attempt, "action": label, "error": error})
+        if normalized is not None:
+            payload = normalized
+            break
+        schema_errors.append(error)
+    return payload, schema_errors, calls
+
+
+def _run_cross_match_discovery(
+    *,
+    strategy_name: str,
+    race: str,
+    summaries: list[BattleAnalysis],
+    skill_texts: dict[str, str],
+    knowledge_mode: str,
+    model: str,
+    prior_experiences: list[Any] | None,
+    events: list[dict[str, Any]],
+    prefix: str,
+) -> tuple[dict[str, Any] | None, list[str], int]:
+    print(
+        f"{prefix}AnalysisAgent: cross-match discovery over {len(summaries)} match summaries",
+        flush=True,
     )
-    payload["winning_mechanism"] = str(payload.get("winning_mechanism") or "").strip()
-
-    wins: list[dict[str, Any]] = []
-    for item in payload.get("wins_to_preserve") or []:
-        if not isinstance(item, dict):
-            continue
-        pattern = str(item.get("pattern") or "").strip()
-        if not pattern:
-            continue
-        wins.append(
-            {
-                "pattern": pattern,
-                "evidence": _clean_strings(item.get("evidence"), limit=3),
-                "why": str(item.get("why") or "").strip(),
-            }
-        )
-        if len(wins) >= 5:
-            break
-    payload["wins_to_preserve"] = wins
-
-    raw_problems = payload.get("problems") or []
-    if not raw_problems and isinstance(payload.get("primary_problem"), dict):
-        raw_problems = [payload["primary_problem"]]
-    problems: list[dict[str, Any]] = []
-    for item in raw_problems:
-        if not isinstance(item, dict):
-            continue
-        problem = str(item.get("problem") or item.get("cause") or "").strip()
-        fixable = item.get("strategy_fixable")
-        if not isinstance(fixable, bool):
-            fixable = str(fixable).strip().lower() in {"1", "true", "yes"}
-        if not problem or not fixable:
-            continue
-        problems.append(
-            {
-                "problem_id": f"P{len(problems) + 1}",
-                "problem": problem,
-                "evidence": _clean_strings(item.get("evidence"), limit=4),
-                "consequence": str(item.get("consequence") or "").strip(),
-                "strategy_fixable": True,
-                "confidence": str(item.get("confidence") or "medium").strip().lower(),
-            }
-        )
-        if len(problems) >= 5:
-            break
-    if not problems:
-        return None, "analysis.problems must contain at least one strategy-fixable problem"
-    payload["problems"] = problems
-    payload["primary_problem"] = problems[0]
-    valid_problem_ids = {item["problem_id"] for item in problems}
-
-    raw_plans = payload.get("candidate_plans") or payload.get("candidate_directions") or []
-    plans: list[dict[str, Any]] = []
-    for item in raw_plans:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or item.get("direction") or "").strip()
-        addressed = [
-            problem_id.upper()
-            for problem_id in _clean_strings(
-                item.get("addresses_problem_ids") or item.get("problem_ids"), limit=5
-            )
-            if problem_id.upper() in valid_problem_ids
-        ]
-        if not addressed:
-            addressed = [problems[0]["problem_id"]]
-        changes: list[dict[str, str]] = []
-        raw_changes = item.get("changes") or []
-        if not raw_changes and (item.get("baseline_rule") or item.get("candidate_rule")):
-            raw_changes = [item]
-        for change in raw_changes:
-            if not isinstance(change, dict):
-                continue
-            baseline_rule = str(change.get("baseline_rule") or "").strip()
-            candidate_rule = str(change.get("candidate_rule") or "").strip()
-            if baseline_rule and candidate_rule:
-                changes.append(
-                    {
-                        "baseline_rule": baseline_rule,
-                        "candidate_rule": candidate_rule,
-                        "why_required": str(
-                            change.get("why_required") or change.get("reason") or ""
-                        ).strip(),
-                    }
-                )
-            if len(changes) >= 6:
-                break
-        if not name or not changes:
-            continue
-        plans.append(
-            {
-                "id": f"D{len(plans) + 1}",
-                "name": name,
-                "addresses_problem_ids": list(dict.fromkeys(addressed)),
-                "changes": changes,
-                "expected_benefit": str(item.get("expected_benefit") or "").strip(),
-                "risk_to_winning_mechanism": str(
-                    item.get("risk_to_winning_mechanism") or ""
-                ).strip(),
-            }
-        )
-        if len(plans) >= 5:
-            break
-    if len(plans) < 2:
-        return None, "analysis.candidate_plans must contain at least two complete coherent plans"
-    payload["candidate_plans"] = plans
-    payload.pop("candidate_directions", None)
-    valid_plan_ids = {item["id"] for item in plans}
-
-    evidence_limits = _clean_strings(payload.get("evidence_limits"))
-    questions: list[dict[str, Any]] = []
-    if knowledge_mode == "enabled":
-        for item in payload.get("knowledge_questions") or []:
-            if not isinstance(item, dict):
-                continue
-            question = str(item.get("question") or "").strip()
-            evidence_motivation = str(item.get("evidence_motivation") or "").strip()
-            decision_use = str(item.get("decision_use") or "").strip()
-            if not question or not evidence_motivation or not decision_use:
-                continue
-            entities = _clean_strings(item.get("entities"), limit=6)
-            needs = [
-                need.lower()
-                for need in _clean_strings(item.get("needs"), limit=4)
-                if need.lower() in _KNOWLEDGE_NEEDS
-            ]
-            plan_ids = [
-                plan_id.upper()
-                for plan_id in _clean_strings(
-                    item.get("plan_ids") or item.get("direction_ids"), limit=5
-                )
-                if plan_id.upper() in valid_plan_ids
-            ]
-            if not entities or not needs or not plan_ids:
-                continue
-            linked_problem_ids = list(
-                dict.fromkeys(
-                    problem_id
-                    for plan in plans
-                    if plan["id"] in plan_ids
-                    for problem_id in plan["addresses_problem_ids"]
-                )
-            )
-            questions.append(
-                {
-                    "id": f"Q{len(questions) + 1}",
-                    "problem_ids": linked_problem_ids,
-                    "plan_ids": list(dict.fromkeys(plan_ids)),
-                    "evidence_motivation": evidence_motivation,
-                    "decision_use": decision_use,
-                    "question": question,
-                    "entities": entities,
-                    "needs": list(dict.fromkeys(needs)),
-                }
-            )
-            if len(questions) >= MAX_KNOWLEDGE_QUERIES:
-                break
-        if len(questions) < MIN_KNOWLEDGE_QUERIES:
-            return None, (
-                f"analysis.knowledge_questions must contain at least "
-                f"{MIN_KNOWLEDGE_QUERIES} complete plan-linked questions"
-            )
-    payload["knowledge_questions"] = questions
-    payload["evidence_limits"] = list(dict.fromkeys(evidence_limits))
-
-    payload["repeated_failures"] = [
-        {
-            "problem_id": problem["problem_id"],
-            "cause": problem["problem"],
-            "consequence": problem["consequence"],
-            "seen_in": problem["evidence"],
-            "strategy_fixable": True,
-            "confidence": problem["confidence"],
-        }
-        for problem in problems
-    ]
-    payload["optimization_targets"] = [
-        {
-            "plan_id": plan["id"],
-            "addresses_problem_ids": plan["addresses_problem_ids"],
-            "strategy_change": plan["name"],
-            "changes": plan["changes"],
-        }
-        for plan in plans
-    ]
-    payload["cross_outcome_comparison"] = _clean_strings(
-        payload.get("cross_outcome_comparison"), limit=5
+    payload, errors, calls = _run_analysis_json(
+        build_prompt=lambda schema_errors: build_cross_match_discovery_prompt(
+            strategy_name=strategy_name,
+            race=race,
+            single_game_analyses=summaries,
+            skill_texts=skill_texts,
+            validation_errors=schema_errors,
+            knowledge_mode=knowledge_mode,
+            prior_experiences=prior_experiences or [],
+        ),
+        model=model,
+        normalizer=lambda raw: _normalize_cross_match_discovery(
+            raw, knowledge_mode=knowledge_mode
+        ),
+        events=events,
+        label="cross_match_discovery",
     )
-    return payload, ""
+    if payload is not None:
+        print(
+            f"{prefix}AnalysisAgent: discovery strengths={len(payload['strengths'])} "
+            f"weaknesses={len(payload['weaknesses'])} unknowns={len(payload['unknowns'])} "
+            f"knowledge_questions={len(payload['knowledge_questions'])}",
+            flush=True,
+        )
+        events.append(
+            {
+                "action": "cross_match_discovery",
+                "strength_count": len(payload["strengths"]),
+                "weakness_count": len(payload["weaknesses"]),
+                "unknown_count": len(payload["unknowns"]),
+                "knowledge_question_count": len(payload["knowledge_questions"]),
+            }
+        )
+    return payload, errors, calls
+
+
+def _run_cross_match_decision(
+    *,
+    strategy_name: str,
+    race: str,
+    summaries: list[BattleAnalysis],
+    skill_texts: dict[str, str],
+    knowledge_mode: str,
+    model: str,
+    prior_experiences: list[Any] | None,
+    discovery: dict[str, Any],
+    knowledge_runs: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    prefix: str,
+) -> tuple[dict[str, Any] | None, list[str], int]:
+    print(f"{prefix}AnalysisAgent: cross-match decision", flush=True)
+    payload, errors, calls = _run_analysis_json(
+        build_prompt=lambda schema_errors: build_cross_match_decision_prompt(
+            strategy_name=strategy_name,
+            race=race,
+            single_game_analyses=summaries,
+            skill_texts=skill_texts,
+            validation_errors=schema_errors,
+            knowledge_mode=knowledge_mode,
+            prior_experiences=prior_experiences or [],
+            discovery=discovery,
+            knowledge_runs=knowledge_runs,
+        ),
+        model=model,
+        normalizer=lambda raw: _normalize_cross_match_decision(
+            raw, strategy_name=strategy_name
+        ),
+        events=events,
+        label="cross_match_decision",
+    )
+    if payload is not None:
+        print(
+            f"{prefix}AnalysisAgent: next_action={payload.get('next_action')}",
+            flush=True,
+        )
+        events.append(
+            {
+                "action": "cross_match_decision",
+                "next_action": payload.get("next_action"),
+                "priority_problem": (payload.get("priority_problem") or {}).get("problem"),
+            }
+        )
+    return payload, errors, calls
 
 
 def _observations_from_runs(
@@ -269,8 +603,6 @@ def _observations_from_runs(
                 tool="sc2_knowledge",
                 args={
                     "question_id": run.get("question_id"),
-                    "problem_ids": run.get("problem_ids") or ["P1"],
-                    "plan_ids": run.get("plan_ids") or [],
                     "query": run.get("query"),
                 },
                 result={"answer": run.get("answer"), "error": error},
@@ -322,6 +654,10 @@ def _run_knowledge_queries(
             run = run_knowledge_query(question, race=race)
             if checkpoint is not None:
                 checkpoint.save_knowledge_result(run)
+        run["question"] = str(question.get("question") or run.get("question") or "")
+        run["ok"] = is_knowledge_run_verified(run)
+        if run["ok"]:
+            run["error"] = ""
         runs.append(run)
     return runs
 
@@ -448,7 +784,9 @@ def run_analysis_agent_loop(
     prefix: str = "  ",
     checkpoint: EvolCheckpoint | None = None,
     prior_experiences: list[Any] | None = None,
+    capability_manifest: dict[str, Any] | None = None,
 ) -> AnalysisPipelineResult:
+    del capability_manifest
     model = str(model or "").strip() or DEFAULT_ANALYSIS_MODEL
     if not records:
         analysis = fallback_analysis(
@@ -515,62 +853,109 @@ def run_analysis_agent_loop(
         )
 
     payload: dict[str, Any] | None = None
+    discovery: dict[str, Any] | None = None
     analysis_events: list[dict[str, Any]] = []
+    observations: list[ToolObservation] = []
+    questions: list[dict[str, Any]] = []
+    runs: list[dict[str, Any]] = []
+    llm_cross_match_calls = 0
+
     if checkpoint is not None and stage_reached(checkpoint.stage, "batch_analysis"):
         loaded = checkpoint.load_batch_analysis()
-        payload, resume_error = _normalize_batch_analysis(
-            loaded,
-            strategy_name=strategy_name,
-            knowledge_mode=knowledge_mode,
+        payload, resume_error = _normalize_cross_match_decision(
+            loaded, strategy_name=strategy_name
         )
         if resume_error:
             errors.append(f"old checkpoint analysis was not reusable: {resume_error}")
+            payload = None
 
     if payload is None:
-        print(
-            f"{prefix}AnalysisAgent: analyzing {len(summaries)} match summaries in one call",
-            flush=True,
-        )
-        schema_errors: list[str] = []
-        for attempt in range(1, _ANALYSIS_ATTEMPTS + 1):
-            result = call_json_llm(
-                build_batch_analysis_prompt(
-                    strategy_name=strategy_name,
-                    race=race,
-                    single_game_analyses=summaries,
-                    skill_texts=skill_texts,
-                    validation_errors=schema_errors,
-                    knowledge_mode=knowledge_mode,
-                    prior_experiences=prior_experiences or [],
-                ),
-                model=model,
-                is_reasoning=ANALYSIS_ENABLE_REASONING,
-            )
-            raw = result.get("analysis") if isinstance(result, dict) else None
-            if not isinstance(raw, dict) and isinstance(result, dict):
-                raw = result
-            if not isinstance(raw, dict):
-                error = "AnalysisAgent returned no analysis object"
-            else:
-                payload, error = _normalize_batch_analysis(
-                    raw,
-                    strategy_name=strategy_name,
+        if checkpoint is not None and checkpoint.has_cross_match_discovery():
+            try:
+                loaded_discovery, discovery_error = _normalize_cross_match_discovery(
+                    checkpoint.load_cross_match_discovery(),
                     knowledge_mode=knowledge_mode,
                 )
-            analysis_events.append(
-                {"attempt": attempt, "action": "analyze_batch", "error": error}
+            except (OSError, ValueError) as exc:
+                loaded_discovery, discovery_error = None, str(exc)
+            if loaded_discovery is None:
+                errors.append(f"old discovery was not reusable: {discovery_error}")
+            else:
+                discovery = loaded_discovery
+                print(
+                    f"{prefix}AnalysisAgent: resume loaded cross-match discovery",
+                    flush=True,
+                )
+
+        if discovery is None:
+            discovery, discovery_errors, discovery_calls = _run_cross_match_discovery(
+                strategy_name=strategy_name,
+                race=race,
+                summaries=summaries,
+                skill_texts=skill_texts,
+                knowledge_mode=knowledge_mode,
+                model=model,
+                prior_experiences=prior_experiences,
+                events=analysis_events,
+                prefix=prefix,
             )
-            if payload is not None:
-                break
-            schema_errors.append(error)
-        errors.extend(f"analysis: {item}" for item in schema_errors)
+            llm_cross_match_calls += discovery_calls
+            errors.extend(f"discovery: {item}" for item in discovery_errors)
+            if discovery is not None and checkpoint is not None:
+                checkpoint.save_cross_match_discovery(discovery)
+                print(
+                    f"{prefix}AnalysisAgent: checkpoint saved discovery -> {checkpoint.run_dir}",
+                    flush=True,
+                )
+
+        if discovery is None:
+            analysis = fallback_analysis(
+                strategy_name=strategy_name,
+                race=race,
+                records=records,
+                reason="Cross-match Discovery failed to produce a usable diagnosis.",
+            )
+            return AnalysisPipelineResult(
+                completed=False,
+                game_digests=digests,
+                single_game_analyses=summaries,
+                battle_analysis=analysis,
+                errors=errors,
+                events=[*match_events, *analysis_events],
+            )
+
+        questions = list(discovery.get("knowledge_questions") or [])
+        if knowledge_mode == "enabled" and questions:
+            runs = _run_knowledge_queries(
+                questions,
+                race=race,
+                checkpoint=checkpoint,
+                prefix=prefix,
+            )
+            observations = _observations_from_runs(runs, prefix=prefix)
+
+        payload, decision_errors, decision_calls = _run_cross_match_decision(
+            strategy_name=strategy_name,
+            race=race,
+            summaries=summaries,
+            skill_texts=skill_texts,
+            knowledge_mode=knowledge_mode,
+            model=model,
+            prior_experiences=prior_experiences,
+            discovery=discovery,
+            knowledge_runs=runs,
+            events=analysis_events,
+            prefix=prefix,
+        )
+        llm_cross_match_calls += decision_calls
+        errors.extend(f"decision: {item}" for item in decision_errors)
 
     if payload is None:
         analysis = fallback_analysis(
             strategy_name=strategy_name,
             race=race,
             records=records,
-            reason="Batch Analysis Agent failed to produce one usable optimization hypothesis.",
+            reason="Cross-match Decision failed to produce one usable next action.",
         )
         return AnalysisPipelineResult(
             completed=False,
@@ -581,21 +966,6 @@ def run_analysis_agent_loop(
             events=[*match_events, *analysis_events],
         )
 
-    if checkpoint is not None:
-        checkpoint.save_batch_analysis(payload)
-        print(
-            f"{prefix}AnalysisAgent: checkpoint saved batch analysis -> {checkpoint.run_dir}",
-            flush=True,
-        )
-
-    questions = payload.get("knowledge_questions") or []
-    runs = _run_knowledge_queries(
-        questions,
-        race=race,
-        checkpoint=checkpoint,
-        prefix=prefix,
-    ) if knowledge_mode == "enabled" else []
-    observations = _observations_from_runs(runs, prefix=prefix)
     failed_questions = [
         str(run.get("question_id") or "")
         for run in runs
@@ -611,28 +981,30 @@ def run_analysis_agent_loop(
             )
         )
     payload["knowledge_used"] = [
-        {
-            "question_id": run.get("question_id"),
-            "finding": run.get("answer"),
-        }
+        {"question_id": run.get("question_id"), "finding": run.get("answer")}
         for run in runs
         if is_knowledge_run_verified(run)
     ]
     payload["knowledge_queries"] = [
-        {
-            "question_id": run.get("question_id"),
-            "ok": is_knowledge_run_verified(run),
-        }
+        {"question_id": run.get("question_id"), "ok": is_knowledge_run_verified(run)}
         for run in runs
     ]
+    if checkpoint is not None:
+        checkpoint.save_batch_analysis(payload)
+        print(
+            f"{prefix}AnalysisAgent: checkpoint saved final batch analysis -> {checkpoint.run_dir}",
+            flush=True,
+        )
     battle_analysis = analysis_from_json(
         strategy_name=strategy_name,
         race=race,
         records=records,
         data=payload,
     )
+    knowledge_ok = sum(1 for run in runs if is_knowledge_run_verified(run))
     knowledge_trace = {
         "knowledge_mode": knowledge_mode,
+        "discovery": discovery,
         "questions": questions,
         "runs": runs,
         "failed_questions": failed_questions,
@@ -640,8 +1012,9 @@ def run_analysis_agent_loop(
     analysis_events.append(
         {
             "action": "analysis_complete",
-            "llm_cross_match_calls": 1,
+            "llm_cross_match_calls": llm_cross_match_calls,
             "knowledge_questions": len(questions),
+            "knowledge_answers_ok": knowledge_ok,
             "analysis": battle_analysis.raw,
         }
     )
@@ -668,3 +1041,4 @@ def run_analysis_agent_loop(
         errors=errors,
         events=[*match_events, *analysis_events],
     )
+

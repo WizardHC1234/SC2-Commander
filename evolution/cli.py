@@ -17,11 +17,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--map", dest="map_name", default="KairosJunctionLE")
     parser.add_argument("--difficulties", default=",".join(DEFAULT_DIFFICULTIES))
     parser.add_argument("--matches", type=int, default=10)
+    parser.add_argument("--candidate-matches", type=int, default=10)
     parser.add_argument("--concurrency", type=int, default=5)
-    parser.add_argument("--pass-score", type=float, default=0.8)
-    parser.add_argument("--max-generations", type=int, default=10)
+    parser.add_argument("--mastery-score-threshold", type=float, default=0.90)
+    parser.add_argument("--analysis-batch-games", type=int, default=10)
+    parser.add_argument("--max-analysis-games-per-generation", type=int, default=20)
+    parser.add_argument("--max-generations-per-difficulty", type=int, default=10)
+    parser.add_argument("--max-total-generations", "--max-generations", type=int, default=50)
     parser.add_argument("--knowledge-mode", choices=("enabled", "disabled"), default="enabled")
     parser.add_argument("--run-dir", default="", help="Existing run directory to resume")
+    parser.add_argument(
+        "--baseline-batch-dir",
+        default="",
+        help="Seed a new run from one already-completed champion batch",
+    )
     parser.add_argument("--real-time", action="store_true")
     return parser
 
@@ -39,11 +48,16 @@ def main() -> None:
         map_name=args.map_name,
         difficulties=difficulties,
         matches_per_batch=args.matches,
+        candidate_matches=args.candidate_matches,
         concurrency=args.concurrency,
-        pass_score=args.pass_score,
-        max_generations=args.max_generations,
+        mastery_score_threshold=args.mastery_score_threshold,
+        analysis_batch_games=args.analysis_batch_games,
+        max_analysis_games_per_generation=args.max_analysis_games_per_generation,
+        max_generations_per_difficulty=args.max_generations_per_difficulty,
+        max_total_generations=args.max_total_generations,
         knowledge_mode=args.knowledge_mode,
         real_time=args.real_time,
+        baseline_batch_dir=args.baseline_batch_dir,
     )
     runner = EvolutionRunner(config, run_dir=Path(args.run_dir) if args.run_dir else None)
     state = runner.run()
@@ -55,3 +69,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

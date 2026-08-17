@@ -100,6 +100,8 @@ class EvolRunRequest:
 class EvolRunResult:
     ok: bool
     message: str
+    decision_action: str = "propose_strategy_patch"
+    action_reason: str = ""
     strategy_name: str = ""
     race: str = "terran"
     output_dir: Optional[Path] = None
@@ -109,3 +111,4 @@ class EvolRunResult:
     improvement: Optional[EvolImprovement] = None
     changes: list[JsonDict] = field(default_factory=list)
     tool_observations: list[ToolObservation] = field(default_factory=list)
+

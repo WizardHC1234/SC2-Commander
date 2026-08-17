@@ -2,7 +2,7 @@
 
 This package is the outer experiment controller. It runs matches, calls
 `evol_agent` for one candidate, evaluates that candidate, and keeps only a
-strictly better strategy as the next Champion.
+strictly higher-scoring strategy as the next Champion.
 
 Default curriculum:
 
@@ -10,9 +10,19 @@ Default curriculum:
 Harder -> VeryHard -> CheatVision -> CheatMoney -> CheatInsane
 ```
 
-Each batch uses 10 matches by default. A level is passed at a score of 0.8.
-Wins score 1, ties score 0.5, and defeats score 0. Ties between Champion and
-candidate retain the Champion.
+Each Champion baseline and each Candidate evaluation uses 10 matches.
+Selection is score-only:
+
+```text
+Candidate score > Champion score  -> accepted
+Candidate score < Champion score  -> rejected
+Candidate score == Champion score -> inconclusive; Champion retained
+```
+
+Posterior probability is saved as a diagnostic. It is not a promotion gate.
+
+A difficulty is mastered when the current Champion score is strictly greater
+than 0.90. Wins score 1, ties score 0.5, and defeats score 0.
 
 Start a new run:
 
@@ -39,3 +49,4 @@ Run state and curve-ready data are saved under
 `evolution_runs/<strategy>/<timestamp>/state.json` and `history.csv`. Raw match
 records remain under `game_records/`, while immutable candidate strategies
 remain under `skills/<race>/`.
+

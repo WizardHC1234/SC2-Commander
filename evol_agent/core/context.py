@@ -43,6 +43,66 @@ def render_single_game_analyses(analyses: list[BattleAnalysis]) -> str:
     return "\n\n".join(blocks)
 
 
+def render_batch_match_evidence(analyses: list[BattleAnalysis]) -> str:
+    """Pass complete single-game summaries through without recropping events."""
+    return render_single_game_analyses(analyses)
+
+
+def render_knowledge_results(runs: list[dict[str, Any]]) -> str:
+    """Compact knowledge answers for Cross-match Decision, without tool traces."""
+    rows: list[dict[str, Any]] = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        row: dict[str, Any] = {
+            "question_id": str(run.get("question_id") or run.get("id") or "").strip(),
+            "question": str(run.get("question") or "").strip(),
+            "ok": bool(run.get("ok")),
+        }
+        if row["ok"]:
+            row["answer"] = str(run.get("answer") or "").strip()
+        else:
+            row["error"] = str(run.get("error") or "knowledge query failed").strip()
+        rows.append(row)
+    if not rows:
+        return "[]"
+    return json_compact_block(rows)
+
+
+def render_optimizer_decision(decision: dict[str, Any]) -> str:
+    """Compact Cross-match Decision for the Optimizer; no match summaries."""
+    priority = decision.get("priority_problem") or {}
+    if not isinstance(priority, dict):
+        priority = {"problem": str(priority)}
+    plan = decision.get("plan") if isinstance(decision.get("plan"), dict) else {}
+    payload = {
+        "strengths_to_preserve": decision.get("strengths_to_preserve") or [],
+        "priority_problem": {
+            "problem": str(priority.get("problem") or "").strip(),
+            "evidence": list(priority.get("evidence") or [])[:4],
+            "control_class": str(priority.get("control_class") or "").strip(),
+        },
+        "hypothesis": str(decision.get("hypothesis") or "").strip(),
+        "mechanism_prediction": (
+            dict(decision.get("mechanism_prediction"))
+            if isinstance(decision.get("mechanism_prediction"), dict)
+            else {}
+        ),
+        "plan": {"direction": str(plan.get("direction") or "").strip()},
+    }
+    return json_compact_block(payload)
+
+
+def render_discovery_findings(discovery: dict[str, Any]) -> str:
+    """Pass Round 1 findings to Round 2 as compact JSON, not scattered prose."""
+    payload = {
+        "strengths": discovery.get("strengths") or [],
+        "weaknesses": discovery.get("weaknesses") or [],
+        "unknowns": discovery.get("unknowns") or [],
+    }
+    return json_compact_block(payload)
+
+
 def render_sc2_knowledge(observations: list[ToolObservation]) -> str:
     if not observations:
         return "No SC2 knowledge results are available."
@@ -65,8 +125,6 @@ def render_sc2_knowledge(observations: list[ToolObservation]) -> str:
             header += f" problems={problem_ids}"
         if plan_ids:
             header += f" plans={plan_ids}"
-        # Pass through complete verified answers. Failed runs contribute only
-        # their error so fallback dumps cannot masquerade as usable knowledge.
         if observation.ok:
             body = observation.summary or json_block(observation.result)
         else:
@@ -79,7 +137,12 @@ __all__ = [
     "json_block",
     "json_compact_block",
     "render_battle_analysis",
+    "render_batch_match_evidence",
+    "render_discovery_findings",
+    "render_knowledge_results",
+    "render_optimizer_decision",
     "render_sc2_knowledge",
     "render_single_game_analyses",
     "render_skill_context",
 ]
+

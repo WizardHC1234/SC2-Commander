@@ -107,16 +107,16 @@ def agent_role_for_trigger(trigger: str, *, has_initial: bool = False) -> str:
 def _compact_actions(translations: Any) -> str:
     """Compact down-agent translations into issued action summaries."""
     parts = []
-    for item in _as_list(translations)[:8]:
+    for item in _as_list(translations):
         parsed = _as_dict(item.get("parsed")) if isinstance(item, dict) else {}
         if parsed:
             action = parsed.get("action", "?")
             target = parsed.get("to_count")
             parts.append(f"{action}->{target}" if target is not None else str(action))
         elif isinstance(item, dict) and item.get("raw"):
-            parts.append(str(item["raw"])[:80])
+            parts.append(str(item["raw"]))
         else:
-            parts.append(str(item)[:80])
+            parts.append(str(item))
     return " | ".join(parts)
 
 
@@ -126,7 +126,7 @@ def _compact_policy_execution(execution: Any) -> str:
     if not policy:
         return ""
     parts = []
-    for raw in _as_list(policy.get("commands"))[:3]:
+    for raw in _as_list(policy.get("commands")):
         command = _as_dict(raw)
         parts.append(
             f"{command.get('group_id', '?')} "
@@ -159,7 +159,7 @@ def _compact_mid_execution(execution: Any) -> str:
         f"last_issues={' | '.join(str(item) for item in issues) if issues else 'none'}"
     )
 
-def _compact_reasoning(reasoning: Any, limit: int = 5000) -> str:
+def _compact_reasoning(reasoning: Any) -> str:
     """Keep narrative reasoning while omitting the duplicated JSON task block."""
     text = str(reasoning or "").strip()
     fence_pos = text.find("```")
@@ -172,10 +172,7 @@ def _compact_reasoning(reasoning: Any, limit: int = 5000) -> str:
         )
         if task_json:
             text = text[:task_json.start()].rstrip()
-    if len(text) <= limit:
-        return text
-    shortened = text[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:")
-    return shortened + "..."
+    return text
 
 
 def _compact_army_decision(interaction: dict) -> dict:
@@ -186,7 +183,7 @@ def _compact_army_decision(interaction: dict) -> dict:
     policy = _as_dict(interaction.get("army_control_agent_policy"))
     parsed = _as_dict(policy.get("parsed"))
     commands = []
-    for raw_command in _as_list(parsed.get("commands"))[:3]:
+    for raw_command in _as_list(parsed.get("commands")):
         command = _as_dict(raw_command)
         group_id = command.get("group_id", "?")
         movement_mode = command.get("movement_mode", "?")
@@ -194,17 +191,17 @@ def _compact_army_decision(interaction: dict) -> dict:
         rendered = f"{group_id}:{movement_mode}->{zone_id}"
         focus = _as_list(command.get("focus_target_types"))
         if focus:
-            rendered += f"; focus={','.join(str(item) for item in focus[:6])}"
+            rendered += f"; focus={','.join(str(item) for item in focus)}"
         commands.append(rendered)
 
-    issues = [str(item)[:200] for item in _as_list(policy.get("command_issues"))[:5]]
+    issues = [str(item) for item in _as_list(policy.get("command_issues"))]
     error = policy.get("error")
     directive = interaction_get_str(
         interaction, STRATEGY_COORDINATOR_ARMY_DIRECTIVE
     )
 
     target_zone_ids = []
-    for raw_command in _as_list(parsed.get("commands"))[:3]:
+    for raw_command in _as_list(parsed.get("commands")):
         zone_id = _as_dict(raw_command).get("destination_zone_id")
         if zone_id and zone_id not in target_zone_ids:
             target_zone_ids.append(zone_id)
@@ -235,7 +232,7 @@ def _compact_army_decision(interaction: dict) -> dict:
         "scout_zone_id": parsed.get("scout_zone_id"),
         "target_zones": target_zones,
         "issues": issues,
-        "error": str(error)[:300] if error else "",
+        "error": str(error) if error else "",
         "signature": signature,
     }
 
@@ -252,7 +249,7 @@ def _execution_history_lines(execution: Any) -> list[str]:
         f"since={history.get('window_start_game_time_seconds', 'unknown')}s; "
         f"mid_decisions={len(mid_events)}; army_decisions={len(army_events)}"
     ]
-    for raw in mid_events[:12]:
+    for raw in mid_events:
         event = _as_dict(raw)
         tasks = " | ".join(str(item) for item in _as_list(event.get("tasks"))) or "none"
         issues = " | ".join(str(item) for item in _as_list(event.get("issues"))) or "none"
@@ -261,10 +258,10 @@ def _execution_history_lines(execution: Any) -> list[str]:
             f"time={event.get('game_time_seconds')}s; status={event.get('status', 'unknown')}; "
             f"tasks={tasks}; issues={issues}"
         )
-    for raw in army_events[:12]:
+    for raw in army_events:
         event = _as_dict(raw)
         commands = []
-        for raw_command in _as_list(event.get("commands"))[:3]:
+        for raw_command in _as_list(event.get("commands")):
             command = _as_dict(raw_command)
             commands.append(
                 f"{command.get('group_id', '?')}:{command.get('movement_mode', '?')}"
@@ -283,6 +280,7 @@ def _execution_history_lines(execution: Any) -> list[str]:
 
 def _current_army_decision(interaction: dict, observation: dict) -> dict:
     policy = _as_dict(interaction.get("army_policy"))
+    intent = _as_dict(policy.get("intent"))
     commands = []
     target_zone_ids = []
     for raw_command in _as_list(policy.get("commands")):
@@ -308,13 +306,14 @@ def _current_army_decision(interaction: dict, observation: dict) -> dict:
         if zone.get("zone_id")
     }
     issues = [
-        str(item)[:300]
+        str(item)
         for item in (
             _as_list(interaction.get("issues"))
             + _as_list(interaction.get("reflection_issues"))
         )
     ]
     return {
+        "intent": intent,
         "directive": "",
         "commands": commands,
         "scan_zone_id": policy.get("scan_zone_id"),
@@ -326,20 +325,19 @@ def _current_army_decision(interaction: dict, observation: dict) -> dict:
         ],
         "target_zone_ids": target_zone_ids,
         "issues": list(dict.fromkeys(issues)),
-        "error": str(interaction.get("error") or "")[:300],
+        "error": str(interaction.get("error") or ""),
         "signature": json.dumps(policy, sort_keys=True, ensure_ascii=False),
     }
 def _current_decision_lines(
     interaction: dict,
     *,
     reasoning_source: Any,
-    reasoning_limit: int,
     macro_tasks: list,
     tool_call_summary: str,
     army: dict,
 ) -> list[str]:
     lines: list[str] = []
-    reasoning = _compact_reasoning(reasoning_source, limit=reasoning_limit)
+    reasoning = _compact_reasoning(reasoning_source)
     if reasoning:
         lines.append(f"[Commander Reasoning] {reasoning}")
     if macro_tasks:
@@ -354,6 +352,11 @@ def _current_decision_lines(
         lines.append(f"[Commander Tool Calls] {tool_call_summary}")
     if army.get("commands"):
         lines.append("[Commander Army Commands] " + " | ".join(army["commands"]))
+    if army.get("intent"):
+        lines.append(
+            "[Commander Army Intent] "
+            f"{army['intent'].get('mode', '?')}->{army['intent'].get('zone_id', '?')}"
+        )
     if army.get("scan_zone_id"):
         lines.append(f"[Commander Scan] {army['scan_zone_id']}")
     if army.get("scout_zone_id"):
@@ -366,7 +369,7 @@ def _current_decision_lines(
     if interaction.get("accepted") is False:
         lines.append("[Decision Rejected]")
     if interaction.get("error"):
-        lines.append(f"[Decision Error] {str(interaction.get('error'))[:300]}")
+        lines.append(f"[Decision Error] {str(interaction.get('error'))}")
     return lines
 
 
@@ -482,7 +485,7 @@ def _extract_current_commander_chunk(interaction: dict) -> dict:
         "accepted": interaction.get("accepted"),
         "issues": list(
             dict.fromkeys(
-                str(item)[:300]
+                str(item)
                 for item in (
                     _as_list(interaction.get("issues"))
                     + _as_list(interaction.get("reflection_issues"))
@@ -538,7 +541,6 @@ def _extract_current_commander_chunk(interaction: dict) -> dict:
         _current_decision_lines(
             interaction,
             reasoning_source=reasoning_source,
-            reasoning_limit=5000,
             macro_tasks=macro_tasks,
             tool_call_summary=issued,
             army=army,
@@ -746,7 +748,7 @@ def extract_interaction_chunk(interaction: dict) -> dict:
         initial_strategy = initial.get("forced_strategy") or initial.get("selected_strategy") or "unknown"
         lines.append(
             f"Initial strategy: {initial_strategy} | "
-            f"{str(initial.get('instruct') or '')[:200]}"
+            f"{str(initial.get('instruct') or '')}"
         )
     if not obs:
         if not initial:
@@ -848,12 +850,12 @@ def extract_interaction_chunk(interaction: dict) -> dict:
         if high_level.get("assessed_build_directive"):
             lines.append(
                 "[Strategy Coordinator Build Directive] "
-                f"{str(high_level['assessed_build_directive'])[:800]}"
+                f"{str(high_level['assessed_build_directive'])}"
             )
         if high_level.get("assessed_army_directive"):
             lines.append(
                 "[Strategy Coordinator Army Directive] "
-                f"{str(high_level['assessed_army_directive'])[:800]}"
+                f"{str(high_level['assessed_army_directive'])}"
             )
     elif is_strategy_coordination_trigger(trigger) or (
         trigger != "army_control_agent_poll" and decision["top_build_directive"]
@@ -861,26 +863,26 @@ def extract_interaction_chunk(interaction: dict) -> dict:
         if decision["top_build_directive"]:
             lines.append(
                 "[Strategy Coordinator Build Directive] "
-                f"{str(decision['top_build_directive'])[:800]}"
+                f"{str(decision['top_build_directive'])}"
             )
         if decision["top_army_directive"] and trigger != "army_control_agent_poll":
             lines.append(
                 "[Strategy Coordinator Army Directive] "
-                f"{str(decision['top_army_directive'])[:800]}"
+                f"{str(decision['top_army_directive'])}"
             )
 
     if decision["reasoning"]:
         lines.append(f"[Macro Planner Reasoning] {decision['reasoning']}")
     if decision["prev_tasks"]:
-        lines.append("[Macro Planner Previous Tasks] " + " | ".join(str(item) for item in decision["prev_tasks"][:12]))
+        lines.append("[Macro Planner Previous Tasks] " + " | ".join(str(item) for item in decision["prev_tasks"]))
     if decision["new_tasks"]:
-        lines.append("[Macro Planner New Tasks] " + " | ".join(str(item) for item in decision["new_tasks"][:12]))
+        lines.append("[Macro Planner New Tasks] " + " | ".join(str(item) for item in decision["new_tasks"]))
     active_text = ""
     if decision["active_tasks"]:
         active_text = " | ".join(
             f"{item.get('action', '?')}->{item.get('to_count', '?')}"
             if isinstance(item, dict) else str(item)
-            for item in decision["active_tasks"][:12]
+            for item in decision["active_tasks"]
         )
         lines.append(f"[Action Translator Active Commands] {active_text}")
     if decision["actions_issued"] and decision["actions_issued"] != active_text:
@@ -986,7 +988,7 @@ def extract_interaction_chunk(interaction: dict) -> dict:
         if army["error"]:
             lines.append(f"[Army Error] {army['error']}")
     if decision["error"]:
-        lines.append(f"Error: {str(decision['error'])[:300]}")
+        lines.append(f"Error: {str(decision['error'])}")
 
     strategic_signature = json.dumps(
         [phase, decision["top_build_directive"], decision["top_army_directive"]],
@@ -1061,3 +1063,4 @@ def extract_chunks(data: dict) -> dict:
         "metadata_text": format_metadata_text(metadata),
         "chunks": chunks,
     }
+

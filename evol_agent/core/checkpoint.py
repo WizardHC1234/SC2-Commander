@@ -13,12 +13,14 @@ from .types import BattleAnalysis, GameDigest, ToolObservation
 from ..sc2_data_agent.bridge import is_knowledge_run_verified
 
 CHECKPOINT_SCHEMA = "evol_agent_checkpoint.v2"
+PIPELINE_VERSION = "full_timeline_summary_v1_cross_match_discovery_v1"
 
 STAGE_ORDER = (
     "created",
     "match_summaries",
-    "batch_analysis",
+    "batch_discovery",
     "knowledge",
+    "batch_analysis",
     "analysis_complete",
     "candidate",
 )
@@ -185,6 +187,22 @@ class EvolCheckpoint:
         errors = [str(item) for item in (data.get("errors") or [])]
         return digests, analyses, int(data.get("completed_matches") or 0), events, errors
 
+    def save_cross_match_discovery(self, discovery: dict[str, Any]) -> None:
+        _write_json(self.run_dir / "cross_match_discovery.json", discovery)
+        self.set_stage("batch_discovery")
+
+    def load_cross_match_discovery(self) -> dict[str, Any]:
+        path = self.run_dir / "cross_match_discovery.json"
+        if not path.is_file():
+            raise FileNotFoundError(f"cross_match_discovery.json not found in {self.run_dir}")
+        data = _read_json(path)
+        if not isinstance(data, dict):
+            raise ValueError("cross_match_discovery.json must contain an object")
+        return data
+
+    def has_cross_match_discovery(self) -> bool:
+        return (self.run_dir / "cross_match_discovery.json").is_file()
+
     def save_batch_analysis(self, analysis: dict[str, Any]) -> None:
         _write_json(self.run_dir / "batch_analysis.json", analysis)
         self.set_stage("batch_analysis")
@@ -297,6 +315,7 @@ def create_checkpoint(
     (run_dir / "knowledge").mkdir(parents=True, exist_ok=True)
     meta = {
         "schema": CHECKPOINT_SCHEMA,
+        "pipeline_version": PIPELINE_VERSION,
         "stage": "created",
         "created": datetime.now().isoformat(),
         "updated": datetime.now().isoformat(),
@@ -338,6 +357,11 @@ def validate_checkpoint_fingerprint(
 ) -> None:
     meta = checkpoint.meta
     errors: list[str] = []
+    if str(meta.get("pipeline_version") or "") != PIPELINE_VERSION:
+        errors.append(
+            "pipeline_version mismatch: checkpoint predates two-round "
+            "cross-match analysis; start a new EvolAgent run"
+        )
     if str(meta.get("strategy_name") or "") != strategy_name:
         errors.append(
             f"strategy_name mismatch: checkpoint={meta.get('strategy_name')} current={strategy_name}"
@@ -356,3 +380,4 @@ def validate_checkpoint_fingerprint(
         )
     if errors:
         raise ValueError("; ".join(errors))
+
