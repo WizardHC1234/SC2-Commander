@@ -19,7 +19,6 @@ from evol_agent.core.analysis_agent_loop import (
     _normalize_cross_match_discovery,
 )
 from evol_agent.core.checkpoint import EvolCheckpoint
-from evol_agent.core.candidate_critic import critique_candidate_contract
 from evol_agent.core.capabilities import build_executor_capability_manifest
 from evol_agent.core.loop_helpers import normalize_strategy_contract
 from evol_agent.core.optimization_agent_loop import run_optimization_agent_loop
@@ -659,6 +658,8 @@ def test_optimizer_always_calls_llm_for_paragraph_patches(monkeypatch) -> None:
 
     def fake_llm(prompt: str, **kwargs):
         prompts.append(prompt)
+        if "You are validating a strategy patch" in prompt:
+            return {"valid": True, "errors": []}
         return {
             "action": "draft_candidate",
             "patches": [
@@ -676,6 +677,9 @@ def test_optimizer_always_calls_llm_for_paragraph_patches(monkeypatch) -> None:
     monkeypatch.setattr(
         "evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm
     )
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm", fake_llm
+    )
     result, improvement, _observations, errors, events = run_optimization_agent_loop(
         strategy_name="tank",
         race="terran",
@@ -687,64 +691,17 @@ def test_optimizer_always_calls_llm_for_paragraph_patches(monkeypatch) -> None:
 
     assert result.ok
     assert improvement is not None
-    assert len(prompts) == 1
+    assert sum("Strategy Optimizer" in prompt or "revising an invalid paragraph patch" in prompt for prompt in prompts) == 1
     assert events[0]["llm_calls"] == 1
     assert "Gather 40 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
     assert improvement.analysis["hypothesis"] == "an earlier gathered force converts before scaling"
     assert improvement.analysis["selected_plan_ids"] == ["D1"]
 
-def test_executor_manifest_and_candidate_critic_share_action_vocabulary() -> None:
+def test_executor_manifest_lists_runtime_owned_boundaries() -> None:
     manifest = build_executor_capability_manifest("terran")
     assert "train_siege_tank" in manifest["macro_contract"]["available_actions"]
-    valid = {
-        "hypothesis": "more completed Tanks improve the first engagement",
-        "primary_lever": "composition",
-        "predictions": ["first contact has more living Siege Tanks"],
-        "disproof_conditions": ["Tank count does not improve"],
-        "capability_mapping": {
-            "macro_actions": ["train_siege_tank"],
-            "army_controls": ["main_force_reinforcement"],
-            "unsupported_dependencies": [],
-        },
-    }
-    assert critique_candidate_contract(valid, capability_manifest=manifest) == []
-    valid["capability_mapping"]["macro_actions"] = ["micro_every_tank"]
-    assert "unknown macro actions" in critique_candidate_contract(
-        valid, capability_manifest=manifest
-    )[0]
-
-
-def test_candidate_critic_compares_only_changed_actions_with_plan_delta() -> None:
-    manifest = build_executor_capability_manifest("terran")
-    rationale = {
-        "hypothesis": "Stimpack improves the first engagement",
-        "primary_lever": "upgrade",
-        "predictions": ["the first force retains more Marines"],
-        "disproof_conditions": ["the upgraded force still collapses"],
-        "selected_plan_ids": ["D1"],
-        "selected_changes": [{"source_plan_id": "D1"}],
-        "capability_mapping": {
-            "macro_actions": [
-                "research_stimpack",
-                "train_scv",
-                "build_gas",
-                "expand",
-            ],
-            "changed_macro_actions": ["research_stimpack"],
-            "unsupported_dependencies": [],
-        },
-    }
-    plan = {
-        "id": "D1",
-        "primary_lever": "upgrade",
-        "capability_mapping": {"macro_actions": ["research_stimpack"]},
-    }
-
-    assert critique_candidate_contract(
-        rationale,
-        capability_manifest=manifest,
-        selected_plan=plan,
-    ) == []
+    assert "transport and unit-level micro" in manifest["runtime_owned"]
+    assert "manual unit-level target selection" in manifest["strategy_must_not_require"]
 
 
 def test_strategy_supply_budget_rejects_end_state_over_200() -> None:

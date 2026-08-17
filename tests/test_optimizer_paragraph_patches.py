@@ -8,7 +8,7 @@ from evol_agent.core.optimization_agent_loop import (
     run_optimization_agent_loop,
 )
 from evol_agent.core.prompts import build_candidate_prompt
-from evol_agent.core.types import BattleAnalysis, ValidationResult
+from evol_agent.core.types import BattleAnalysis
 from evol_agent.optimization.strategy_document import StrategyDocument, paragraph_hash
 from evol_agent.validation import validate_strategy_markdown
 
@@ -254,7 +254,19 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
 
     def fake_llm(prompt: str, **kwargs):
         calls.append(prompt)
-        if len(calls) == 1:
+        if "You are validating a strategy patch" in prompt:
+            if "rebuild to 36 Marines and 8 Siege Tanks" in prompt:
+                return {"valid": True, "errors": []}
+            return {
+                "valid": False,
+                "errors": [
+                    "Recovery and Cleanup still uses the old readiness threshold."
+                ],
+            }
+        optimizer_prompts = [
+            item for item in calls if "You are validating a strategy patch" not in item
+        ]
+        if len(optimizer_prompts) == 1:
             return {
                 "action": "draft_candidate",
                 "patches": [
@@ -268,7 +280,7 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
                 "expected_effect": "earlier first attack",
                 "main_risk": "smaller force",
             }
-        assert "Recovery remains inconsistent" in prompt
+        assert "Recovery and Cleanup still uses the old readiness threshold." in prompt
         return {
             "action": "revise_candidate",
             "patches": [
@@ -289,17 +301,9 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
             "main_risk": "smaller force",
         }
 
-    validate_calls = {"n": 0}
-
-    def fake_validate(*, files, race):
-        validate_calls["n"] += 1
-        if validate_calls["n"] == 1:
-            return ValidationResult(ok=False, error="Recovery remains inconsistent")
-        return ValidationResult(ok=True, files=files)
-
     monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
     monkeypatch.setattr(
-        "evol_agent.core.optimization_agent_loop.validate_improvement", fake_validate
+        "evol_agent.core.strategy_patch_validator.call_json_llm", fake_llm
     )
     result, improvement, _obs, _errors, events = run_optimization_agent_loop(
         strategy_name="tank",
@@ -310,7 +314,7 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
     )
     assert result.ok
     assert improvement is not None
-    assert len(calls) == 2
+    assert len([item for item in calls if "You are validating a strategy patch" not in item]) == 2
     assert events[-1]["llm_calls"] == 2
     assert paragraph_hash(gate.value) != paragraph_hash(
         next(item for item in StrategyDocument.parse(improvement.files["strategy.md"]).details if item.id == "main_attack_gate").value

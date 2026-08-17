@@ -9,7 +9,10 @@ from .config import (
 )
 from .llm import call_json_llm
 from .prompts import build_candidate_prompt
-from .candidate_critic import critique_candidate_contract
+from .strategy_patch_validator import (
+    validate_strategy_patch_semantics,
+    validate_strategy_patch_structure,
+)
 from .types import BattleAnalysis, EvolImprovement, ToolObservation, ValidationResult
 from ..optimization.strategy_document import StrategyDocument
 from ..validation import validate_improvement
@@ -329,19 +332,19 @@ def run_optimization_agent_loop(
 
         operations = _patches_to_operations(normalized["patches"])
         rationale = _candidate_rationale(decision=decision, candidate=normalized)
-        critic_errors = critique_candidate_contract(
-            rationale,
-            capability_manifest=capability_manifest,
-            selected_plan=None,
+        structure_errors = validate_strategy_patch_structure(
+            decision=decision,
+            patches=normalized["patches"],
+            parent_document=parent_document,
         )
-        if critic_errors:
-            error = "; ".join(critic_errors)
+        if structure_errors:
+            error = "; ".join(structure_errors)
             candidate = normalized
             validation_errors.append(error)
             events.append(
                 {
                     "attempt": attempt,
-                    "action": "candidate_critic",
+                    "action": "strategy_patch_structure",
                     "valid": False,
                     "error": error,
                     "llm_calls": llm_calls,
@@ -349,7 +352,7 @@ def run_optimization_agent_loop(
             )
             if attempt <= MAX_VALIDATION_RETRIES:
                 print(
-                    f"{prefix}OptimizationAgent: contract validation failed; "
+                    f"{prefix}OptimizationAgent: patch structure failed; "
                     f"retrying ({attempt}/{MAX_VALIDATION_RETRIES}): {error}",
                     flush=True,
                 )
@@ -370,6 +373,35 @@ def run_optimization_agent_loop(
                     "llm_calls": llm_calls,
                 }
             )
+            continue
+
+        semantic_errors = validate_strategy_patch_semantics(
+            decision=decision,
+            parent_text=parent_text,
+            candidate_text=patched_text,
+            patches=normalized["patches"],
+            capability_manifest=capability_manifest,
+            model=model,
+        )
+        if semantic_errors:
+            error = "; ".join(semantic_errors)
+            candidate = normalized
+            validation_errors.append(error)
+            events.append(
+                {
+                    "attempt": attempt,
+                    "action": "strategy_patch_semantics",
+                    "valid": False,
+                    "error": error,
+                    "llm_calls": llm_calls,
+                }
+            )
+            if attempt <= MAX_VALIDATION_RETRIES:
+                print(
+                    f"{prefix}OptimizationAgent: patch semantics failed; "
+                    f"retrying ({attempt}/{MAX_VALIDATION_RETRIES}): {error}",
+                    flush=True,
+                )
             continue
 
         payload = {

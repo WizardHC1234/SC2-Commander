@@ -38,10 +38,10 @@ def build_candidate_prompt(
 
 Keep the same Cross-match hypothesis and plan direction.
 
-Fix only the reported validator or critic errors.
+Fix only the reported patch validation errors.
 
-You may add, remove, or revise paragraph patches when required to make the
-same hypothesis internally consistent.
+You may add, remove, or revise paragraph patches when required to make the same
+hypothesis internally consistent.
 
 Do not introduce a new strategic objective.
 Do not modify unrelated paragraphs.

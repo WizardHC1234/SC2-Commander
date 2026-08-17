@@ -10,6 +10,7 @@ from .context import (
     render_skill_context,
 )
 from .optimizer_prompt import build_candidate_prompt
+from .strategy_patch_validator import build_strategy_patch_validation_prompt
 from .types import BattleAnalysis, ToolObservation
 
 
@@ -458,4 +459,5 @@ __all__ = [
     "build_cross_match_decision_prompt",
     "build_cross_match_discovery_prompt",
     "build_fixed_match_summary_prompt",
+    "build_strategy_patch_validation_prompt",
 ]
