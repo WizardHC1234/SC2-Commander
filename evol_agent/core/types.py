@@ -94,6 +94,7 @@ class EvolRunRequest:
     dry_run: bool = False
     resume_dir: Optional[Path] = None
     analysis_seed_dir: Optional[Path] = None
+    match_summary_cache_path: Optional[Path] = None
     prior_experiences: list[Any] = field(default_factory=list)
 
 

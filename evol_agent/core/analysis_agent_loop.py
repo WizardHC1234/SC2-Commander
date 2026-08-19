@@ -7,7 +7,11 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .checkpoint import EvolCheckpoint, stage_reached
+from .checkpoint import (
+    EvolCheckpoint,
+    battle_analysis_from_dict,
+    stage_reached,
+)
 from .config import (
     ANALYSIS_ENABLE_REASONING,
     DEFAULT_ANALYSIS_MODEL,
@@ -24,6 +28,7 @@ from .loop_helpers import (
     normalize_strategy_contract,
 )
 from .match_summary import run_fixed_match_summary
+from .match_summary_cache import MatchSummaryCache
 from .evidence_retrieval import build_retrieval_evidence_packet
 from .prompts import (
     build_cross_match_decision_prompt,
@@ -1009,6 +1014,7 @@ def _summarize_matches(
     prefix: str,
     checkpoint: EvolCheckpoint | None,
     summary_seed_checkpoint: EvolCheckpoint | None = None,
+    match_summary_cache_path: Path | None = None,
 ) -> tuple[
     list[GameDigest],
     list[BattleAnalysis],
@@ -1029,6 +1035,7 @@ def _summarize_matches(
         tuple[GameDigest, BattleAnalysis, bool, list[str], list[dict[str, Any]]],
     ] = {}
     reused_paths: set[str] = set()
+    summary_cache = MatchSummaryCache(match_summary_cache_path)
     if summary_seed_checkpoint is not None:
         try:
             seed_digests, seed_analyses, seed_completed, seed_events, _seed_errors = (
@@ -1069,6 +1076,52 @@ def _summarize_matches(
                 f"{prefix}AnalysisAgent: summary seed ignored: {exc}",
                 flush=True,
             )
+
+    for game_index, record in enumerate(records, 1):
+        if game_index in results:
+            continue
+        cached = summary_cache.get(
+            record,
+            strategy_name=strategy_name,
+            race=race,
+            model=model,
+        )
+        if cached is None:
+            continue
+        summary = cached["summary"]
+        digest = evidence_digest(record, game_index)
+        raw_digest = cached.get("digest")
+        cached_digest_summary = (
+            str(raw_digest.get("summary") or "").strip()
+            if isinstance(raw_digest, dict)
+            else ""
+        )
+        digest.summary = cached_digest_summary or (
+            f"{summary.get('result') or record.result} "
+            f"duration_s={summary.get('duration_s')} "
+            f"events={len(summary.get('events') or [])}"
+        )
+        digest.raw["summary"] = digest.summary
+        digest.raw["analysis"] = summary
+        digest.raw["summary_input"] = {
+            "format": "fixed_match_timeline_v2",
+            "source": "persistent_cache",
+        }
+        analysis = battle_analysis_from_dict(cached["summary"])
+        results[game_index] = (
+            digest,
+            analysis,
+            True,
+            [],
+            [
+                {
+                    "action": "reuse_match_summary",
+                    "source_cache": str(match_summary_cache_path or ""),
+                    "cached_by": cached.get("source") or "persistent_cache",
+                }
+            ],
+        )
+        reused_paths.add(str(Path(record.file).resolve()))
 
     pending_records = [
         (game_index, record)
@@ -1114,7 +1167,20 @@ def _summarize_matches(
             for future in as_completed(futures):
                 game_index, record = futures[future]
                 try:
-                    results[game_index] = future.result()
+                    result = future.result()
+                    results[game_index] = result
+                    digest, analysis, ok, item_errors, _item_events = result
+                    if ok:
+                        summary_cache.put(
+                            record,
+                            strategy_name=strategy_name,
+                            race=race,
+                            model=model,
+                            summary=analysis.raw,
+                            errors=item_errors,
+                            source="analysis_agent",
+                            digest=digest.raw,
+                        )
                 except Exception as exc:  # noqa: BLE001 - preserve the remaining batch
                     error = f"Match summary crashed: {type(exc).__name__}: {exc}"
                     digest = evidence_digest(record, game_index)
@@ -1186,6 +1252,7 @@ def run_analysis_agent_loop(
     prefix: str = "  ",
     checkpoint: EvolCheckpoint | None = None,
     summary_seed_checkpoint: EvolCheckpoint | None = None,
+    match_summary_cache_path: Path | None = None,
     prior_experiences: list[Any] | None = None,
     capability_manifest: dict[str, Any] | None = None,
 ) -> AnalysisPipelineResult:
@@ -1233,6 +1300,7 @@ def run_analysis_agent_loop(
         prefix=prefix,
         checkpoint=checkpoint,
         summary_seed_checkpoint=summary_seed_checkpoint,
+        match_summary_cache_path=match_summary_cache_path,
     )
     if completed == 0:
         analysis = fallback_analysis(

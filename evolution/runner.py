@@ -1384,6 +1384,9 @@ class EvolutionRunner:
                 prior_experiences=prior_experiences,
                 resume_dir=resume_dir,
                 analysis_seed_dir=analysis_seed_dir,
+                match_summary_cache_path=(
+                    self.run_dir / "experiment_match_summary_cache.json"
+                ),
             )
         )
 
@@ -1508,6 +1511,8 @@ class EvolutionRunner:
         if target_index is None:
             return
         row = rows[target_index]
+        if batch.games < int(row.get("games") or 0):
+            return
         mastered = int(row.get("mastered_levels") or 0)
         progress_score = curriculum_progress_score(
             mastered,
@@ -2074,6 +2079,9 @@ class EvolutionRunner:
                     else None
                 ),
             }
+        self._sync_champion_baseline(state, comparison_champion)
+        if str(state.get("search_parent") or champion) == champion:
+            self._sync_search_parent(state, champion, comparison_champion)
         probability = posterior_probability_better(
             comparison_candidate.to_dict(),
             comparison_champion.to_dict(),
@@ -2129,11 +2137,23 @@ class EvolutionRunner:
             "mechanism_evidence": [],
             "combat_evidence": [],
             "runtime_findings": [],
-            "evidence_limits": ["post-experiment mechanism audit was unavailable"],
-            "lesson": "",
+            "evidence_limits": [
+                (
+                    "mechanism audit skipped because the candidate reached the "
+                    "difficulty mastery threshold"
+                    if candidate_mastered
+                    else "post-experiment mechanism audit was unavailable"
+                )
+            ],
+            "lesson": (
+                "The candidate reached the difficulty mastery threshold, so it was "
+                "accepted and advanced without a post-experiment mechanism audit."
+                if candidate_mastered
+                else ""
+            ),
         }
-        auditor = self._experiment_auditor
-        if auditor is None and self._batch_executor is None:
+        auditor = None if candidate_mastered else self._experiment_auditor
+        if not candidate_mastered and auditor is None and self._batch_executor is None:
             auditor = audit_experiment
         if auditor is not None:
             try:
@@ -2195,6 +2215,7 @@ class EvolutionRunner:
                                 reverse=True,
                             )
                     parent_analysis: dict[str, Any] = {}
+                    parent_analysis_record_paths: list[str] = []
                     for analysis_file in parent_analysis_files:
                         try:
                             loaded_analysis = json.loads(
@@ -2210,12 +2231,26 @@ class EvolutionRunner:
                         if recorded_strategy and recorded_strategy != mutation_parent:
                             continue
                         parent_analysis = loaded_analysis
+                        checkpoint_file = analysis_file.parent / "checkpoint.json"
+                        try:
+                            checkpoint_meta = json.loads(
+                                checkpoint_file.read_text(encoding="utf-8-sig")
+                            )
+                        except (OSError, ValueError):
+                            checkpoint_meta = {}
+                        if isinstance(checkpoint_meta, dict):
+                            parent_analysis_record_paths = [
+                                str(path)
+                                for path in (checkpoint_meta.get("record_files") or [])
+                                if str(path).strip()
+                            ]
                         break
                     audit_kwargs.update(
                         summary_cache_path=(
                             self.run_dir / "experiment_match_summary_cache.json"
                         ),
                         parent_analysis=parent_analysis,
+                        parent_analysis_record_paths=parent_analysis_record_paths,
                     )
                 mechanism_audit = auditor(**audit_kwargs)
                 if not isinstance(mechanism_audit, dict):

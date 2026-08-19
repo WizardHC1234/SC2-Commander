@@ -17,6 +17,7 @@ from evol_agent.core.checkpoint import (
 )
 from evol_agent.core.context import render_single_game_analyses
 from evol_agent.core.match_summary import run_fixed_match_summary
+from evol_agent.core.match_summary_cache import MatchSummaryCache
 from evol_agent.core.prompts import (
     build_cross_match_decision_prompt,
     build_cross_match_discovery_prompt,
@@ -523,6 +524,115 @@ def test_match_summary_seed_reuses_old_records_and_summarizes_only_new_records(
     assert errors == []
     assert [event["reused"] for event in events] == [True, True, False]
     assert target.load_match_summaries()[2] == 3
+
+
+def test_match_summary_combines_checkpoint_seed_with_persistent_audit_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    records = [
+        _record_ns(_write_record(tmp_path / f"match_{index}.json", _multi_row_record()))
+        for index in range(1, 4)
+    ]
+    seed = EvolCheckpoint(tmp_path / "seed", {"stage": "created"})
+    seed.run_dir.mkdir(parents=True)
+    seed.save_match_summaries(
+        game_digests=[
+            GameDigest(
+                record_path=record.file,
+                result="Defeat",
+                duration="12:22",
+                summary=f"checkpoint-{index}",
+                raw={
+                    "record_path": record.file,
+                    "result": "Defeat",
+                    "duration": "12:22",
+                    "summary": f"checkpoint-{index}",
+                },
+            )
+            for index, record in enumerate(records[:2], 1)
+        ],
+        single_game_analyses=[
+            BattleAnalysis(
+                strategy_name="tank",
+                race="terran",
+                sample_size=1,
+                record_mix="0W/1L",
+                raw={
+                    "strategy_name": "tank",
+                    "race": "terran",
+                    "sample_size": 1,
+                    "record_mix": "0W/1L",
+                    "result": "Defeat",
+                    "events": [],
+                },
+            )
+            for _record in records[:2]
+        ],
+        completed_matches=2,
+        events=[
+            {"record_path": record.file, "completed": True}
+            for record in records[:2]
+        ],
+    )
+    cache_path = tmp_path / "summary_cache.json"
+    cache = MatchSummaryCache(cache_path)
+    cache.put(
+        records[2],
+        strategy_name="tank",
+        race="terran",
+        model="test-model",
+        summary={
+            "strategy_name": "tank",
+            "race": "terran",
+            "sample_size": 1,
+            "record_mix": "0W/1L",
+            "result": "Defeat",
+            "duration_s": 742,
+            "events": [],
+        },
+        errors=[],
+        source="experiment_audit",
+        digest={
+            "record_path": records[2].file,
+            "result": "Defeat",
+            "duration": "12:22",
+            "summary": "audit-cache",
+        },
+    )
+    target = EvolCheckpoint(tmp_path / "target", {"stage": "created"})
+    target.run_dir.mkdir(parents=True)
+
+    def unexpected_summary(**_kwargs):
+        raise AssertionError("all summaries should be reused")
+
+    monkeypatch.setattr(
+        "evol_agent.core.analysis_agent_loop.run_fixed_match_summary",
+        unexpected_summary,
+    )
+    digests, analyses, completed, events, errors = _summarize_matches(
+        strategy_name="tank",
+        race="terran",
+        records=records,
+        skill_texts={"strategy.md": VALID_STRATEGY},
+        model="test-model",
+        prefix="",
+        checkpoint=target,
+        summary_seed_checkpoint=seed,
+        match_summary_cache_path=cache_path,
+    )
+
+    assert [digest.summary for digest in digests] == [
+        "checkpoint-1",
+        "checkpoint-2",
+        "audit-cache",
+    ]
+    assert len(analyses) == 3
+    assert completed == 3
+    assert errors == []
+    assert [event["reused"] for event in events] == [True, True, True]
+    assert events[2]["events"][0]["cached_by"] == "experiment_audit"
+    assert digests[2].raw["game_index"] == 3
 
 
 def test_analysis_seed_accepts_a_completed_subset(tmp_path: Path) -> None:

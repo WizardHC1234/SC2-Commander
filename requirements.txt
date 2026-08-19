@@ -16,6 +16,7 @@ aiohttp==3.7.4
 numpy<2.0.0
 scipy==1.10.0
 scikit-learn<2.0.0
+matplotlib>=3.7,<4.0       # 论文实验曲线与一致性指标绘图
 
 # === 图像处理与工具 ===
 opencv-python

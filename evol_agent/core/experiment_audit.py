@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from threading import Lock
 from typing import Any
 
 from .capabilities import build_executor_capability_manifest
 from .config import DEFAULT_ANALYSIS_MODEL, MAX_CONCURRENT_MATCH_SUBAGENTS
 from .llm import call_json_llm
 from .match_summary import run_fixed_match_summary
+from .match_summary_cache import MatchSummaryCache
 from .types import GameEvidence
 from ..analysis.record_reader import find_record_jsons, is_completed_match_record
 
@@ -27,110 +26,6 @@ _HYPOTHESIS_VERDICTS = {
     "inconclusive",
     "not_tested",
 }
-
-
-class _MatchSummaryCache:
-    """Persistent per-record summaries shared by analysis and experiment audit."""
-
-    _SCHEMA = "sc2.experiment_match_summary_cache.v1"
-
-    def __init__(self, path: Path | None) -> None:
-        self.path = path
-        self._lock = Lock()
-        self._entries: dict[str, dict[str, Any]] = {}
-        if path is None or not path.is_file():
-            return
-        try:
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
-            return
-        entries = data.get("entries") if isinstance(data, dict) else None
-        if isinstance(entries, dict):
-            self._entries = {
-                str(key): dict(value)
-                for key, value in entries.items()
-                if isinstance(value, dict)
-            }
-
-    @staticmethod
-    def _key(path: str | Path) -> str:
-        return os.path.normcase(os.path.abspath(os.fspath(path)))
-
-    @staticmethod
-    def _fingerprint(path: str | Path) -> tuple[int, int] | None:
-        try:
-            stat = Path(path).stat()
-        except OSError:
-            return None
-        return stat.st_size, stat.st_mtime_ns
-
-    def get(
-        self,
-        record: GameEvidence,
-        *,
-        strategy_name: str,
-        race: str,
-    ) -> dict[str, Any] | None:
-        fingerprint = self._fingerprint(record.file)
-        if fingerprint is None:
-            return None
-        with self._lock:
-            entry = self._entries.get(self._key(record.file))
-            if not isinstance(entry, dict):
-                return None
-            if (
-                int(entry.get("size") or -1) != fingerprint[0]
-                or int(entry.get("mtime_ns") or -1) != fingerprint[1]
-                or str(entry.get("strategy") or "") != strategy_name
-                or str(entry.get("race") or "") != race
-                or not isinstance(entry.get("summary"), dict)
-            ):
-                return None
-            return {
-                "summary": dict(entry["summary"]),
-                "errors": [str(item) for item in (entry.get("errors") or [])],
-            }
-
-    def put(
-        self,
-        record: GameEvidence,
-        *,
-        strategy_name: str,
-        race: str,
-        summary: dict[str, Any],
-        errors: list[str],
-        source: str,
-    ) -> None:
-        fingerprint = self._fingerprint(record.file)
-        if fingerprint is None or not summary:
-            return
-        with self._lock:
-            self._entries[self._key(record.file)] = {
-                "record_path": str(Path(record.file).resolve()),
-                "size": fingerprint[0],
-                "mtime_ns": fingerprint[1],
-                "strategy": strategy_name,
-                "race": race,
-                "summary": summary,
-                "errors": errors,
-                "source": source,
-            }
-            self._flush_locked()
-
-    def _flush_locked(self) -> None:
-        if self.path is None:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
-        temp_path.write_text(
-            json.dumps(
-                {"schema": self._SCHEMA, "entries": self._entries},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        temp_path.replace(self.path)
 
 
 _PARENT_ANALYSIS_FIELDS = (
@@ -199,7 +94,7 @@ def _summarize_records(
     race: str,
     model: str,
     label: str,
-    cache: _MatchSummaryCache,
+    cache: MatchSummaryCache,
 ) -> list[dict[str, Any]]:
     if not records:
         return []
@@ -210,6 +105,7 @@ def _summarize_records(
             record,
             strategy_name=strategy_name,
             race=race,
+            model=model,
         )
         if cached is None:
             pending.append((index, record))
@@ -247,7 +143,7 @@ def _summarize_records(
         for future in as_completed(futures):
             index = futures[future]
             try:
-                _digest, analysis, ok, errors, _events = future.result()
+                digest, analysis, ok, errors, _events = future.result()
                 summaries[index] = {
                     "game": index,
                     "result": records[index - 1].result,
@@ -259,9 +155,15 @@ def _summarize_records(
                         records[index - 1],
                         strategy_name=strategy_name,
                         race=race,
+                        model=model,
                         summary=analysis.raw,
                         errors=errors,
                         source="experiment_audit",
+                        digest=(
+                            digest.raw
+                            if digest is not None and isinstance(digest.raw, dict)
+                            else {}
+                        ),
                     )
             except Exception as exc:  # preserve the evolution run on audit failure
                 summaries[index] = {
@@ -282,6 +184,7 @@ def build_experiment_audit_prompt(
     candidate_summaries: list[dict[str, Any]],
     outcome_comparison: dict[str, Any],
     capability_manifest: dict[str, Any],
+    parent_new_summaries: list[dict[str, Any]] | None = None,
 ) -> str:
     return f"""You are EvolAgent's post-experiment mechanism auditor.
 
@@ -290,8 +193,10 @@ the match. Attack timing, production synchronization, resource banking, scouting
 and gate attainment are intermediate mechanisms only.
 
 Audit the pre-registered hypothesis using the parent analysis already produced
-before candidate generation and the candidate match summaries collected after the
-change. Do not re-analyze parent matches or propose a new strategy in this step.
+before candidate generation, any Parent confirmation-match summaries added after
+that analysis, and the candidate match summaries collected after the change. Do
+not re-analyze Parent matches already covered by the prior analysis or propose a
+new strategy in this step.
 
 The experiment is one primary failure mode addressed by a coordinated intervention
 package. Audit the package as a whole, not merely the easiest individual lever.
@@ -343,6 +248,9 @@ Outcome comparison:
 
 Parent prior cross-match analysis:
 {json.dumps(parent_analysis, ensure_ascii=False, indent=2)}
+
+Parent factual summaries added after the prior analysis:
+{json.dumps(parent_new_summaries or [], ensure_ascii=False, indent=2)}
 
 Candidate factual match summaries:
 {json.dumps(candidate_summaries, ensure_ascii=False, indent=2)}
@@ -406,9 +314,13 @@ def audit_experiment(
     model: str = "",
     summary_cache_path: Path | None = None,
     parent_analysis: dict[str, Any] | None = None,
+    parent_analysis_record_paths: list[str] | None = None,
 ) -> dict[str, Any]:
-    summary_cache = _MatchSummaryCache(summary_cache_path)
+    summary_cache = MatchSummaryCache(summary_cache_path)
     compact_parent_analysis = _compact_parent_analysis(parent_analysis or {})
+    parent_records = _evidence_from_batches(
+        parent_batch_dirs, strategy=parent_strategy_name
+    )
     candidate_records = _evidence_from_batches(
         candidate_batch_dirs, strategy=candidate_strategy_name
     )
@@ -424,12 +336,36 @@ def audit_experiment(
             ],
             "lesson": "The mechanism could not be audited from the available evidence.",
         }
+    selected_model = str(model or "").strip() or DEFAULT_ANALYSIS_MODEL
+    analyzed_parent_paths = {
+        MatchSummaryCache.key(path)
+        for path in (parent_analysis_record_paths or [])
+        if str(path).strip()
+    }
+    new_parent_records = (
+        [
+            record
+            for record in parent_records
+            if MatchSummaryCache.key(record.file) not in analyzed_parent_paths
+        ]
+        if analyzed_parent_paths
+        else []
+    )
+    covered_parent_count = len(parent_records) - len(new_parent_records)
     print(
-        f"    [parent: {parent_strategy_name}] reusing prior cross-match analysis; "
-        "0 parent matches will be summarized",
+        f"    [parent: {parent_strategy_name}] reusing prior cross-match analysis "
+        f"for {covered_parent_count} matches; {len(new_parent_records)} newly added "
+        "parent matches require summaries",
         flush=True,
     )
-    selected_model = str(model or "").strip() or DEFAULT_ANALYSIS_MODEL
+    parent_new_summaries = _summarize_records(
+        new_parent_records,
+        strategy_name=parent_strategy_name,
+        race=race,
+        model=selected_model,
+        label="parent-new",
+        cache=summary_cache,
+    )
     candidate_summaries = _summarize_records(
         candidate_records,
         strategy_name=candidate_strategy_name,
@@ -447,6 +383,7 @@ def audit_experiment(
             candidate_summaries=candidate_summaries,
             outcome_comparison=outcome_comparison,
             capability_manifest=build_executor_capability_manifest(race),
+            parent_new_summaries=parent_new_summaries,
         ),
         model=selected_model,
         is_reasoning=True,

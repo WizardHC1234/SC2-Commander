@@ -31,6 +31,10 @@ candidate is not promoted even if its sampled score is higher. The posterior
 probability is retained only as an informational uncertainty statistic; it does
 not participate in selection.
 
+If the initial Candidate batch already reaches the difficulty mastery win rate,
+the Candidate is accepted immediately, the post-experiment mechanism audit is
+skipped, and the curriculum advances to the next difficulty.
+
 When later evidence adds confirmation matches for an unchanged search parent,
 the next generation seeds analysis from the latest compatible checkpoint. Match
 summaries are reused by resolved record path, so only newly added records call the

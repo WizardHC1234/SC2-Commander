@@ -144,11 +144,12 @@ def discover_record_files(paths: Iterable[Path]) -> list[Path]:
             continue
         batch_dirs = (
             [input_path]
-            if input_path.name.startswith("batch_")
+            if input_path.name.startswith(("batch_", "ev_"))
             else [
                 path
                 for path in input_path.iterdir()
-                if path.is_dir() and path.name.startswith("batch_")
+                if path.is_dir()
+                and path.name.startswith(("batch_", "ev_"))
             ]
         )
         for batch_dir in batch_dirs:
@@ -299,7 +300,7 @@ def load_match(path: Path) -> Match:
 
 def batch_name(path: Path) -> str:
     for parent in path.parents:
-        if parent.name.startswith("batch_"):
+        if parent.name.startswith(("batch_", "ev_")):
             return parent.name
     return ""
 

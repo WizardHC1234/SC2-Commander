@@ -4,7 +4,12 @@ import json
 import math
 from pathlib import Path
 
-from tools.strategy_execution_metrics import evaluate_match, load_match
+from tools.strategy_execution_metrics import (
+    batch_name,
+    discover_record_files,
+    evaluate_match,
+    load_match,
+)
 
 
 def _spec(*, gate: int = 2, first_role: str | None = None) -> dict:
@@ -54,6 +59,17 @@ def _observation(*, marine_count: int, attacking: bool) -> dict:
         "movement_mode": "push",
         "retreat_ratio": None,
     }
+
+
+def test_evolution_batch_directories_are_discovered(tmp_path: Path) -> None:
+    evolution_batch = tmp_path / "ev_example_g000_cand"
+    record_dir = evolution_batch / "match_0"
+    record_dir.mkdir(parents=True)
+    record = record_dir / "match.json"
+    record.write_text("{}", encoding="utf-8")
+
+    assert discover_record_files([tmp_path]) == [record]
+    assert batch_name(record) == evolution_batch.name
     return {
         "economy": {"own_base_count": 1},
         "production": {

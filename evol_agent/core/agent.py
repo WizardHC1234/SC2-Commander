@@ -73,6 +73,11 @@ def _base_run_context(
             "analysis_seed_dir": (
                 str(request.analysis_seed_dir) if request.analysis_seed_dir else ""
             ),
+            "match_summary_cache_path": (
+                str(request.match_summary_cache_path)
+                if request.match_summary_cache_path
+                else ""
+            ),
             "prior_experiences": list(request.prior_experiences),
         },
         "selected_group": {
@@ -341,6 +346,7 @@ class EvolAgent:
                 prefix="    ",
                 checkpoint=checkpoint,
                 summary_seed_checkpoint=analysis_seed,
+                match_summary_cache_path=request.match_summary_cache_path,
                 prior_experiences=analysis_prior_experiences,
                 capability_manifest=capability_manifest,
             )

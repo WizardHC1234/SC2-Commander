@@ -32,6 +32,39 @@ def _batch(strategy: str, difficulty: str, wins: int, root: Path) -> BatchResult
     )
 
 
+def test_generate_candidate_passes_shared_match_summary_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class FakeEvolAgent:
+        def __init__(self, *, model: str = "") -> None:
+            captured["model"] = model
+
+        def run(self, request):
+            captured["request"] = request
+            return EvolRunResult(ok=False, message="captured")
+
+    monkeypatch.setattr("evolution.runner.EvolAgent", FakeEvolAgent)
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="commander-model",
+            evolution_model="analysis-model",
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    batch = _batch("tank", "harder", 5, tmp_path)
+
+    runner.generate_candidate("tank", batch, [], evidence_batches=[batch])
+
+    assert captured["request"].match_summary_cache_path == (
+        tmp_path / "run" / "experiment_match_summary_cache.json"
+    )
+
+
 def test_evolution_accepts_only_strict_improvement_and_advances(tmp_path: Path) -> None:
     scores = {"tank": 5, "tank_opt1": 10}
 
@@ -556,6 +589,68 @@ def test_later_close_candidate_is_topped_up_without_replaying_champion(
     assert decision["candidate_evidence_games"] == 14
 
 
+def test_later_generation_does_not_overwrite_confirmed_champion_with_smaller_sample(
+    tmp_path: Path,
+) -> None:
+    results = {
+        "tank": [(5, 10), (3, 4)],
+        "tank_opt1": [(5, 10), (2, 4)],
+        "tank_opt2": [(9, 10)],
+    }
+    calls = {strategy: 0 for strategy in results}
+    generation = 0
+
+    def play(
+        strategy: str, difficulty: str, expected_games: int = 10
+    ) -> BatchResult:
+        index = calls[strategy]
+        calls[strategy] += 1
+        wins, games = results[strategy][index]
+        assert expected_games == games
+        return BatchResult(
+            name=f"{strategy}_{index}",
+            path=tmp_path / f"{strategy}_{index}",
+            strategy=strategy,
+            difficulty=difficulty,
+            wins=wins,
+            draws=0,
+            losses=games - wins,
+        )
+
+    def evolve(
+        champion: str, batch: BatchResult, experiences: list[object]
+    ) -> EvolRunResult:
+        nonlocal generation
+        generation += 1
+        candidate = tmp_path / "skills" / "terran" / f"tank_opt{generation}"
+        candidate.mkdir(parents=True, exist_ok=True)
+        return EvolRunResult(ok=True, message="OK", output_dir=candidate)
+
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_total_generations=2,
+            confirmation_matches=4,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    )
+
+    state = runner.run()
+
+    rows = list(csv.DictReader(runner.history_path.open(encoding="utf-8")))
+    tank_row = next(row for row in rows if row["strategy"] == "tank")
+    assert tank_row["wins"] == "8"
+    assert tank_row["losses"] == "6"
+    assert tank_row["games"] == "14"
+    assert tank_row["batch"] == "tank_0+tank_1"
+    assert state["champion"] == "tank_opt2"
+
+
 def test_candidate_with_ninety_percent_win_rate_skips_confirmation_and_advances(
     tmp_path: Path,
 ) -> None:
@@ -576,6 +671,9 @@ def test_candidate_with_ninety_percent_win_rate_skips_confirmation_and_advances(
         candidate.mkdir(parents=True, exist_ok=True)
         return EvolRunResult(ok=True, message="OK", output_dir=candidate)
 
+    def audit(**_kwargs: object) -> dict[str, object]:
+        raise AssertionError("mastered candidate should skip mechanism audit")
+
     runner = EvolutionRunner(
         EvolutionConfig(
             strategy="tank",
@@ -588,6 +686,7 @@ def test_candidate_with_ninety_percent_win_rate_skips_confirmation_and_advances(
         project_root=tmp_path,
         batch_executor=play,
         candidate_generator=evolve,
+        experiment_auditor=audit,
     )
     state = runner.run()
 
@@ -605,6 +704,8 @@ def test_candidate_with_ninety_percent_win_rate_skips_confirmation_and_advances(
     assert decision["candidate_win_rate"] == 0.9
     assert decision["confirmation"] is None
     assert decision["selection_rule"] == "candidate_win_rate_meets_mastery_threshold"
+    assert decision["implementation_verdict"] == "unknown"
+    assert "mastery threshold" in decision["audit_evidence_limits"][0]
 
 
 def test_execution_invalid_audit_blocks_candidate_promotion(tmp_path: Path) -> None:
@@ -613,7 +714,7 @@ def test_execution_invalid_audit_blocks_candidate_promotion(tmp_path: Path) -> N
     (parent / "strategy.md").write_text("parent", encoding="utf-8")
 
     def play(strategy: str, difficulty: str) -> BatchResult:
-        return _batch(strategy, difficulty, 5 if strategy == "tank" else 10, tmp_path)
+        return _batch(strategy, difficulty, 5 if strategy == "tank" else 8, tmp_path)
 
     def evolve(
         champion: str, batch: BatchResult, experiences: list[object]
