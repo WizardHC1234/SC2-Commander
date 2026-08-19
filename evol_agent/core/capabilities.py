@@ -90,6 +90,10 @@ def build_executor_capability_manifest(race: str) -> dict[str, Any]:
             "group IDs fixed before observation",
             "manual unit-level target selection",
             "unobserved opponent truth",
+            "transport loading or unloading",
+            "manual unit transformations or transformation-readiness gates",
+            "manual combat-ability use",
+            "a runtime transformation state as an attack-gate prerequisite",
         ],
         "catalog_error": error,
     }

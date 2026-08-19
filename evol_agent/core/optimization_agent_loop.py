@@ -54,9 +54,25 @@ def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[
         "strengths_to_preserve": strengths,
         "priority_problem": priority,
         "hypothesis": hypothesis,
+        "mechanism_family": str(raw.get("mechanism_family") or "").strip(),
+        "failure_mode_analysis": (
+            dict(raw.get("failure_mode_analysis"))
+            if isinstance(raw.get("failure_mode_analysis"), dict)
+            else {}
+        ),
+        "priority_alignment": (
+            dict(raw.get("priority_alignment"))
+            if isinstance(raw.get("priority_alignment"), dict)
+            else {}
+        ),
         "mechanism_prediction": (
             dict(raw.get("mechanism_prediction"))
             if isinstance(raw.get("mechanism_prediction"), dict)
+            else {}
+        ),
+        "retrieval_assessment": (
+            dict(raw.get("retrieval_assessment"))
+            if isinstance(raw.get("retrieval_assessment"), dict)
             else {}
         ),
         "plan": plan,
@@ -154,6 +170,55 @@ def _normalize_optimizer_candidate(
         for item in (raw.get("preserved_strengths") or [])
         if str(item).strip()
     ]
+    raw_inheritance = raw.get("inheritance")
+    inheritance = dict(raw_inheritance) if isinstance(raw_inheritance, dict) else {}
+
+    def inheritance_items(key: str) -> list[dict[str, str]]:
+        values = inheritance.get(key)
+        if not isinstance(values, list):
+            return []
+        normalized: list[dict[str, str]] = []
+        for value in values:
+            if isinstance(value, dict):
+                item = {
+                    "item": str(
+                        value.get("item")
+                        or value.get("mechanism")
+                        or value.get("change")
+                        or ""
+                    ).strip(),
+                    "reason": str(
+                        value.get("reason")
+                        or value.get("evidence")
+                        or value.get("why")
+                        or ""
+                    ).strip(),
+                }
+            else:
+                item = {"item": str(value).strip(), "reason": ""}
+            if item["item"]:
+                normalized.append(item)
+        return normalized
+
+    normalized_inheritance = {
+        "keep": inheritance_items("keep"),
+        "revise": inheritance_items("revise"),
+        "remove": inheritance_items("remove"),
+    }
+    if not any(normalized_inheritance.values()):
+        # Compatibility fallback for older optimizer responses. Live prompts now
+        # require an explicit ledger, but old checkpoints can still be resumed.
+        normalized_inheritance = {
+            "keep": [{"item": item, "reason": "preserved strength"} for item in preserved],
+            "revise": [
+                {
+                    "item": item["target"],
+                    "reason": item["why_required"],
+                }
+                for item in normalized_patches
+            ],
+            "remove": [],
+        }
     return (
         {
             "action": action,
@@ -161,6 +226,7 @@ def _normalize_optimizer_candidate(
             "expected_effect": str(raw.get("expected_effect") or "").strip(),
             "main_risk": str(raw.get("main_risk") or "").strip(),
             "preserved_strengths": preserved,
+            "inheritance": normalized_inheritance,
         },
         "",
     )
@@ -208,9 +274,26 @@ def _candidate_rationale(
     patches = list(candidate.get("patches") or [])
     return {
         "hypothesis": hypothesis,
+        "mechanism_family": str(decision.get("mechanism_family") or "").strip(),
+        "failure_mode_analysis": (
+            dict(decision.get("failure_mode_analysis"))
+            if isinstance(decision.get("failure_mode_analysis"), dict)
+            else {}
+        ),
+        "priority_alignment": (
+            dict(decision.get("priority_alignment"))
+            if isinstance(decision.get("priority_alignment"), dict)
+            else {}
+        ),
         "mechanism_prediction": mechanism_prediction,
+        "retrieval_assessment": (
+            dict(decision.get("retrieval_assessment"))
+            if isinstance(decision.get("retrieval_assessment"), dict)
+            else {}
+        ),
         "priority_problem": problem,
         "plan_direction": direction,
+        "intervention_package": dict(plan),
         "primary_lever": "other",
         "predictions": [
             str(mechanism_prediction.get("outcome_prediction") or expected_effect).strip()
@@ -231,6 +314,7 @@ def _candidate_rationale(
         "preserved_strength": strengths[0] if strengths else "",
         "strengths_to_preserve": list(decision.get("strengths_to_preserve") or []),
         "preserved_strengths": list(candidate.get("preserved_strengths") or strengths),
+        "inheritance": dict(candidate.get("inheritance") or {}),
         "selected_plan_ids": ["D1"],
         "overall_assessment": direction,
         "selected_changes": [
@@ -399,17 +483,59 @@ def run_optimization_agent_loop(
                 )
             continue
 
+        payload = {
+            **normalized,
+            "rationale": rationale,
+            "operations": operations,
+            "paragraph_changes": paragraph_changes,
+            "files": {"strategy.md": patched_text},
+        }
+        candidate = payload
+        draft_improvement = EvolImprovement(
+            analysis=rationale,
+            files=payload["files"],
+            raw=payload,
+        )
+        result = validate_improvement(
+            files=draft_improvement.files,
+            race=race,
+        )
+        if not result.ok:
+            validation_errors.append(result.error)
+            prompt_errors = [result.error]
+            events.append(
+                {
+                    "attempt": attempt,
+                    "action": normalized["action"],
+                    "valid": False,
+                    "error": result.error,
+                    "llm_calls": llm_calls,
+                    "paragraph_changes": paragraph_changes,
+                }
+            )
+            if attempt <= MAX_VALIDATION_RETRIES:
+                print(
+                    f"{prefix}OptimizationAgent: basic validation failed; "
+                    f"retrying ({attempt}/{MAX_VALIDATION_RETRIES}): {result.error}",
+                    flush=True,
+                )
+            continue
+
+        draft_improvement.files = result.files or draft_improvement.files
+        draft_improvement.raw["files"] = dict(draft_improvement.files)
+        last_improvement = draft_improvement
         semantic_errors = validate_strategy_patch_semantics(
             decision=decision,
             parent_text=parent_text,
             candidate_text=patched_text,
             patches=normalized["patches"],
+            inheritance=normalized.get("inheritance"),
             capability_manifest=capability_manifest,
+            knowledge_runs=knowledge_runs,
             model=model,
         )
         if semantic_errors:
             error = "; ".join(semantic_errors)
-            candidate = normalized
             validation_errors.append(error)
             prompt_errors = [error]
             events.append(
@@ -419,6 +545,7 @@ def run_optimization_agent_loop(
                     "valid": False,
                     "error": error,
                     "llm_calls": llm_calls,
+                    "paragraph_changes": paragraph_changes,
                 }
             )
             if attempt <= MAX_VALIDATION_RETRIES:
@@ -429,23 +556,6 @@ def run_optimization_agent_loop(
                 )
             continue
 
-        payload = {
-            **normalized,
-            "rationale": rationale,
-            "operations": operations,
-            "paragraph_changes": paragraph_changes,
-            "files": {"strategy.md": patched_text},
-        }
-        candidate = payload
-        last_improvement = EvolImprovement(
-            analysis=rationale,
-            files=payload["files"],
-            raw=payload,
-        )
-        result = validate_improvement(
-            files=last_improvement.files,
-            race=race,
-        )
         events.append(
             {
                 "attempt": attempt,
@@ -456,25 +566,40 @@ def run_optimization_agent_loop(
                 "paragraph_changes": paragraph_changes,
             }
         )
-        if result.ok:
-            last_improvement.files = result.files or last_improvement.files
-            last_improvement.raw["files"] = dict(last_improvement.files)
-            print(
-                f"{prefix}OptimizationAgent: candidate passed basic validation",
-                flush=True,
-            )
-            return result, last_improvement, observations, validation_errors, events
-
-        validation_errors.append(result.error)
-        prompt_errors = [result.error]
-        if attempt <= MAX_VALIDATION_RETRIES:
-            print(
-                f"{prefix}OptimizationAgent: basic validation failed; "
-                f"retrying ({attempt}/{MAX_VALIDATION_RETRIES}): {result.error}",
-                flush=True,
-            )
+        print(
+            f"{prefix}OptimizationAgent: candidate passed validation",
+            flush=True,
+        )
+        return result, last_improvement, observations, validation_errors, events
 
     error = validation_errors[-1] if validation_errors else "OptimizationAgent exhausted"
+    if last_improvement is not None:
+        warning = {
+            "status": "accepted_after_semantic_retry_exhausted",
+            "errors": list(validation_errors),
+        }
+        last_improvement.raw["semantic_validation"] = warning
+        last_improvement.analysis["semantic_validation"] = warning
+        events.append(
+            {
+                "action": "accept_latest_candidate_after_semantic_retry_exhausted",
+                "valid": True,
+                "warning": error,
+                "llm_calls": llm_calls,
+            }
+        )
+        print(
+            f"{prefix}OptimizationAgent: semantic retries exhausted; "
+            "using the latest structurally valid candidate with warnings",
+            flush=True,
+        )
+        return (
+            ValidationResult(ok=True, error=error, files=dict(last_improvement.files)),
+            last_improvement,
+            observations,
+            validation_errors,
+            events,
+        )
     return (
         ValidationResult(ok=False, error=error),
         last_improvement,
@@ -482,4 +607,3 @@ def run_optimization_agent_loop(
         validation_errors,
         events,
     )
-

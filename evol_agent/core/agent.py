@@ -12,6 +12,7 @@ from .checkpoint import (
     load_checkpoint,
     normalize_record_files,
     stage_reached,
+    validate_analysis_seed_checkpoint,
     validate_checkpoint_fingerprint,
 )
 from .loop_helpers import fallback_analysis
@@ -69,6 +70,9 @@ def _base_run_context(
             "knowledge_mode": request.knowledge_mode,
             "dry_run": request.dry_run,
             "resume_dir": str(request.resume_dir) if request.resume_dir else "",
+            "analysis_seed_dir": (
+                str(request.analysis_seed_dir) if request.analysis_seed_dir else ""
+            ),
             "prior_experiences": list(request.prior_experiences),
         },
         "selected_group": {
@@ -189,6 +193,26 @@ class EvolAgent:
         }
         capability_manifest = build_executor_capability_manifest(race)
 
+        analysis_seed = None
+        if request.analysis_seed_dir:
+            try:
+                loaded_seed = load_checkpoint(request.analysis_seed_dir)
+                validate_analysis_seed_checkpoint(
+                    loaded_seed,
+                    strategy_name=strategy_name,
+                    race=race,
+                    knowledge_mode=request.knowledge_mode,
+                    record_files=record_files,
+                    analysis_model=analysis_model,
+                )
+                if checkpoint is None or loaded_seed.run_dir != checkpoint.run_dir:
+                    analysis_seed = loaded_seed
+            except (OSError, ValueError) as exc:
+                print(
+                    f"  EvolAgent: analysis seed ignored: {exc}",
+                    flush=True,
+                )
+
         if checkpoint is not None:
             try:
                 validate_checkpoint_fingerprint(
@@ -230,6 +254,12 @@ class EvolAgent:
             "run_dir": str(checkpoint.run_dir),
             "stage": checkpoint.stage,
         }
+        if analysis_seed is not None:
+            run_context["analysis_seed"] = {
+                "run_dir": str(analysis_seed.run_dir),
+                "stage": analysis_seed.stage,
+                "record_count": len(analysis_seed.meta.get("record_files") or []),
+            }
 
         if stage_reached(checkpoint.stage, "candidate"):
             message = f"checkpoint already produced a candidate at {checkpoint.run_dir}"
@@ -237,6 +267,7 @@ class EvolAgent:
             return EvolRunResult(
                 ok=True,
                 message=message,
+                checkpoint_dir=checkpoint.run_dir,
                 strategy_name=strategy_name,
                 race=race,
             )
@@ -274,6 +305,25 @@ class EvolAgent:
                 "resumed_from": "analysis_complete",
             }
         else:
+            analysis_prior_experiences = list(request.prior_experiences)
+            if analysis_seed is not None and stage_reached(
+                analysis_seed.stage, "analysis_complete"
+            ):
+                seeded_analysis, _observations, _trace, _events, _errors = (
+                    analysis_seed.load_analysis_complete()
+                )
+                analysis_prior_experiences.append(
+                    {
+                        "kind": "parent_analysis_seed",
+                        "source_checkpoint": str(analysis_seed.run_dir),
+                        "source_record_count": len(
+                            analysis_seed.meta.get("record_files") or []
+                        ),
+                        "current_record_count": len(records),
+                        "analysis": seeded_analysis.raw
+                        or seeded_analysis.__dict__,
+                    }
+                )
             print(
                 f"  EvolAgent running match summaries and one batch analysis "
                 f"for {len(records)} records: {race}/{strategy_name} "
@@ -290,7 +340,8 @@ class EvolAgent:
                 knowledge_mode=request.knowledge_mode,
                 prefix="    ",
                 checkpoint=checkpoint,
-                prior_experiences=request.prior_experiences,
+                summary_seed_checkpoint=analysis_seed,
+                prior_experiences=analysis_prior_experiences,
                 capability_manifest=capability_manifest,
             )
             digests = analysis_result.game_digests
@@ -338,6 +389,7 @@ class EvolAgent:
                 return EvolRunResult(
                     ok=False,
                     message=message,
+                    checkpoint_dir=checkpoint.run_dir,
                     strategy_name=strategy_name,
                     race=race,
                     game_digests=digests,
@@ -361,6 +413,7 @@ class EvolAgent:
             return EvolRunResult(
                 ok=True,
                 message="dry run complete",
+                checkpoint_dir=checkpoint.run_dir,
                 strategy_name=strategy_name,
                 race=race,
                 game_digests=digests,
@@ -396,6 +449,7 @@ class EvolAgent:
             return EvolRunResult(
                 ok=True,
                 message=message,
+                checkpoint_dir=checkpoint.run_dir,
                 decision_action=decision_action,
                 action_reason=action_reason,
                 strategy_name=strategy_name,
@@ -443,6 +497,7 @@ class EvolAgent:
             return EvolRunResult(
                 ok=False,
                 message=validation.error,
+                checkpoint_dir=checkpoint.run_dir,
                 strategy_name=strategy_name,
                 race=race,
                 game_digests=digests,
@@ -494,6 +549,7 @@ class EvolAgent:
         return EvolRunResult(
             ok=True,
             message="OK",
+            checkpoint_dir=checkpoint.run_dir,
             strategy_name=strategy_name,
             race=race,
             output_dir=out_dir,
@@ -504,4 +560,3 @@ class EvolAgent:
             changes=changes,
             tool_observations=observations,
         )
-

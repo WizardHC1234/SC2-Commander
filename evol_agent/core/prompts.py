@@ -6,6 +6,7 @@ from typing import Any
 from .context import (
     render_discovery_findings,
     render_knowledge_results,
+    render_retrieval_evidence,
     render_single_game_analyses,
     render_skill_context,
 )
@@ -43,7 +44,11 @@ CONTROLLABLE_OPTIMIZATION_SCOPE = """Controllable strategy scope:
 - Army: gather/readiness conditions, semantic objective, movement intent, reinforcement, retreat, rebuild, and re-engagement.
 - Information and redecision: scout/scan purpose, observable request conditions, required information, and meaningful wake checkpoints.
 - Strategy identity defines what must be preserved; it is not an extra optimization category.
-- Change only the smallest coherent area or combination supported by match evidence. Do not compensate for unavailable micro or runtime behavior in strategy.md.
+- Select the highest-priority evidence-supported failure mode using the shared SC2
+  Strategic Priority below. Once selected, change every coherent dependency needed
+  to produce a material combat-outcome difference; do not shrink the intervention
+  merely to minimize edits. Do not compensate for unavailable micro or runtime
+  behavior in strategy.md.
 
 Strategic search guidance (not an exhaustive enum; one generation tests one primary causal hypothesis):
 - Economy and expansion: worker/base/gas targets and observable expansion conditions, not clock-only expansion.
@@ -58,6 +63,13 @@ Strategic search guidance (not an exhaustive enum; one generation tests one prim
 
 SC2_STRATEGIC_PRIORITY = """## SC2 Strategic Priority
 
+The primary optimization objective is to win the decisive army engagement, or
+to survive it with enough retained combat power to continue the win plan. Match
+win rate remains the final external objective, but attack time, resource banking,
+production synchronization, gate timing, scouting volume, and strategy compliance
+are only intermediate mechanisms. Never select one of those surrogate improvements
+unless the evidence explains how it should improve decisive combat outcomes.
+
 This is an evidence-driven reasoning preference, not a fixed ranking enum or a
 deterministic category selector. Do not choose a weakly supported higher-level
 category over a strongly supported lower-level explanation.
@@ -68,7 +80,10 @@ engagement:
 
 1. First ask whether the assembled army package can take favorable or survivable
    fights against the observed opponent composition. Compare matchup, composition,
-   support-unit balance, engagement conditions, and execution.
+   support-unit balance, upgrades, engagement conditions, first-engagement force
+   retention, and execution. A repeated catastrophic first engagement outranks
+   economy, production, and timing cleanup unless those levers create a materially
+   different fighting package or power-spike window.
 2. Then ask whether the strategy commits during the correct relative power-spike
    window. Distinguish timing from an absolute unit-count threshold.
 3. Then ask whether production capacity and resource allocation create the viable
@@ -144,6 +159,16 @@ Do not diagnose. Do not explain why something succeeded or failed. Do not recomm
 Strategy: {strategy_name}
 Race: {race}
 
+In addition to the compressed timeline, extract two factual views when the
+record supports them:
+- enemy_pressure_events: enemy pressure on owned bases, production, workers, or
+  a defending army. Record the observable cue separately from Replay truth.
+- major_engagements: major army contacts, including both forces before/after the
+  contact and whether the force held, broke through, withdrew, or was destroyed.
+
+Do not infer an attack merely because the opponent owned an army. If the record
+does not establish pressure or a major engagement, return an empty list.
+
 Return one JSON object with exactly these top-level fields:
 {{
   "result": "Victory|Defeat|Tie",
@@ -156,6 +181,27 @@ Return one JSON object with exactly these top-level fields:
       "enemy_observed": {{"army": "...", "buildings": "...", "intel": "..."}},
       "enemy_truth": {{"economy": "...", "buildings": "...", "technology": "...", "army": "..."}},
       "commands": ["recorded_action -> target"]
+    }}
+  ],
+  "enemy_pressure_events": [
+    {{
+      "time_s": 0,
+      "observed_cue": "recorded threat, visible enemy, defensive trigger, or loss change",
+      "own_defense": "completed living defending force",
+      "enemy_observed": "what Commander knew",
+      "enemy_truth": "Replay-only composition when available",
+      "outcome": "held|continued_pressure|army_broken|base_or_economy_damaged"
+    }}
+  ],
+  "major_engagements": [
+    {{
+      "time_s": 0,
+      "initiator": "own|enemy|unclear",
+      "own_force_before": "recorded force",
+      "enemy_observed": "what Commander knew",
+      "enemy_truth": "Replay-only force when available",
+      "own_force_after": "next recorded post-contact force",
+      "outcome": "breakthrough|held|withdrawal|army_broken|unclear"
     }}
   ]
 }}
@@ -174,39 +220,107 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
     experience_lines: list[str] = []
     for item in prior_experiences or []:
         if isinstance(item, dict):
+            if item.get("kind") == "parent_analysis_seed":
+                analysis = (
+                    dict(item.get("analysis") or {})
+                    if isinstance(item.get("analysis"), dict)
+                    else {}
+                )
+                compact_analysis = {
+                    key: analysis.get(key)
+                    for key in (
+                        "record_mix",
+                        "repeated_failures",
+                        "wins_to_preserve",
+                        "cross_outcome_comparison",
+                        "optimization_targets",
+                        "priority_problem",
+                        "hypothesis",
+                        "mechanism_family",
+                        "failure_mode_analysis",
+                        "priority_alignment",
+                        "intervention_package",
+                        "next_action",
+                        "action_reason",
+                        "evidence_limits",
+                    )
+                    if key in analysis
+                }
+                for key in (
+                    "repeated_failures",
+                    "wins_to_preserve",
+                    "cross_outcome_comparison",
+                    "optimization_targets",
+                    "evidence_limits",
+                ):
+                    if isinstance(compact_analysis.get(key), list):
+                        compact_analysis[key] = compact_analysis[key][:6]
+                experience_lines.append(
+                    json.dumps(
+                        {
+                            "kind": "parent_analysis_seed",
+                            "source_record_count": item.get("source_record_count"),
+                            "current_record_count": item.get("current_record_count"),
+                            "previous_analysis": compact_analysis,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                continue
+            if item.get("kind") == "mechanism_search_policy":
+                experience_lines.append(
+                    json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+                )
+                continue
             keep = (
                 "experiment_id",
                 "generation",
                 "difficulty",
-                "parent",
+                "mutation_parent",
+                "comparison_champion",
                 "candidate",
+                "mechanism_family",
                 "hypothesis",
-                "plan_direction",
-                "patches",
+                "implementation_verdict",
+                "hypothesis_verdict",
+                "runtime_findings",
                 "decision",
-                "parent_score",
+                "comparison_champion_score",
                 "candidate_score",
-                "delta",
                 "posterior_probability_better",
                 "score_delta",
-                "evaluation",
                 "primary_change",
                 "primary_lever",
                 "lesson",
+                "reason",
+                "inheritance",
             )
             compact_item = {key: item.get(key) for key in keep if key in item}
+            for key in ("hypothesis", "primary_change", "lesson"):
+                if isinstance(compact_item.get(key), str):
+                    compact_item[key] = compact_item[key][:1200]
+            runtime_findings = compact_item.get("runtime_findings")
+            if isinstance(runtime_findings, list):
+                compact_item["runtime_findings"] = runtime_findings[:3]
             evidence = item.get("experiment_evidence")
             if isinstance(evidence, dict):
                 compact_evidence = {
                     key: evidence.get(key)
                     for key in (
                         "parent_batch",
+                        "comparison_champion_batch",
                         "candidate_batch",
                         "candidate_minus_parent",
+                        "candidate_minus_comparison_champion",
                     )
                     if key in evidence
                 }
-                for batch_key in ("parent_batch", "candidate_batch"):
+                for batch_key in (
+                    "parent_batch",
+                    "comparison_champion_batch",
+                    "candidate_batch",
+                ):
                     batch = compact_evidence.get(batch_key)
                     if isinstance(batch, dict):
                         compact_evidence[batch_key] = {
@@ -254,7 +368,11 @@ Experiment-history rules:
 - Accepted: candidate score was strictly higher in the tested context.
 - Rejected: candidate score was strictly lower.
 - Inconclusive: the two scores were equal; not proof for or against.
-- Same paragraph target is not the same experiment."""
+- Same paragraph target is not the same experiment.
+- A parent_analysis_seed is the previous synthesis of a subset of the current
+  records. Preserve findings still supported by the full batch, revise findings
+  contradicted by newly added matches, and do not count the seed as another match.
+"""
 
 
 def build_cross_match_discovery_prompt(
@@ -269,7 +387,7 @@ def build_cross_match_discovery_prompt(
     capability_manifest: dict[str, Any] | None = None,
 ) -> str:
     """Round 1: understand evidence before proposing any strategy change."""
-    del capability_manifest
+    capability_text = json.dumps(capability_manifest or {}, ensure_ascii=False, indent=2)
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
     knowledge_rule = (
         "When knowledge_mode is enabled, ask a knowledge question only if a missing "
@@ -301,6 +419,9 @@ Do not return next_action, candidate_plans, candidate_rule, or target_paragraph_
 
 Analyze across matches, not one match in isolation.
 
+Executor capability manifest:
+{capability_text}
+
 {_cross_match_shared_context(
     strategy_name=strategy_name,
     race=race,
@@ -323,16 +444,49 @@ poor information, or failure to finish. Do not yet name a root-cause hypothesis.
 Questions that cannot be answered reliably from the match evidence alone. These must
 be static SC2 mechanism facts, not "which strategy is best" or "why this game was lost".
 
+4. Opponent pressure patterns
+Compare when and how opponents pressure owned bases, economy, production, or the
+defending army. Record the observable cues, the own defensive package available at
+contact, whether the strategy survived until its intended power spike, and concrete
+counterexamples. Do not fit a rule to one exact timestamp or one opponent build.
+
+5. Matchup and composition patterns
+Compare own and enemy compositions at major engagements across wins and losses.
+Separate upgrade differences from unit counters, support balance, defender advantage,
+engagement conditions, and execution. If a counter, synergy, or upgrade effect is
+needed to distinguish explanations, request a bounded knowledge query.
+
+6. Retrieval plan
+Create a bounded, evidence-linked query plan before diagnosis:
+- First aggregate opponent pressure across the whole batch: first pressure/contact
+  time, observable pressure cues, enemy composition at contact, own completed
+  defensive package, whether the intended power spike was reached, and survival
+  outcome. Report coverage as match counts and a time range; do not generalize
+  from one dramatic loss.
+- match_evidence_queries must name why exact recorded rows need to be checked and cite existing `Game N @ Ts` references. Use them especially to verify who initiated an engagement, whether pressure reached an owned zone, what command preceded contact, and whether a strategy gate was already satisfied.
+- experience_query must describe the observed failure signature, not a strategy filename or a preferred replacement. It will retrieve both successful and failed prior interventions.
+- game_knowledge_queries may request only static SC2 facts needed to distinguish the supported interpretations. Each question must state why it is needed, the match references that motivated it, and the bounded hypothesis scope.
+- When production throughput or continuous resource demand matters, add deterministic calculations instead of estimating arithmetic in prose. Use parallel_production with action, quantity, and production_slots, or resource_demand_per_minute with action and production_slots.
+
 Use concrete evidence such as:
 "Game 3 @ 420s: ..."
 
 Rules:
 - Compare wins and losses whenever possible.
+- Every opponent_pressure_pattern and matchup_pattern must state how many matches
+  support it and include at least one counterexample when one exists.
 - Do not infer causation from final-state differences alone.
 - A requested Commander action is not proof that execution succeeded.
 - Distinguish Commander-observed enemy information from post-match enemy truth.
 - Do not invent missing game facts.
 - If a weakness may be caused by Commander execution or runtime execution, say so rather than assuming strategy.md is at fault.
+- Trace every important failure through strategy rule -> Commander decision ->
+  applied command -> later game state. If the strategy already gave a clear rule
+  and the downstream behavior failed, classify it as an execution limit instead
+  of recommending a more verbose strategy rule.
+- Keep army-fight evidence primary. Earlier attacks, lower resource banks, more
+  production, or more scouting are not strengths by themselves unless they create
+  a more favorable or more survivable decisive engagement.
 - Use rejected-experiment evidence to avoid treating an already-failed lever as a fresh unexplained weakness.
 - {knowledge_rule}
 - Never ask the knowledge database for optimal strategy, match diagnosis, Commander behavior, movement behavior, or micro.
@@ -357,13 +511,38 @@ Return one JSON object only:
         "evidence":["Game 2 @ 390s: ..."]
       }}
     ],
-    "knowledge_questions":[
-      {{
-        "question":"static SC2 factual question",
-        "entities":["relevant unit, structure, upgrade, or ability"],
-        "needs":["requirements"]
-      }}
-    ]
+    "opponent_pressure_patterns":[
+      {{"pattern":"repeated pressure pattern and survival outcome","evidence":["Game 2 @ 420s: ..."],"confidence":"medium"}}
+    ],
+    "matchup_patterns":[
+      {{"pattern":"composition or engagement relationship across outcomes","evidence":["Game 3 @ 620s: ...","Game 7 @ 670s: ..."],"confidence":"medium"}}
+    ],
+    "query_plan":{{
+      "match_evidence_queries":[
+        {{
+          "query_reason":"which attribution or interaction must be verified",
+          "evidence_refs":["Game 2 @ 390s: ..."]
+        }}
+      ],
+      "experience_query":{{
+        "query_reason":"why analogous prior interventions are relevant",
+        "failure_signature":["game phase","pressure pattern","own combat state","matchup context"]
+      }},
+      "game_knowledge_queries":[
+        {{
+          "question":"static SC2 factual question",
+          "entities":["relevant unit, structure, upgrade, or ability"],
+          "needs":["requirements"],
+          "query_reason":"which competing interpretation this fact distinguishes",
+          "evidence_refs":["Game 2 @ 390s: ..."],
+          "hypothesis_scope":"bounded factual relationship, not a strategy recommendation",
+          "calculations":[
+            {{"type":"parallel_production","action":"train_core_unit","quantity":10,"production_slots":2}},
+            {{"type":"resource_demand_per_minute","action":"train_core_unit","production_slots":2}}
+          ]
+        }}
+      ]
+    }}
   }}
 }}
 """
@@ -381,9 +560,11 @@ def build_cross_match_decision_prompt(
     capability_manifest: dict[str, Any] | None = None,
     discovery: dict[str, Any] | None = None,
     knowledge_runs: list[dict[str, Any]] | None = None,
+    retrieval_evidence: dict[str, Any] | None = None,
 ) -> str:
     """Round 2: confirm/revise/reject discovery and choose one next action."""
-    del capability_manifest, knowledge_mode
+    del knowledge_mode
+    capability_text = json.dumps(capability_manifest or {}, ensure_ascii=False, indent=2)
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
     return f"""You are EvolAgent's Cross-Match Decision Agent.
 
@@ -399,6 +580,9 @@ You now have:
 
 Your job is to choose ONE most important next step.
 
+Executor capability manifest:
+{capability_text}
+
 {_cross_match_shared_context(
     strategy_name=strategy_name,
     race=race,
@@ -412,6 +596,17 @@ Discovery findings:
 
 Knowledge results:
 {render_knowledge_results(knowledge_runs or [])}
+
+Structured retrieval evidence:
+{render_retrieval_evidence(retrieval_evidence or {})}
+
+Retrieval rules:
+- Treat recorded timeline rows as the authority for command, observation, zone, and engagement-attribution claims. If a discovery sentence conflicts with the queried rows, revise or reject the discovery sentence.
+- Historical experiments provide positive and negative intervention evidence. A similar rejected candidate is evidence against repeating the same concrete package, not automatic proof that every stronger or corrected version of the hypothesis is false.
+- Static game knowledge can support costs, prerequisites, effects, counters, and synergies. It cannot diagnose a match by itself and cannot override contrary trajectory evidence.
+- Any numerical production-time, throughput, or continuous resource-demand claim must quote a deterministic calculation returned by the knowledge query. If the required calculation is absent, keep the claim qualitative or request more evidence; do not calculate it mentally.
+- A production-demand calculation does not establish resource income. Never compare demand against a claimed mineral or gas income unless that income was returned by a deterministic query or measured from match records.
+- Every retrieved item used in the final diagnosis must be named in retrieval_assessment. Record conflicting evidence instead of silently dropping it.
 
 First, re-evaluate the discovery findings.
 
@@ -427,7 +622,7 @@ Preserve strengths that remain supported by evidence.
 
 {SC2_STRATEGIC_PRIORITY}
 
-Before selecting the final hypothesis, identify the 2-4 strongest plausible
+Before selecting the final intervention, identify the 2-4 strongest plausible
 explanations for the priority failure pattern that the current evidence actually
 supports. Do not invent extra explanations merely to fill the list.
 
@@ -446,6 +641,26 @@ the same failure after the hypothesized bottleneck has already been resolved.
 Ask of every candidate: if this problem were already resolved in some matches,
 did the same failure still occur? If yes, it may be a contributor but cannot
 alone explain the main failure pattern.
+
+Before proposing upgrades, technology, expansion, or another delayed power spike,
+determine whether the current strategy repeatedly survives the opponent's pressure
+until that change can become active. If it does not, the intervention package must
+include the necessary survival prerequisites or choose the earlier survival failure
+as the priority failure mode. Do not spend more resources on a power spike that the
+strategy usually dies before reaching.
+
+Treat unit counters and support relationships as hypotheses to ground, not generic
+StarCraft intuition. Exact numerical combat claims must appear in verified knowledge
+results or recorded evidence. If the knowledge only establishes a qualitative
+effect, keep the hypothesis qualitative; never invent damage multipliers, shots to
+kill, timing, or cost values.
+
+Apply SC2 Strategic Priority to both diagnosis and the optimization direction.
+Before selecting a lower-priority lever, explicitly state why every relevant
+higher-priority explanation is unsupported, already viable, or outside strategy
+control. Information, economy, production, timing, or an isolated upgrade cannot
+be selected merely because it is easier to patch than the supported combat,
+survival, matchup, or power-window problem.
 
 ## Prior Experiment Interpretation
 
@@ -471,11 +686,25 @@ equivalent patch. If repeated attempts remain unauditable, request more evidence
 inspect execution, or choose another evidence-supported hypothesis instead of
 indefinitely relabeling the same change.
 
+Assign every proposed experiment a concise mechanism_family identifier describing
+the causal mechanism, not a unit name or paragraph name. Use prior experiments as
+a hard search policy: after two non-accepted attempts in one mechanism_family,
+select a different family; after an implemented experiment is contradicted, block
+that family; after execution_invalid, block every retry that depends on the same
+unsupported Commander/runtime capability. Do not evade the policy by renaming a
+materially equivalent mechanism.
+
 When repeated decisive fights fail after the current attack gate is met or
 exceeded, explicitly consider unit composition / support balance, matchup-dependent
 readiness, technology / upgrades, information quality before committing, Commander
 execution, and runtime execution. Considering them is required; changing
 composition is not required.
+
+Do not select attack timing, production throughput, resource banking, or gate
+attainment as the priority objective when the assembled army still loses the
+decisive engagement. Such a lever is valid only when it creates a materially
+different combat package or reaches a supported relative power-spike window, and
+the mechanism_prediction must name the expected combat-outcome change.
 
 If a strategy rule was already satisfied but execution or retreat still looks
 abnormal, compare commander_execution and runtime_execution. Do not raise a
@@ -525,24 +754,25 @@ the substantive increase or correction in intervention strength.
 
 If next_action is propose_strategy_patch:
 - select exactly one priority problem as an object, not a list;
-- choose exactly one primary causal hypothesis for this generation;
+- choose one primary failure mode and one causal account for this generation;
 - pre-register one mechanism_prediction with an observable expected change, a
   minimum material change required to count as a real test, an outcome prediction,
   and a disproof condition;
-- describe its coherent strategy package direction in plan.direction;
+- describe a materially different coherent intervention package in plan;
 - preserve relevant strengths;
 - do not rewrite unrelated strategy areas;
 - do not provide final paragraph text, target_paragraph_id, baseline_rule, or candidate_rule.
 
 Optimization-direction rules:
 - A causal hypothesis may be chosen only when repeated match evidence supports a plausible connection between the current rule and the observed problem. Do not optimize from StarCraft common sense alone.
-- One hypothesis is not one paragraph or one strategy category. Implement it as one coherent strategy package containing every dependent change required for it to be executable, internally consistent, resource-feasible, prerequisite-complete, and testable.
+- The unit of evolution is one primary failure mode addressed by one coherent intervention package, not one small lever, paragraph, unit, or upgrade. The package must be large enough to produce a clear behavioral difference from the Champion.
+- Implement the package with every dependent change required for it to be executable, internally consistent, resource-feasible, prerequisite-complete, survivable until active, and testable.
 - The package may coordinate economy/expansion, production/resource priority, technology/upgrades, unit composition/support balance, attack readiness/timing, reinforcement/recovery/cleanup, and scouting/information/redecision when they are necessary dependencies of the same hypothesis. This list is neither an enum nor a requirement to change every area.
 - For every proposed change ask: "If this change were removed, would the selected hypothesis become incomplete, internally inconsistent, non-executable, or materially different?" If yes, include it. If no, leave that part of the Champion unchanged.
 - Do not combine unrelated improvements merely because all of them appear beneficial. A change that survives the removal test as a separate optimization objective belongs to a later generation.
 - A candidate should mutate the Champion, not redesign it from scratch. Preserve successful mechanisms unless current evidence directly contradicts them.
 - The optimization may adjust quantities, priorities, timings, prerequisites, support units, and readiness conditions, but must not replace the strategy's defining army concept or win plan unless the current strategy itself explicitly allows that flexibility. If the identity is no longer viable, choose stop rather than swapping strategy family.
-- plan.direction must answer "What single causal idea is this entire package testing?" and describe the coordinated package without writing final paragraph patches. Good: "Move the selected army package's power spike earlier and align its prerequisites, resource priority, and commitment condition so the intended timing is executable." Bad: "Improve timing." Bad: "Improve timing, expand earlier, change composition, and scout more."
+- plan.direction states the primary failure mode and causal idea. plan.material_behavior_change states the clearly observable difference from the Champion. plan.coordinated_changes lists the core intervention and every necessary prerequisite or consistency change without writing final paragraph text. Do not limit package size by paragraph count; reject only unrelated changes.
 
 The hypothesis must explain why changing strategy.md could plausibly change
 external match outcomes.
@@ -566,11 +796,33 @@ Return one JSON object only:
       "evidence":["Game 2 @ 390s: ..."],
       "control_class":"strategy_fixable"
     }},
+    "failure_mode_analysis":{{
+      "failure_mode":"repeated match-level failure the package will address",
+      "survival_prerequisite":"whether the strategy survives until its intended power spike and supporting evidence",
+      "opponent_pressure_pattern":"cross-match pressure pattern or why it is not decisive",
+      "matchup_assessment":"composition, counters, support, upgrades, and engagement conditions across outcomes",
+      "counterexample_check":"why wins or resolved cases do not refute the selected failure mode"
+    }},
+    "priority_alignment":{{
+      "selected_priority":"the highest evidence-supported level from SC2 Strategic Priority",
+      "higher_priority_assessment":"which higher-priority combat, survival, matchup, or power-window explanations were checked and why none outranks the selection",
+      "downstream_combat_effect":"how the selected package materially changes decisive engagement survival or victory"
+    }},
+    "retrieval_assessment":{{
+      "query_summary":"how record, history, and static-knowledge queries changed or confirmed the diagnosis",
+      "match_evidence_used":["query id and exact Game N @ Ts finding"],
+      "historical_experience_used":["experiment id and lesson, including failed changes when relevant"],
+      "knowledge_used":["question id and bounded fact used"],
+      "conflicting_evidence":["retrieved evidence that weakens the selected explanation"],
+      "confidence":"low|medium|high"
+    }},
     "hypothesis":"one causal claim that survived the counterevidence check",
+    "mechanism_family":"concise_stable_causal_family_id",
     "mechanism_prediction":{{
       "expected_change":"observable intermediate state the candidate must change",
       "minimum_material_change":"minimum difference required to count as testing the hypothesis",
       "outcome_prediction":"match behavior expected if that mechanism changes",
+      "combat_success_measure":"decisive-engagement outcome or force-retention signal expected to improve",
       "disproof_condition":"evidence that would contradict the hypothesis after adequate implementation"
     }},
     "next_action":"propose_strategy_patch",
@@ -585,7 +837,11 @@ Return one JSON object only:
       }}
     ],
     "plan":{{
-      "direction":"one coherent strategy package direction testing the selected causal hypothesis",
+      "direction":"primary failure mode and causal direction of the package",
+      "material_behavior_change":"clear match behavior that will differ materially from the Champion",
+      "coordinated_changes":[
+        {{"change":"core or dependent strategic change","why_required":"why removing it would make the package incomplete or ineffective"}}
+      ],
       "preserve":["successful mechanism to keep"]
     }},
     "evidence_limits":[]
@@ -647,4 +903,3 @@ __all__ = [
     "build_fixed_match_summary_prompt",
     "build_strategy_patch_validation_prompt",
 ]
-

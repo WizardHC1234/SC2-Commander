@@ -16,6 +16,62 @@ from .run_recorder import append_run_event
 logger = logging.getLogger(__name__)
 
 
+_PROMPT_STRUCTURAL_PREFIXES = (
+    "SCHEMA ",
+    "MATCH ",
+    "SELECTOR ",
+    "R ",
+    "#",
+    "* ",
+)
+
+
+def _unwrap_prompt_block(block: str) -> str:
+    lines = [line.rstrip() for line in block.splitlines()]
+    if len(lines) <= 1:
+        return block
+    stripped = [line.strip() for line in lines]
+    if re.match(r"^\d+\. [^.!?]{1,80}$", stripped[0]):
+        return stripped[0] + "\n" + _unwrap_prompt_block("\n".join(lines[1:]))
+    if any(
+        line.startswith(_PROMPT_STRUCTURAL_PREFIXES)
+        or line.startswith(("{", "}", "[", "]", '"'))
+        for line in stripped
+    ):
+        return "\n".join(lines)
+
+    output: list[str] = []
+    current = ""
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            output.append(current)
+            current = ""
+
+    for line in stripped:
+        is_list_item = bool(re.match(r"^(?:- |\d+\. )", line))
+        is_short_heading = bool(
+            re.match(r"^\d+\. [^.!?]{1,80}$", line)
+            or (line.endswith(":") and len(line) <= 80)
+        )
+        if is_list_item or is_short_heading:
+            flush()
+            current = line
+        elif current:
+            current = f"{current} {line}".strip()
+        else:
+            current = line
+    flush()
+    return "\n".join(output)
+
+
+def normalize_prompt_layout(prompt: str) -> str:
+    """Remove source-code soft wraps while preserving real prompt structure."""
+    blocks = re.split(r"\n[ \t]*\n", str(prompt))
+    return "\n\n".join(_unwrap_prompt_block(block) for block in blocks)
+
+
 def extract_json_object(text: str) -> dict[str, Any]:
     cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     json_match = re.search(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL)
@@ -56,10 +112,16 @@ def call_json_llm(
     if isinstance(prompt, str):
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": normalize_prompt_layout(prompt)},
         ]
     else:
-        messages = prompt
+        messages = [
+            {
+                **message,
+                "content": normalize_prompt_layout(str(message.get("content") or "")),
+            }
+            for message in prompt
+        ]
     last_error = ""
     for attempt in range(1, LLM_CALL_MAX_ATTEMPTS + 1):
         response = ""
@@ -135,4 +197,3 @@ def call_json_llm(
     )
     logger.error("LLM JSON call failed after %s attempts: %s", LLM_CALL_MAX_ATTEMPTS, last_error)
     return None
-

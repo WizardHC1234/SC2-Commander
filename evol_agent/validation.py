@@ -60,6 +60,41 @@ _UNEXECUTABLE_STRATEGY_PATTERNS = (
     ),
     (
         re.compile(
+            r"\ball\s+(?:available\s+|own\s+)?siege\s+tanks?\b.{0,80}"
+            r"\b(?:fully\s+sieged|in\s+siege\s+mode|transformed\s+to\s+siege\s+mode)\b|"
+            r"\bfully\s+sieged\b.{0,60}\b(?:before|until|gate|attack|assault)\b",
+            re.IGNORECASE,
+        ),
+        "strategy.md cannot require every Tank to be pre-sieged; Sharpy decides "
+        "Siege Mode from local combat state",
+    ),
+    (
+        re.compile(
+            r"\b(?:SiegeTankSieged|VikingAssault|VikingFighter)\b",
+            re.IGNORECASE,
+        ),
+        "strategy.md cannot use runtime transformation-state unit identifiers as "
+        "strategy conditions",
+    ),
+    (
+        re.compile(
+            r"\b(?:at\s+least|until|wait\s+for|observe(?:d)?)\b.{0,50}"
+            r"\b(?:own|friendly)\b.{0,35}\b(?:sieged|siege\s+mode)\b",
+            re.IGNORECASE,
+        ),
+        "strategy.md cannot gate decisions on friendly runtime-owned transformation state",
+    ),
+    (
+        re.compile(
+            r"\bfifth\s+refiner(?:y|ies)\b.{0,45}"
+            r"\b(?:natural|second\s+base)\b",
+            re.IGNORECASE,
+        ),
+        "a standard base has only two Vespene geysers; a fifth Refinery requires "
+        "another base",
+    ),
+    (
+        re.compile(
             r"\bresearch\s+siege\s+mode\b|\bsiege\s+mode\s+research\b|"
             r"\bresearch\b.{0,20}\bsiege\s+tech\b",
             re.IGNORECASE,
@@ -190,7 +225,11 @@ def validate_strategy_house_style(content: str) -> Optional[str]:
     return None
 
 
-def validate_strategy_markdown(content: str, *, race: str = "") -> Optional[str]:
+def validate_strategy_markdown(
+    content: str,
+    *,
+    race: str = "",
+) -> Optional[str]:
     text = str(content or "").strip()
     if not text:
         return "strategy.md is empty"
@@ -241,4 +280,3 @@ __all__ = [
     "validate_strategy_markdown",
     "validate_strategy_supply_budget",
 ]
-

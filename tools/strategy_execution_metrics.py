@@ -36,6 +36,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from tools.batch_stats import _natural_sort_key
 from evol_agent.interaction_schema import (
     STRATEGY_COORDINATOR_INITIAL,
     interaction_get_dict,
@@ -1904,7 +1905,7 @@ def grouped_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups.items(),
         key=lambda item: (
             item[0][1],
-            item[0][2],
+            _natural_sort_key(item[0][2]),
             difficulty_sort_key(item[0][4]),
             item[0][0],
             item[0][3],
@@ -2292,7 +2293,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         },
         key=lambda item: (
             item[1],
-            item[2],
+            _natural_sort_key(item[2]),
             difficulty_sort_key(item[3]),
             item[0],
         ),
@@ -2308,7 +2309,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         },
         key=lambda item: (
             item[0],
-            item[1],
+            _natural_sort_key(item[1]),
             difficulty_sort_key(item[2]),
         ),
     )
@@ -2319,7 +2320,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 str(row.get("strategy") or ""),
             )
             for row in game_rows
-        }
+        },
+        key=lambda item: (item[0], _natural_sort_key(item[1])),
     )
     paper_batch_rows = []
     paper_rows = []

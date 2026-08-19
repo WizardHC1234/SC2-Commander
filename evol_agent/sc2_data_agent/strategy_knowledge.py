@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -302,12 +303,24 @@ def _load_action_specs(race: str) -> dict[str, Any]:
     return specs if isinstance(specs, dict) else {}
 
 
-def _action_facts(entity_names: list[str], race: str) -> list[dict[str, Any]]:
+def _action_facts(
+    entity_names: list[str],
+    race: str,
+    *,
+    requested_actions: list[str] | None = None,
+) -> list[dict[str, Any]]:
     wanted = {normalize_key(name) for name in entity_names}
+    wanted_actions = {
+        normalize_key(name) for name in (requested_actions or []) if str(name).strip()
+    }
     rows: list[dict[str, Any]] = []
     for action_name, spec in _load_action_specs(race).items():
         stem = re.sub(r"^(train|build|research|morph)_?", "", action_name)
-        if normalize_key(stem) not in wanted:
+        if (
+            normalize_key(stem) not in wanted
+            and normalize_key(stem) not in wanted_actions
+            and normalize_key(action_name) not in wanted_actions
+        ):
             continue
         rows.append(
             {
@@ -324,6 +337,116 @@ def _action_facts(entity_names: list[str], race: str) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _resolve_action_fact(
+    action_facts: list[dict[str, Any]], requested: str
+) -> dict[str, Any] | None:
+    wanted = normalize_key(requested)
+    if not wanted:
+        return None
+    for row in action_facts:
+        action = str(row.get("action") or "")
+        target = re.sub(r"^(train|build|research|morph)_?", "", action)
+        if wanted in {normalize_key(action), normalize_key(target)}:
+            return row
+    return None
+
+
+def _production_calculations(
+    requests: Any,
+    action_facts: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    results: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for index, request in enumerate(requests or [], 1):
+        if not isinstance(request, dict):
+            continue
+        calculation_type = str(request.get("type") or "").strip().lower()
+        requested_action = str(
+            request.get("action") or request.get("unit") or request.get("entity") or ""
+        ).strip()
+        fact = _resolve_action_fact(action_facts, requested_action)
+        if fact is None:
+            errors.append(
+                f"calculation {index}: no action fact resolved for {requested_action or '(missing action)'}"
+            )
+            continue
+        try:
+            slots = int(request.get("production_slots") or request.get("producers") or 0)
+        except (TypeError, ValueError):
+            slots = 0
+        if slots <= 0:
+            errors.append(f"calculation {index}: production_slots must be positive")
+            continue
+        time_s = float(fact.get("base_time_seconds") or 0)
+        if time_s <= 0:
+            errors.append(f"calculation {index}: action has no positive build time")
+            continue
+        common = {
+            "type": calculation_type,
+            "action": fact.get("action"),
+            "production_slots": slots,
+            "unit_time_seconds": round(time_s, 3),
+            "unit_cost": {
+                "minerals": fact.get("minerals", 0),
+                "gas": fact.get("gas", 0),
+                "supply": fact.get("supply", 0),
+            },
+            "assumptions": [
+                "all production slots remain continuously available",
+                "resources and prerequisites are available before each cycle",
+            ],
+        }
+        if calculation_type == "parallel_production":
+            try:
+                quantity = int(request.get("quantity") or 0)
+            except (TypeError, ValueError):
+                quantity = 0
+            if quantity <= 0:
+                errors.append(f"calculation {index}: quantity must be positive")
+                continue
+            cycles = math.ceil(quantity / slots)
+            results.append(
+                {
+                    **common,
+                    "quantity": quantity,
+                    "cycles": cycles,
+                    "minimum_continuous_time_seconds": round(cycles * time_s, 3),
+                    "total_cost": {
+                        "minerals": quantity * float(fact.get("minerals") or 0),
+                        "gas": quantity * float(fact.get("gas") or 0),
+                        "supply": quantity * float(fact.get("supply") or 0),
+                    },
+                }
+            )
+        elif calculation_type == "resource_demand_per_minute":
+            cycles_per_minute = 60.0 / time_s
+            results.append(
+                {
+                    **common,
+                    "cycles_per_minute_per_slot": round(cycles_per_minute, 4),
+                    "demand_per_minute": {
+                        "minerals": round(
+                            slots * cycles_per_minute * float(fact.get("minerals") or 0),
+                            3,
+                        ),
+                        "gas": round(
+                            slots * cycles_per_minute * float(fact.get("gas") or 0),
+                            3,
+                        ),
+                        "supply": round(
+                            slots * cycles_per_minute * float(fact.get("supply") or 0),
+                            3,
+                        ),
+                    },
+                }
+            )
+        else:
+            errors.append(
+                f"calculation {index}: unsupported type {calculation_type or '(missing)'}"
+            )
+    return results, errors
 
 
 def _control_effect_facts(entity_names: list[str], race: str) -> list[dict[str, Any]]:
@@ -475,8 +598,28 @@ def build_strategy_knowledge(
         data_path=data_path,
     )
     entity_names = [entity["name"] for entity in entities]
+    calculation_requests = [
+        request
+        for request in (item.get("calculations") or [])
+        if isinstance(request, dict)
+    ]
+    calculation_actions = [
+        str(
+            request.get("action")
+            or request.get("unit")
+            or request.get("entity")
+            or ""
+        ).strip()
+        for request in calculation_requests
+    ]
     action_facts = (
-        _action_facts(entity_names, race) if "requirements" in needs else []
+        _action_facts(
+            entity_names,
+            race,
+            requested_actions=calculation_actions,
+        )
+        if "requirements" in needs or calculation_requests
+        else []
     )
     action_entity_names = {
         normalize_key(re.sub(r"^(train|build|research|morph)_?", "", row["action"]))
@@ -512,6 +655,9 @@ def build_strategy_knowledge(
                     "source": "commander_action_metadata",
                 }
     relations = _relation_facts(entities, needs, data_path)
+    calculations, calculation_errors = _production_calculations(
+        calculation_requests, action_facts
+    )
 
     missing: list[str] = []
     if not entities:
@@ -540,6 +686,9 @@ def build_strategy_knowledge(
         "abilities": abilities,
         "control_effects": control_effects,
         "relations": relations,
+        "calculations": calculations,
+        "requested_calculation_count": len(calculation_requests),
+        "calculation_errors": calculation_errors,
         "missing": missing,
     }
 
@@ -608,6 +757,20 @@ def render_strategy_knowledge(packet: dict[str, Any]) -> str:
             f"- {row['subject']} {row['relation']} {row['object']}"
             + (f": {description}" if description else "")
         )
+    for row in packet.get("calculations") or []:
+        if row.get("type") == "parallel_production":
+            lines.append(
+                f"- Deterministic parallel production: {row['quantity']} x {row['action']} "
+                f"with {row['production_slots']} slots requires {row['cycles']} cycles, "
+                f"minimum {row['minimum_continuous_time_seconds']}s; total cost {row['total_cost']}"
+            )
+        elif row.get("type") == "resource_demand_per_minute":
+            lines.append(
+                f"- Deterministic continuous demand: {row['production_slots']} slots of "
+                f"{row['action']} require {row['demand_per_minute']} per minute"
+            )
+    for error in packet.get("calculation_errors") or []:
+        lines.append(f"- Calculation limit: {error}")
     for missing in packet.get("missing") or []:
         lines.append(f"- Evidence limit: {missing}")
     return "\n".join(lines)
@@ -620,4 +783,3 @@ __all__ = [
     "render_strategy_knowledge",
     "resolve_knowledge_entities",
 ]
-

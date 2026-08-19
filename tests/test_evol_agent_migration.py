@@ -343,8 +343,8 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
     assert "Select exactly one self-contained candidate plan" not in candidate_prompt
     assert "selected_plan_ids" not in candidate_prompt
     assert "There is no fixed maximum number of paragraph patches" in candidate_prompt
-    assert "selected causal hypothesis is the unit of experimentation" in candidate_prompt
-    assert "coherent strategy package direction" in candidate_prompt
+    assert "selected primary failure mode is the unit of evolution" in candidate_prompt
+    assert "coherent intervention package" in candidate_prompt
     assert "Do not modify # Summary" in candidate_prompt
     assert "why_required" in candidate_prompt
     assert "Independent factual match summaries" not in candidate_prompt
@@ -411,6 +411,20 @@ def test_discovery_does_not_require_a_plan() -> None:
                     "evidence": ["Game 2 @ 430s"],
                 }
             ],
+            "opponent_pressure_patterns": [
+                {
+                    "pattern": "pressure arrives before the intended power spike",
+                    "evidence": ["Game 2 @ 430s"],
+                    "confidence": "high",
+                }
+            ],
+            "matchup_patterns": [
+                {
+                    "pattern": "the incomplete own package loses the first engagement",
+                    "evidence": ["Game 2 @ 430s", "Game 5 @ 510s"],
+                    "confidence": "medium",
+                }
+            ],
             "knowledge_questions": [
                 {
                     "question": "What are Siege Tank production requirements?",
@@ -429,6 +443,46 @@ def test_discovery_does_not_require_a_plan() -> None:
     assert "candidate_rule" not in payload
     assert "plan_ids" not in payload["knowledge_questions"][0]
     assert payload["knowledge_questions"][0]["id"] == "Q1"
+    assert payload["opponent_pressure_patterns"][0]["confidence"] == "high"
+    assert len(payload["matchup_patterns"][0]["evidence"]) == 2
+
+
+def test_decision_rejects_an_incomplete_intervention_package() -> None:
+    payload, error = _normalize_cross_match_decision(
+        {
+            "next_action": "propose_strategy_patch",
+            "action_reason": "the decisive engagement repeatedly collapses",
+            "priority_problem": {
+                "problem": "the first decisive engagement is lost",
+                "evidence": ["Game 2 @ 430s"],
+                "control_class": "strategy_fixable",
+            },
+            "hypothesis": "a coordinated defensive and production response reaches a viable fight",
+            "failure_mode_analysis": {
+                "failure_mode": "the army collapses before the planned power spike",
+                "survival_prerequisite": "the strategy lacks enough defense to reach the spike",
+                "opponent_pressure_pattern": "pressure arrives before the spike",
+                "matchup_assessment": "the incomplete force cannot hold the observed attack",
+                "counterexample_check": "wins survive the corresponding pressure window",
+            },
+            "mechanism_prediction": {
+                "expected_change": "more combat power survives until the planned spike",
+                "minimum_material_change": "the candidate must survive the pressure window repeatedly",
+                "outcome_prediction": "the decisive engagement becomes survivable",
+                "combat_success_measure": "retained combat power after first contact improves",
+                "disproof_condition": "survival improves materially but decisive fights still collapse",
+            },
+            "plan": {
+                "direction": "survive early pressure and reach the intended fighting package",
+                "material_behavior_change": "retain a viable army through the pressure window",
+                "coordinated_changes": [],
+            },
+        },
+        strategy_name="generic",
+    )
+
+    assert payload is None
+    assert "plan.coordinated_changes" in error
 
 
 def test_discovery_allows_empty_knowledge_questions() -> None:
@@ -461,13 +515,39 @@ def test_decision_propose_requires_hypothesis_and_plan_direction() -> None:
                 "control_class": "strategy_fixable",
             },
             "hypothesis": "an earlier factory increases completed tanks before contact",
+            "failure_mode_analysis": {
+                "failure_mode": "the first engagement is repeatedly too weak",
+                "survival_prerequisite": "the opening survives until the production change can matter",
+                "opponent_pressure_pattern": "enemy pressure reaches the army before it is complete",
+                "matchup_assessment": "the own fighting package is incomplete at contact",
+                "counterexample_check": "wins complete more of the intended package before contact",
+            },
+            "priority_alignment": {
+                "selected_priority": "decisive combat viability",
+                "higher_priority_assessment": "the selected combat problem is the highest supported level",
+                "downstream_combat_effect": "the completed force retains more power after first contact",
+            },
             "mechanism_prediction": {
                 "expected_change": "more of the intended army is completed before contact",
                 "minimum_material_change": "pre-contact completion must materially exceed the parent",
                 "outcome_prediction": "the first engagement becomes more competitive",
+                "combat_success_measure": "first-engagement force retention improves",
                 "disproof_condition": "completion improves materially but the same failure persists",
             },
-            "plan": {"direction": "Prioritize a second Factory before marine scaling."},
+            "plan": {
+                "direction": "Prioritize a second Factory before marine scaling.",
+                "material_behavior_change": "complete materially more of the intended force before contact",
+                "coordinated_changes": [
+                    {
+                        "change": "shift production capacity toward the intended force",
+                        "why_required": "the intended force is otherwise incomplete",
+                    },
+                    {
+                        "change": "preserve sufficient early defense",
+                        "why_required": "the strategy must survive until added capacity matters",
+                    },
+                ],
+            },
         },
         strategy_name="tank",
     )
@@ -479,7 +559,7 @@ def test_decision_propose_requires_hypothesis_and_plan_direction() -> None:
     assert payload["mechanism_prediction"]["expected_change"].startswith("more of")
     assert payload["plan"]["direction"].startswith("Prioritize a second Factory")
     assert payload["candidate_plans"][0]["id"] == "D1"
-    assert payload["candidate_plans"][0]["changes"] == []
+    assert len(payload["candidate_plans"][0]["changes"]) == 2
     assert payload["knowledge_questions"] == []
     assert payload["considered_explanations"] == []
 
@@ -498,14 +578,38 @@ def test_decision_keeps_considered_explanations_without_patch_fields() -> None:
                 "control_class": "strategy_fixable",
             },
             "hypothesis": "the marine-tank mix trades poorly into observed heavy mech",
+            "failure_mode_analysis": {
+                "failure_mode": "the first engagement collapses after readiness is met",
+                "survival_prerequisite": "the force reaches the intended engagement",
+                "opponent_pressure_pattern": "the decisive pressure occurs after the readiness gate",
+                "matchup_assessment": "the assembled force trades poorly into the observed composition",
+                "counterexample_check": "the same collapse is absent when the force retains supporting power",
+            },
+            "priority_alignment": {
+                "selected_priority": "matchup and fighting-package viability",
+                "higher_priority_assessment": "the strategy reaches the gate, so survival and reachability do not outrank matchup",
+                "downstream_combat_effect": "the better-matched package avoids catastrophic first-fight loss",
+            },
             "mechanism_prediction": {
                 "expected_change": "the assembled army package is better matched to observed opposition",
                 "minimum_material_change": "the candidate must materially alter the matchup response",
                 "outcome_prediction": "decisive engagement losses become less catastrophic",
+                "combat_success_measure": "first-engagement survival and retained combat power improve",
                 "disproof_condition": "the matchup response changes materially but decisive losses persist",
             },
             "plan": {
-                "direction": "Raise matchup-dependent readiness without abandoning Marine/Tank identity."
+                "direction": "Raise matchup-dependent readiness without abandoning Marine/Tank identity.",
+                "material_behavior_change": "enter the decisive fight with a materially better-matched package",
+                "coordinated_changes": [
+                    {
+                        "change": "adapt readiness to the observed opposing composition",
+                        "why_required": "the fixed readiness gate admits unfavorable fights",
+                    },
+                    {
+                        "change": "align reinforcement with the adapted fighting package",
+                        "why_required": "the matchup response must persist after first contact",
+                    },
+                ],
             },
             "considered_explanations": [
                 {

@@ -555,7 +555,7 @@ def summarize_groups(
         buckets[group_key(row, group_by)].append(row)
 
     out: list[tuple[str, int, int, int, int, int, Optional[float]]] = []
-    for key in sorted(buckets.keys(), key=lambda s: s.lower()):
+    for key in sorted(buckets.keys(), key=_natural_sort_key):
         group_rows = buckets[key]
         wins = losses = ties = unknown = 0
         for row in group_rows:
@@ -616,6 +616,23 @@ def _difficulty_sort_key(name: str) -> tuple[int, str]:
     return (_DIFFICULTY_ORDER.get(text, 100), text)
 
 
+_NATURAL_CHUNK_RE = re.compile(r"(\d+)")
+
+
+def _natural_sort_key(value: str) -> tuple:
+    """Sort ``tank_opt2`` before ``tank_opt10`` (not lexicographic)."""
+    text = str(value or "").strip().lower()
+    parts: list[tuple[int, object]] = []
+    for chunk in _NATURAL_CHUNK_RE.split(text):
+        if not chunk:
+            continue
+        if chunk.isdigit():
+            parts.append((1, int(chunk)))
+        else:
+            parts.append((0, chunk))
+    return tuple(parts)
+
+
 def print_strategy_model_summary(
     rows: list[MatchRow], *, title: str = "Summary by strategy + model"
 ) -> None:
@@ -636,7 +653,8 @@ def print_strategy_model_summary(
     print(header)
     print("-" * len(header))
     for strategy, model in sorted(
-        buckets.keys(), key=lambda k: (k[0].lower(), k[1].lower())
+        buckets.keys(),
+        key=lambda k: (_natural_sort_key(k[0]), k[1].lower()),
     ):
         total, wins, losses, ties, _unknown, rate = _count_results(
             buckets[(strategy, model)]
@@ -730,7 +748,7 @@ def print_batch_overview(
             )
         records.sort(
             key=lambda r: (
-                r[0].lower(),
+                _natural_sort_key(r[0]),
                 r[1].lower(),
                 r[2].lower(),
                 _difficulty_sort_key(r[3]),
@@ -789,7 +807,7 @@ def print_batch_overview(
         for row in sorted(
             ungrouped_rows,
             key=lambda r: (
-                (r.strategy or "").lower(),
+                _natural_sort_key(r.strategy or ""),
                 r.model_key.lower(),
                 (r.enemy_race or "").lower(),
                 _difficulty_sort_key(r.difficulty),

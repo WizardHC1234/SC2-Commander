@@ -16,15 +16,50 @@ DEFAULT_DATA_PATH = DEFAULT_DATABASE_PATH
 def find_knowledge_run_error(run: dict[str, Any] | None) -> str:
     """Explain why a persisted deterministic result is not safe to reuse."""
     payload = run if isinstance(run, dict) else {}
+    evidence = payload.get("dataset_evidence")
+    if isinstance(evidence, list):
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            packet = item.get("result")
+            if not isinstance(packet, dict):
+                continue
+            calculation_errors = [
+                str(error).strip()
+                for error in (packet.get("calculation_errors") or [])
+                if str(error).strip()
+            ]
+            if calculation_errors:
+                return "knowledge calculation failed: " + "; ".join(
+                    calculation_errors
+                )
     if not payload.get("ok"):
         return str(payload.get("error") or "knowledge query failed")
     if not str(payload.get("answer") or "").strip():
         return "knowledge query returned an empty answer"
     if payload.get("verification_schema") != KNOWLEDGE_VERIFICATION_SCHEMA:
         return "knowledge result uses an obsolete verification schema"
-    evidence = payload.get("dataset_evidence")
     if not isinstance(evidence, list) or not evidence:
         return "knowledge result has no deterministic dataset evidence"
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        packet = item.get("result")
+        if not isinstance(packet, dict):
+            continue
+        requested = int(packet.get("requested_calculation_count") or 0)
+        completed = len(
+            [
+                result
+                for result in (packet.get("calculations") or [])
+                if isinstance(result, dict)
+            ]
+        )
+        if completed < requested:
+            return (
+                "knowledge result completed only "
+                f"{completed}/{requested} requested calculations"
+            )
     return ""
 
 
@@ -38,12 +73,22 @@ def build_knowledge_query(item: dict[str, Any], *, race: str = "") -> str:
     entities = [str(value).strip() for value in item.get("entities") or [] if str(value).strip()]
     needs = [str(value).strip() for value in item.get("needs") or [] if str(value).strip()]
     plan_ids = [str(value).strip() for value in item.get("plan_ids") or [] if str(value).strip()]
+    calculations = [
+        value for value in item.get("calculations") or [] if isinstance(value, dict)
+    ]
     if entities:
         parts.append(f"entities={','.join(entities)}")
     if needs:
         parts.append(f"needs={','.join(needs)}")
     if plan_ids:
         parts.append(f"plans={','.join(plan_ids)}")
+    if calculations:
+        import json
+
+        parts.append(
+            "calculations="
+            + json.dumps(calculations, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
     if race:
         parts.append(f"race={race}")
     return " | ".join(part for part in parts if part)
@@ -68,6 +113,13 @@ def run_knowledge_query(
         if str(value).strip()
     ]
     query = build_knowledge_query(item, race=race)
+    query_reason = str(item.get("query_reason") or item.get("reason") or "").strip()
+    evidence_refs = [
+        str(value).strip()
+        for value in item.get("evidence_refs") or []
+        if str(value).strip()
+    ]
+    hypothesis_scope = str(item.get("hypothesis_scope") or "").strip()
     try:
         packet = build_strategy_knowledge(
             item,
@@ -83,13 +135,18 @@ def run_knowledge_query(
             "plan_ids": plan_ids,
             "ok": False,
             "query": query,
+            "query_reason": query_reason,
+            "evidence_refs": evidence_refs,
+            "hypothesis_scope": hypothesis_scope,
             "answer": "",
             "error": f"{type(exc).__name__}: {exc}",
         }
 
-    error = "" if packet.get("entities") else (
-        "deterministic knowledge query resolved no Unit or Upgrade entities"
-    )
+    error = "" if (
+        packet.get("entities")
+        or packet.get("action_facts")
+        or packet.get("calculations")
+    ) else "deterministic knowledge query resolved no entities or action facts"
     return {
         "question_id": question_id,
         "problem_ids": problem_ids,
@@ -97,6 +154,9 @@ def run_knowledge_query(
         "plan_ids": plan_ids,
         "ok": not error,
         "query": query,
+        "query_reason": query_reason,
+        "evidence_refs": evidence_refs,
+        "hypothesis_scope": hypothesis_scope,
         "answer": answer,
         "error": error,
         "verification_schema": KNOWLEDGE_VERIFICATION_SCHEMA,
@@ -106,6 +166,7 @@ def run_knowledge_query(
                 "arguments": {
                     "entities": packet.get("entities") or [],
                     "needs": packet.get("needs") or [],
+                    "calculations": item.get("calculations") or [],
                 },
                 "result": packet,
             }

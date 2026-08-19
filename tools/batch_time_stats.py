@@ -45,6 +45,7 @@ from tools.batch_stats import (
     _clip,
     _difficulty_sort_key,
     _majority,
+    _natural_sort_key,
     _short_batch_name,
     classify_result,
     discover_batches,
@@ -371,7 +372,7 @@ def build_overview_summaries(
     summaries = [_make_summary("|".join(key), group_rows) for key, group_rows in buckets.items()]
     summaries.sort(
         key=lambda s: (
-            s.strategy.lower(),
+            _natural_sort_key(s.strategy),
             s.model_key.lower(),
             s.enemy_race.lower(),
             _difficulty_sort_key(s.difficulty),
@@ -402,7 +403,10 @@ def build_group_summaries(rows: list[TimeRow], group_by: str) -> list[TimeSummar
         else:
             key = row.batch
         buckets[key or "?"].append(row)
-    return [_make_summary(key, buckets[key]) for key in sorted(buckets, key=str.lower)]
+    return [
+        _make_summary(key, buckets[key])
+        for key in sorted(buckets, key=_natural_sort_key)
+    ]
 
 
 def _print_overview(rows: list[TimeRow], *, per_batch: bool) -> None:
@@ -462,7 +466,7 @@ def _print_overview(rows: list[TimeRow], *, per_batch: bool) -> None:
         for row in sorted(
             ungrouped_rows,
             key=lambda r: (
-                (r.strategy or "").lower(),
+                _natural_sort_key(r.strategy or ""),
                 r.model_key.lower(),
                 (r.enemy_race or "").lower(),
                 _difficulty_sort_key(r.difficulty),
@@ -509,7 +513,8 @@ def _print_strategy_model_summary(
     print(header)
     print("-" * len(header))
     for strategy, model in sorted(
-        buckets.keys(), key=lambda k: (k[0].lower(), k[1].lower())
+        buckets.keys(),
+        key=lambda k: (_natural_sort_key(k[0]), k[1].lower()),
     ):
         group_rows = buckets[(strategy, model)]
         total, wins, losses, ties, _unknown, rate = _result_counts(group_rows)

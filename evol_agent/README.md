@@ -20,7 +20,9 @@ EvolAgent 是 SC2-Commander 的离线候选策略生成器。它读取一批完�
 
 每代只验证一个由对局证据支持的主要因果假设，并把它实现为一个 coherent strategy package：为了让假设可执行、资源可行、前置完整且内部一致，可以同步修改多个 paragraph 和战略维度；但不能夹带与该假设无关的第二优化目标。`plan.direction` 描述这个完整策略包，而不是 single lever 或 paragraph 名称。不增加固定优化类别 enum。知识库只在静态事实能区分解释时查询；对局时机、策略选择和 Commander 行为由对局证据与运行时边界决定。`considered_explanations` 留在 `analysis.json`，不写入长期 experiment_history。
 
-每个实验还会预注册 `mechanism_prediction`：候选应改变的可观察中间状态、构成有效测试所需的最低实质变化、预期比赛效果和真正的反证条件。Candidate 是否晋级与 hypothesis 是否被反驳相互独立。负分候选只会使该具体组合被拒绝；在没有证据证明预期机制已充分发生之前，`implementation_verdict` 保持 `unknown`，`hypothesis_verdict` 保持 `inconclusive`。只有达到最低机制变化后相同失败仍存在，才允许记录 `contradicted`。同方向重试必须说明比上次更强或修正了什么，不能原样重复。
+每个实验还会预注册 `mechanism_prediction`：候选应改变的可观察中间状态、构成有效测试所需的最低实质变化、预期比赛效果、决定性交战应改善的 `combat_success_measure` 和真正的反证条件。外层评测结束后，Post-experiment Audit 会重新比较 Parent 与 Candidate 的完整对局摘要，沿“策略规则—Commander 决策—实际应用指令—后续状态”检查机制是否真正发生，并分别记录 `implementation_verdict`、`hypothesis_verdict`、`mechanism_evidence` 与 `combat_evidence`。胜率上升不会自动把假设标记为 supported；只有最低机制变化已实现且决定性交战证据与预测一致时才允许支持该假设。依赖底层微操、单位变形、装载或技能施放的候选会被标记为 `execution_invalid`，不能晋级。
+
+策略优化的首要方向是赢下决定性交战，或以足够兵力保留通过该交战并继续取胜计划。更早进攻、减少资源积压、提高生产同步、达到数量门槛和增加侦察都只是中间机制，必须明确说明其如何改善首战结果或兵力保留率，不能作为独立的最终优化目标。
 
 ## 职责边界
 
@@ -73,7 +75,8 @@ EvolAgent 负责提出候选，不负责判断候选是否更强。候选必须�
 
 运行日志保存在 `evol_agent/logs/<strategy>/<timestamp>/`。其中 `analysis.json` 保存单一优化假设，`knowledge_trace.json` 保存知识查询，`improvement.json` 保存候选内容和修改理由，`context.json` 保存完整运行上下文。
 
+自动进化进入下一代时，如果 Parent 未改变而证据池只增加了确认局，系统会从最新兼容 checkpoint 复用已有逐场总结，只总结新增记录。上一轮跨局分析会作为可修正的分析种子与实验历史一起传入；新一轮仍以当前完整证据集为准，不会把旧分析当作额外对局重复计数。
+
 ## 敌方赛后真实状态
 
 `run_vs_ai.py` 默认从 `.SC2Replay` 提取对手视角状态并保存为 `.enemy_truth.json`。逐局固定时间表会把迷雾下的 `enemy` 与 `opponent_truth_after_match` 分开，避免把赛后真值误当成 Commander 当时已知的信息。
-

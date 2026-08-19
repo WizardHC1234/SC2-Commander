@@ -33,6 +33,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.batch_stats import (  # noqa: E402
+    _natural_sort_key,
     classify_result,
     discover_batches,
     find_record_json,
@@ -315,7 +316,13 @@ def organize(
     skipped: list[dict] = []
     for key, items in sorted(
         grouped.items(),
-        key=lambda kv: kv[0].parts(),
+        key=lambda kv: (
+            kv[0].model.lower(),
+            _natural_sort_key(kv[0].strategy),
+            kv[0].race.lower(),
+            kv[0].difficulty.lower(),
+            kv[0].style.lower(),
+        ),
     ):
         # Prefer unique match_ids (re-runs with same id keep the first path).
         by_id: dict[str, MatchJson] = {}

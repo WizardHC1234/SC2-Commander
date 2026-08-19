@@ -13,7 +13,7 @@ from .types import BattleAnalysis, GameDigest, ToolObservation
 from ..sc2_data_agent.bridge import is_knowledge_run_verified
 
 CHECKPOINT_SCHEMA = "evol_agent_checkpoint.v2"
-PIPELINE_VERSION = "full_timeline_summary_v1_cross_match_discovery_v1"
+PIPELINE_VERSION = "full_timeline_summary_v1_evidence_retrieval_v1"
 
 STAGE_ORDER = (
     "created",
@@ -359,8 +359,8 @@ def validate_checkpoint_fingerprint(
     errors: list[str] = []
     if str(meta.get("pipeline_version") or "") != PIPELINE_VERSION:
         errors.append(
-            "pipeline_version mismatch: checkpoint predates two-round "
-            "cross-match analysis; start a new EvolAgent run"
+            "pipeline_version mismatch: checkpoint predates structured evidence "
+            "retrieval; start a new EvolAgent run"
         )
     if str(meta.get("strategy_name") or "") != strategy_name:
         errors.append(
@@ -381,3 +381,37 @@ def validate_checkpoint_fingerprint(
     if errors:
         raise ValueError("; ".join(errors))
 
+
+def validate_analysis_seed_checkpoint(
+    checkpoint: EvolCheckpoint,
+    *,
+    strategy_name: str,
+    race: str,
+    knowledge_mode: str,
+    record_files: list[str],
+    analysis_model: str,
+) -> None:
+    """Validate a completed checkpoint used to seed a larger analysis batch."""
+    meta = checkpoint.meta
+    errors: list[str] = []
+    if str(meta.get("pipeline_version") or "") != PIPELINE_VERSION:
+        errors.append("pipeline_version mismatch")
+    if not stage_reached(checkpoint.stage, "match_summaries"):
+        errors.append("seed has no completed match summaries")
+    if str(meta.get("strategy_name") or "") != strategy_name:
+        errors.append("strategy_name mismatch")
+    if str(meta.get("race") or "").lower() != race.lower():
+        errors.append("race mismatch")
+    if str(meta.get("knowledge_mode") or "") != knowledge_mode:
+        errors.append("knowledge_mode mismatch")
+    seed_model = str((meta.get("models") or {}).get("analysis") or "").strip()
+    if seed_model and seed_model != str(analysis_model or "").strip():
+        errors.append("analysis model mismatch")
+    current = {str(Path(item).resolve()) for item in record_files}
+    seed = {str(Path(item).resolve()) for item in (meta.get("record_files") or [])}
+    if not seed:
+        errors.append("seed has no record files")
+    elif not seed.issubset(current):
+        errors.append("seed records are not a subset of the current batch")
+    if errors:
+        raise ValueError("; ".join(errors))

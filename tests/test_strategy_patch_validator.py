@@ -88,6 +88,9 @@ def test_validator_prompt_checks_coherent_package_and_identity() -> None:
     assert "3. Test strength" in prompt
     assert "minimum_material_change" in prompt
     assert "never from patch count" in prompt
+    assert "4. Analysis-optimization priority alignment" in prompt
+    assert "## SC2 Strategic Priority" in prompt
+    assert "lower-priority surrogate" in prompt
     assert "defining army concept and win plan" in prompt
     assert "NOT judging whether another causal hypothesis would have been better" in prompt
 
@@ -412,6 +415,59 @@ def test_scan_safety_requirement_is_rejected(monkeypatch) -> None:
         capability_manifest=build_executor_capability_manifest("terran"),
     )
     assert any("unavailable runtime behavior" in item for item in errors)
+
+
+def test_unsupported_wake_condition_is_rejected(monkeypatch) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    patches = [
+        _patch(
+            document,
+            "main_attack_gate",
+            (
+                "Hold the force and set a wake event for scan_ready, "
+                "enemy_visible_in_target_zone, or game_time_at_least."
+            ),
+            "The revised gate requires a reachable redecision event.",
+        )
+    ]
+    patched, _changes = document.apply_patch(_patches_to_operations(patches))
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        lambda prompt, **kwargs: {"valid": True, "errors": []},
+    )
+    errors = validate_strategy_patch_semantics(
+        decision=_decision(),
+        parent_text=TANK_STRATEGY,
+        candidate_text=patched,
+        patches=patches,
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+    assert "unsupported wake condition in strategy: enemy_visible_in_target_zone" in errors
+
+
+def test_precise_maximum_range_requirement_is_rejected(monkeypatch) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    patches = [
+        _patch(
+            document,
+            "engagement_and_reinforcement",
+            "Place the force at maximum range before beginning the engagement.",
+            "The revised package requires exact positioning.",
+        )
+    ]
+    patched, _changes = document.apply_patch(_patches_to_operations(patches))
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        lambda prompt, **kwargs: {"valid": True, "errors": []},
+    )
+    errors = validate_strategy_patch_semantics(
+        decision=_decision(),
+        parent_text=TANK_STRATEGY,
+        candidate_text=patched,
+        patches=patches,
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+    assert any("at maximum range" in item for item in errors)
 
 
 def test_non_blocking_semantic_notes_do_not_fail(monkeypatch) -> None:

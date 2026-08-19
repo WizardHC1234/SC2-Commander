@@ -138,8 +138,8 @@ def test_optimizer_prompt_does_not_select_a_plan() -> None:
     assert "Select exactly one self-contained candidate plan" not in prompt
     assert "selected_plan_ids" not in prompt
     assert "Do not select among candidate plans" in prompt
-    assert "selected causal hypothesis is the unit of experimentation" in prompt
-    assert "coherent strategy package direction" in prompt
+    assert "selected primary failure mode is the unit of evolution" in prompt
+    assert "coherent intervention package" in prompt
     assert "minimum_material_change" in prompt
     assert "cosmetic" in prompt
     assert "If this patch were removed" in prompt
@@ -147,6 +147,11 @@ def test_optimizer_prompt_does_not_select_a_plan() -> None:
     assert "resource and production dependencies" in prompt
     assert "execution dependencies" in prompt
     assert "defining army concept and win plan" in prompt
+    assert "## SC2 Strategic Priority" in prompt
+    assert "viable matchup and fighting" in prompt
+    assert "package first" in prompt
+    assert "information only when it changes" in prompt
+    assert "Never replace a required higher-priority package component" in prompt
     assert "Independent factual match summaries" not in prompt
 
 
@@ -342,6 +347,66 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
         if item.id == "recovery_and_cleanup"
     )
     del recovery
+
+
+def test_semantic_retry_exhaustion_uses_latest_structurally_valid_candidate(
+    monkeypatch,
+) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    optimizer_calls = 0
+
+    def fake_llm(prompt: str, **kwargs):
+        nonlocal optimizer_calls
+        if "You are validating a strategy patch" in prompt:
+            return {
+                "valid": False,
+                "errors": [
+                    {
+                        "type": "missing_dependency",
+                        "location": "Recovery and Cleanup",
+                        "description": "the retry still leaves a dependency warning",
+                        "severity": "blocking",
+                    }
+                ],
+            }
+        optimizer_calls += 1
+        return {
+            "action": "draft_candidate" if optimizer_calls == 1 else "revise_candidate",
+            "patches": [
+                _patch(
+                    document,
+                    "main_attack_gate",
+                    f"Begin the planned attack with {36 - optimizer_calls} Marines and 8 Siege Tanks.",
+                    "This changes the readiness rule selected by the hypothesis.",
+                )
+            ],
+            "expected_effect": "earlier first attack",
+            "main_risk": "smaller force",
+        }
+
+    monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm", fake_llm
+    )
+    result, improvement, _obs, errors, events = run_optimization_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=_decision_analysis(),
+        skill_texts={"strategy.md": TANK_STRATEGY},
+        initial_tool_observations=[],
+    )
+
+    assert result.ok is True
+    assert improvement is not None
+    assert optimizer_calls == 3
+    assert improvement.analysis["semantic_validation"]["status"] == (
+        "accepted_after_semantic_retry_exhausted"
+    )
+    assert errors
+    assert events[-1]["action"] == (
+        "accept_latest_candidate_after_semantic_retry_exhausted"
+    )
+    assert "33 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
 
 
 def test_unrelated_paragraphs_and_titles_remain() -> None:

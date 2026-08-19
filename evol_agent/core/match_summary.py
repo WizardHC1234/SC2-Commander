@@ -70,6 +70,21 @@ def _compact_event(raw: Any) -> dict[str, Any] | None:
     return event or None
 
 
+def _compact_evidence_row(raw: Any, fields: tuple[str, ...]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    row: dict[str, Any] = {}
+    if raw.get("time_s") not in (None, ""):
+        row["time_s"] = raw.get("time_s")
+    elif raw.get("time") not in (None, ""):
+        row["time_s"] = raw.get("time")
+    for field in fields:
+        cleaned = _compact_mapping(raw.get(field))
+        if cleaned:
+            row[field] = cleaned
+    return row or None
+
+
 def _normalize_summary_payload(
     result: Any,
     *,
@@ -87,6 +102,43 @@ def _normalize_summary_payload(
         return None
     else:
         events = [item for raw in events_raw if (item := _compact_event(raw))]
+    pressure_raw = result.get("enemy_pressure_events")
+    if pressure_raw is None:
+        pressure_events: list[dict[str, Any]] = []
+    elif not isinstance(pressure_raw, list):
+        return None
+    else:
+        pressure_fields = (
+            "observed_cue",
+            "own_defense",
+            "enemy_observed",
+            "enemy_truth",
+            "outcome",
+        )
+        pressure_events = [
+            item
+            for raw in pressure_raw
+            if (item := _compact_evidence_row(raw, pressure_fields))
+        ]
+    engagements_raw = result.get("major_engagements")
+    if engagements_raw is None:
+        major_engagements: list[dict[str, Any]] = []
+    elif not isinstance(engagements_raw, list):
+        return None
+    else:
+        engagement_fields = (
+            "initiator",
+            "own_force_before",
+            "enemy_observed",
+            "enemy_truth",
+            "own_force_after",
+            "outcome",
+        )
+        major_engagements = [
+            item
+            for raw in engagements_raw
+            if (item := _compact_evidence_row(raw, engagement_fields))
+        ]
     payload_duration = result.get("duration_s")
     try:
         normalized_duration = float(payload_duration)
@@ -98,6 +150,8 @@ def _normalize_summary_payload(
         "result": str(result.get("result") or manifest.get("result") or "").strip(),
         "duration_s": normalized_duration,
         "events": events,
+        "enemy_pressure_events": pressure_events,
+        "major_engagements": major_engagements,
     }
 
 
@@ -111,6 +165,8 @@ def _degraded_payload(
         "result": str(manifest.get("result") or "unknown"),
         "duration_s": duration_s,
         "events": [],
+        "enemy_pressure_events": [],
+        "major_engagements": [],
         "evidence_limits": [failure_reason],
         "summary_quality": "degraded",
     }
@@ -208,4 +264,3 @@ def run_fixed_match_summary(
         }
     ]
     return digest, analysis, False, errors, events
-

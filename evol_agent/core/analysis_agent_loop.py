@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
 from functools import partial
+from pathlib import Path
+import re
 from typing import Any
 
 from .checkpoint import EvolCheckpoint, stage_reached
@@ -22,6 +24,7 @@ from .loop_helpers import (
     normalize_strategy_contract,
 )
 from .match_summary import run_fixed_match_summary
+from .evidence_retrieval import build_retrieval_evidence_packet
 from .prompts import (
     build_cross_match_decision_prompt,
     build_cross_match_discovery_prompt,
@@ -140,17 +143,121 @@ def _normalize_knowledge_questions(raw: Any) -> list[dict[str, Any]]:
         ]
         if not question or not entities or not needs:
             continue
+        calculations: list[dict[str, Any]] = []
+        for calculation in item.get("calculations") or []:
+            if not isinstance(calculation, dict):
+                continue
+            calculation_type = str(calculation.get("type") or "").strip().lower()
+            action = str(
+                calculation.get("action")
+                or calculation.get("unit")
+                or calculation.get("entity")
+                or ""
+            ).strip()
+            if calculation_type not in {
+                "parallel_production",
+                "resource_demand_per_minute",
+            } or not action:
+                continue
+            normalized_calculation: dict[str, Any] = {
+                "type": calculation_type,
+                "action": action,
+                "production_slots": calculation.get("production_slots")
+                or calculation.get("producers"),
+            }
+            if calculation_type == "parallel_production":
+                normalized_calculation["quantity"] = calculation.get("quantity")
+            calculations.append(normalized_calculation)
+            if len(calculations) >= 6:
+                break
         questions.append(
             {
                 "id": f"Q{len(questions) + 1}",
                 "question": question,
                 "entities": entities,
                 "needs": list(dict.fromkeys(needs)),
+                "query_reason": str(
+                    item.get("query_reason") or item.get("reason") or question
+                ).strip(),
+                "evidence_refs": _clean_strings(
+                    item.get("evidence_refs") or item.get("evidence"), limit=6
+                ),
+                "hypothesis_scope": str(
+                    item.get("hypothesis_scope") or "static_sc2_fact"
+                ).strip(),
+                "calculations": calculations,
             }
         )
         if len(questions) >= MAX_KNOWLEDGE_QUERIES:
             break
     return questions
+
+
+def _normalize_match_evidence_queries(
+    raw: Any,
+    *,
+    fallback_patterns: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    queries: list[dict[str, Any]] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        reason = str(item.get("query_reason") or item.get("reason") or "").strip()
+        refs = _clean_strings(
+            item.get("evidence_refs") or item.get("evidence"), limit=8
+        )
+        if not reason or not refs:
+            continue
+        queries.append(
+            {
+                "id": f"M{len(queries) + 1}",
+                "query_reason": reason,
+                "evidence_refs": refs,
+            }
+        )
+        if len(queries) >= 4:
+            break
+    if queries:
+        return queries
+    for pattern in fallback_patterns:
+        refs = _clean_strings(pattern.get("evidence"), limit=6)
+        if not refs:
+            continue
+        queries.append(
+            {
+                "id": f"M{len(queries) + 1}",
+                "query_reason": (
+                    "Verify the recorded interaction and attribution for: "
+                    + str(pattern.get("pattern") or "")
+                ),
+                "evidence_refs": refs,
+            }
+        )
+        if len(queries) >= 4:
+            break
+    return queries
+
+
+def _normalize_experience_query(
+    raw: Any,
+    *,
+    fallback_patterns: list[dict[str, Any]],
+) -> dict[str, Any]:
+    item = raw if isinstance(raw, dict) else {}
+    signature = _clean_strings(item.get("failure_signature"), limit=8)
+    if not signature:
+        signature = [
+            str(pattern.get("pattern") or "").strip()
+            for pattern in fallback_patterns
+            if str(pattern.get("pattern") or "").strip()
+        ][:6]
+    reason = str(item.get("query_reason") or item.get("reason") or "").strip()
+    if not reason:
+        reason = (
+            "Retrieve prior successful, rejected, and inconclusive interventions "
+            "that address the same observed failure pattern."
+        )
+    return {"query_reason": reason, "failure_signature": signature}
 
 
 def _normalize_cross_match_discovery(
@@ -166,17 +273,40 @@ def _normalize_cross_match_discovery(
         if "confidence" not in item:
             item["confidence"] = "medium"
     unknowns = _normalize_unknowns(raw.get("unknowns"))
+    pressure_patterns = _normalize_pattern_items(
+        raw.get("opponent_pressure_patterns"), limit=4
+    )
+    matchup_patterns = _normalize_pattern_items(raw.get("matchup_patterns"), limit=4)
+    raw_query_plan = raw.get("query_plan") if isinstance(raw.get("query_plan"), dict) else {}
     questions = (
-        _normalize_knowledge_questions(raw.get("knowledge_questions"))
+        _normalize_knowledge_questions(
+            raw_query_plan.get("game_knowledge_queries")
+            or raw.get("knowledge_questions")
+        )
         if knowledge_mode == "enabled"
         else []
     )
+    fallback_patterns = [*weaknesses, *pressure_patterns, *matchup_patterns]
+    query_plan = {
+        "match_evidence_queries": _normalize_match_evidence_queries(
+            raw_query_plan.get("match_evidence_queries"),
+            fallback_patterns=fallback_patterns,
+        ),
+        "experience_query": _normalize_experience_query(
+            raw_query_plan.get("experience_query"),
+            fallback_patterns=fallback_patterns,
+        ),
+        "game_knowledge_queries": questions,
+    }
     return (
         {
             "strengths": strengths,
             "weaknesses": weaknesses,
             "unknowns": unknowns,
+            "opponent_pressure_patterns": pressure_patterns,
+            "matchup_patterns": matchup_patterns,
             "knowledge_questions": questions,
+            "query_plan": query_plan,
         },
         "",
     )
@@ -215,22 +345,169 @@ def _normalize_priority_problem(raw: Any) -> tuple[dict[str, Any] | None, str]:
     )
 
 
+def _normalize_mechanism_family(raw: Any, plan: dict[str, Any] | None) -> str:
+    value = str(raw or "").strip().lower()
+    if not value and plan:
+        value = str(plan.get("direction") or "").strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+    return value[:80] or "unclassified_strategy_mechanism"
+
+
 def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
     if raw in (None, "", []):
         return None, ""
     if isinstance(raw, str):
         direction = raw.strip()
+        material_behavior_change = ""
+        coordinated_changes: list[dict[str, str]] = []
         preserve: list[str] = []
     elif isinstance(raw, dict):
         direction = str(
             raw.get("direction") or raw.get("name") or raw.get("plan") or ""
         ).strip()
+        material_behavior_change = str(
+            raw.get("material_behavior_change") or ""
+        ).strip()
+        coordinated_changes = []
+        for item in raw.get("coordinated_changes") or []:
+            if not isinstance(item, dict):
+                continue
+            change = str(item.get("change") or "").strip()
+            why_required = str(item.get("why_required") or "").strip()
+            if change and why_required:
+                coordinated_changes.append(
+                    {"change": change, "why_required": why_required}
+                )
+            if len(coordinated_changes) >= 10:
+                break
         preserve = _clean_strings(raw.get("preserve"), limit=5)
     else:
         return None, "plan must be an object with direction"
     if not direction:
         return None, "plan.direction is required"
-    return {"direction": direction, "preserve": preserve}, ""
+    return {
+        "direction": direction,
+        "material_behavior_change": material_behavior_change,
+        "coordinated_changes": coordinated_changes,
+        "preserve": preserve,
+    }, ""
+
+
+def _normalize_failure_mode_analysis(
+    raw: Any,
+) -> tuple[dict[str, str] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "failure_mode_analysis must be an object"
+    fields = (
+        "failure_mode",
+        "survival_prerequisite",
+        "opponent_pressure_pattern",
+        "matchup_assessment",
+        "counterexample_check",
+    )
+    normalized = {field: str(raw.get(field) or "").strip() for field in fields}
+    missing = [field for field, value in normalized.items() if not value]
+    if missing:
+        return None, "failure_mode_analysis requires " + ", ".join(missing)
+    return normalized, ""
+
+
+def _normalize_priority_alignment(
+    raw: Any,
+) -> tuple[dict[str, str] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "priority_alignment must be an object"
+    fields = (
+        "selected_priority",
+        "higher_priority_assessment",
+        "downstream_combat_effect",
+    )
+    normalized = {field: str(raw.get(field) or "").strip() for field in fields}
+    missing = [field for field, value in normalized.items() if not value]
+    if missing:
+        return None, "priority_alignment requires " + ", ".join(missing)
+    return normalized, ""
+
+
+def _normalize_retrieval_assessment(
+    raw: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "retrieval_assessment must be an object"
+    query_summary = str(raw.get("query_summary") or "").strip()
+    confidence = str(raw.get("confidence") or "").strip().lower()
+    if confidence not in _CONFIDENCE:
+        return None, "retrieval_assessment.confidence must be low, medium, or high"
+    if not query_summary:
+        return None, "retrieval_assessment.query_summary is required"
+    return (
+        {
+            "query_summary": query_summary,
+            "match_evidence_used": _clean_strings(
+                raw.get("match_evidence_used"), limit=8
+            ),
+            "historical_experience_used": _clean_strings(
+                raw.get("historical_experience_used"), limit=6
+            ),
+            "knowledge_used": _clean_strings(raw.get("knowledge_used"), limit=6),
+            "conflicting_evidence": _clean_strings(
+                raw.get("conflicting_evidence"), limit=6
+            ),
+            "confidence": confidence,
+        },
+        "",
+    )
+
+
+def _validate_retrieval_assessment_links(
+    assessment: dict[str, Any],
+    *,
+    retrieval_evidence: dict[str, Any] | None,
+    knowledge_runs: list[dict[str, Any]] | None,
+) -> str:
+    packet = retrieval_evidence or {}
+    match_packet = packet.get("match_record_evidence") or {}
+    match_queries = [
+        item for item in match_packet.get("queries") or [] if isinstance(item, dict)
+    ]
+    available_match_ids = {
+        str(item.get("query_id") or "").strip()
+        for item in match_queries
+        if item.get("results")
+    }
+    used_match = list(assessment.get("match_evidence_used") or [])
+    if available_match_ids and not used_match:
+        return "retrieval_assessment must use or explicitly conflict with queried match evidence"
+    cited_match_ids = {
+        match.group(0).upper()
+        for text in used_match
+        for match in re.finditer(r"\bM\d+\b", str(text), re.IGNORECASE)
+    }
+    unknown_match_ids = cited_match_ids - available_match_ids
+    if unknown_match_ids:
+        return "retrieval_assessment cites unknown match query ids: " + ", ".join(
+            sorted(unknown_match_ids)
+        )
+
+    verified_knowledge_ids = {
+        str(run.get("question_id") or "").strip()
+        for run in knowledge_runs or []
+        if is_knowledge_run_verified(run)
+    }
+    used_knowledge = list(assessment.get("knowledge_used") or [])
+    if verified_knowledge_ids and not used_knowledge:
+        return "retrieval_assessment must state which verified knowledge facts were used"
+    cited_knowledge_ids = {
+        match.group(0).upper()
+        for text in used_knowledge
+        for match in re.finditer(r"\bQ\d+\b", str(text), re.IGNORECASE)
+    }
+    unknown_knowledge_ids = cited_knowledge_ids - verified_knowledge_ids
+    if unknown_knowledge_ids:
+        return "retrieval_assessment cites unknown knowledge query ids: " + ", ".join(
+            sorted(unknown_knowledge_ids)
+        )
+    return ""
 
 
 def _normalize_mechanism_prediction(
@@ -242,6 +519,7 @@ def _normalize_mechanism_prediction(
         "expected_change",
         "minimum_material_change",
         "outcome_prediction",
+        "combat_success_measure",
         "disproof_condition",
     )
     normalized = {field: str(raw.get(field) or "").strip() for field in fields}
@@ -318,7 +596,7 @@ def _adapt_decision_for_optimizer(
                 "hypothesis": hypothesis,
                 "primary_lever": "other",
                 "addresses_problem_ids": ["P1"],
-                "changes": [],
+                "changes": list(plan.get("coordinated_changes") or []),
                 "predictions": [
                     str(
                         (decision.get("mechanism_prediction") or {}).get(
@@ -370,6 +648,9 @@ def _normalize_cross_match_decision(
     raw: dict[str, Any],
     *,
     strategy_name: str,
+    require_retrieval_assessment: bool = False,
+    retrieval_evidence: dict[str, Any] | None = None,
+    knowledge_runs: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(raw, dict):
         return None, "decision returned no JSON object"
@@ -388,8 +669,20 @@ def _normalize_cross_match_decision(
         return None, priority_error
     hypothesis = str(raw.get("hypothesis") or "").strip()
     plan, plan_error = _normalize_plan(raw.get("plan"))
+    mechanism_family = _normalize_mechanism_family(
+        raw.get("mechanism_family"), plan
+    )
     mechanism_prediction, mechanism_error = _normalize_mechanism_prediction(
         raw.get("mechanism_prediction")
+    )
+    failure_mode_analysis, failure_mode_error = _normalize_failure_mode_analysis(
+        raw.get("failure_mode_analysis")
+    )
+    priority_alignment, priority_alignment_error = _normalize_priority_alignment(
+        raw.get("priority_alignment")
+    )
+    retrieval_assessment, retrieval_error = _normalize_retrieval_assessment(
+        raw.get("retrieval_assessment")
     )
     if plan_error and next_action == "propose_strategy_patch":
         return None, plan_error
@@ -415,6 +708,32 @@ def _normalize_cross_match_decision(
             return None, mechanism_error or (
                 "propose_strategy_patch requires mechanism_prediction"
             )
+        elif not plan.get("material_behavior_change"):
+            return None, "propose_strategy_patch requires plan.material_behavior_change"
+        elif not plan.get("coordinated_changes"):
+            return None, "propose_strategy_patch requires plan.coordinated_changes"
+        elif failure_mode_error or not failure_mode_analysis:
+            return None, failure_mode_error or (
+                "propose_strategy_patch requires failure_mode_analysis"
+            )
+        elif priority_alignment_error or not priority_alignment:
+            return None, priority_alignment_error or (
+                "propose_strategy_patch requires priority_alignment"
+            )
+        elif require_retrieval_assessment and (
+            retrieval_error or not retrieval_assessment
+        ):
+            return None, retrieval_error or (
+                "propose_strategy_patch requires retrieval_assessment"
+            )
+        elif require_retrieval_assessment and retrieval_assessment:
+            retrieval_link_error = _validate_retrieval_assessment_links(
+                retrieval_assessment,
+                retrieval_evidence=retrieval_evidence,
+                knowledge_runs=knowledge_runs,
+            )
+            if retrieval_link_error:
+                return None, retrieval_link_error
     elif next_action in {"request_more_matches", "stop"}:
         if not action_reason:
             return None, f"{next_action} requires action_reason"
@@ -426,7 +745,11 @@ def _normalize_cross_match_decision(
         "strengths_to_preserve": strengths,
         "priority_problem": priority or {},
         "hypothesis": hypothesis,
+        "mechanism_family": mechanism_family,
+        "failure_mode_analysis": failure_mode_analysis or {},
+        "priority_alignment": priority_alignment or {},
         "mechanism_prediction": mechanism_prediction or {},
+        "retrieval_assessment": retrieval_assessment or {},
         "next_action": next_action,
         "action_reason": action_reason,
         "considered_explanations": _normalize_considered_explanations(
@@ -494,6 +817,7 @@ def _run_cross_match_discovery(
     knowledge_mode: str,
     model: str,
     prior_experiences: list[Any] | None,
+    capability_manifest: dict[str, Any] | None,
     events: list[dict[str, Any]],
     prefix: str,
 ) -> tuple[dict[str, Any] | None, list[str], int]:
@@ -510,6 +834,7 @@ def _run_cross_match_discovery(
             validation_errors=schema_errors,
             knowledge_mode=knowledge_mode,
             prior_experiences=prior_experiences or [],
+            capability_manifest=capability_manifest or {},
         ),
         model=model,
         normalizer=lambda raw: _normalize_cross_match_discovery(
@@ -546,8 +871,10 @@ def _run_cross_match_decision(
     knowledge_mode: str,
     model: str,
     prior_experiences: list[Any] | None,
+    capability_manifest: dict[str, Any] | None,
     discovery: dict[str, Any],
     knowledge_runs: list[dict[str, Any]],
+    retrieval_evidence: dict[str, Any],
     events: list[dict[str, Any]],
     prefix: str,
 ) -> tuple[dict[str, Any] | None, list[str], int]:
@@ -563,10 +890,16 @@ def _run_cross_match_decision(
             prior_experiences=prior_experiences or [],
             discovery=discovery,
             knowledge_runs=knowledge_runs,
+            retrieval_evidence=retrieval_evidence,
+            capability_manifest=capability_manifest or {},
         ),
         model=model,
         normalizer=lambda raw: _normalize_cross_match_decision(
-            raw, strategy_name=strategy_name
+            raw,
+            strategy_name=strategy_name,
+            require_retrieval_assessment=True,
+            retrieval_evidence=retrieval_evidence,
+            knowledge_runs=knowledge_runs,
         ),
         events=events,
         label="cross_match_decision",
@@ -604,6 +937,9 @@ def _observations_from_runs(
                 args={
                     "question_id": run.get("question_id"),
                     "query": run.get("query"),
+                    "query_reason": run.get("query_reason"),
+                    "evidence_refs": list(run.get("evidence_refs") or []),
+                    "hypothesis_scope": run.get("hypothesis_scope"),
                 },
                 result={"answer": run.get("answer"), "error": error},
                 ok=verified,
@@ -636,6 +972,7 @@ def _run_knowledge_queries(
                 cached[question_id] = run
 
     runs: list[dict[str, Any]] = []
+    retrieval_evidence: dict[str, Any] = {}
     print(
         f"{prefix}AnalysisAgent: resolving {len(questions)} deterministic knowledge question(s)",
         flush=True,
@@ -671,6 +1008,7 @@ def _summarize_matches(
     model: str,
     prefix: str,
     checkpoint: EvolCheckpoint | None,
+    summary_seed_checkpoint: EvolCheckpoint | None = None,
 ) -> tuple[
     list[GameDigest],
     list[BattleAnalysis],
@@ -686,55 +1024,118 @@ def _summarize_matches(
         )
         return values
 
-    worker_count = min(MAX_CONCURRENT_MATCH_SUBAGENTS, len(records))
-    print(
-        f"{prefix}AnalysisAgent: summarizing {len(records)} matches "
-        f"(max_concurrency={worker_count})",
-        flush=True,
-    )
     results: dict[
         int,
         tuple[GameDigest, BattleAnalysis, bool, list[str], list[dict[str, Any]]],
     ] = {}
-    executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="evol-match")
-    futures = {}
-    try:
-        for game_index, record in enumerate(records, 1):
-            task = partial(
-                run_fixed_match_summary,
-                strategy_name=strategy_name,
-                race=race,
-                record=record,
-                game_index=game_index,
-                model=model,
-                prefix=prefix,
+    reused_paths: set[str] = set()
+    if summary_seed_checkpoint is not None:
+        try:
+            seed_digests, seed_analyses, seed_completed, seed_events, _seed_errors = (
+                summary_seed_checkpoint.load_match_summaries()
             )
-            futures[executor.submit(copy_context().run, task)] = (game_index, record)
-        for future in as_completed(futures):
-            game_index, record = futures[future]
-            try:
-                results[game_index] = future.result()
-            except Exception as exc:  # noqa: BLE001 - preserve the remaining batch
-                error = f"Match summary crashed: {type(exc).__name__}: {exc}"
-                digest = evidence_digest(record, game_index)
-                digest.summary = error
+            completed_paths = {
+                str(Path(str(event.get("record_path") or "")).resolve())
+                for event in seed_events
+                if isinstance(event, dict) and bool(event.get("completed"))
+            }
+            assume_all_completed = not seed_events and seed_completed >= len(seed_digests)
+            seeded = {}
+            for digest, analysis in zip(seed_digests, seed_analyses):
+                path = str(Path(digest.record_path).resolve())
+                if assume_all_completed or path in completed_paths:
+                    seeded[path] = (digest, analysis)
+            for game_index, record in enumerate(records, 1):
+                path = str(Path(record.file).resolve())
+                cached = seeded.get(path)
+                if cached is None:
+                    continue
+                digest, analysis = cached
                 results[game_index] = (
                     digest,
-                    fallback_analysis(
-                        strategy_name=strategy_name,
-                        race=race,
-                        records=[record],
-                        reason=error,
-                    ),
-                    False,
-                    [error],
-                    [{"action": "crashed", "error": error}],
+                    analysis,
+                    True,
+                    [],
+                    [
+                        {
+                            "action": "reuse_match_summary",
+                            "source_checkpoint": str(summary_seed_checkpoint.run_dir),
+                        }
+                    ],
                 )
-    except KeyboardInterrupt:
-        abandon_executor(executor, futures)
-        exit_on_keyboard_interrupt("stopped during match summaries")
+                reused_paths.add(path)
+        except (OSError, ValueError) as exc:
+            print(
+                f"{prefix}AnalysisAgent: summary seed ignored: {exc}",
+                flush=True,
+            )
+
+    pending_records = [
+        (game_index, record)
+        for game_index, record in enumerate(records, 1)
+        if game_index not in results
+    ]
+    worker_count = min(MAX_CONCURRENT_MATCH_SUBAGENTS, len(pending_records))
+    if reused_paths:
+        print(
+            f"{prefix}AnalysisAgent: reused {len(reused_paths)} match summaries; "
+            f"summarizing {len(pending_records)} new matches"
+            + (f" (max_concurrency={worker_count})" if pending_records else ""),
+            flush=True,
+        )
     else:
-        executor.shutdown(wait=True)
+        print(
+            f"{prefix}AnalysisAgent: summarizing {len(records)} matches "
+            f"(max_concurrency={worker_count})",
+            flush=True,
+        )
+
+    if pending_records:
+        executor = ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="evol-match",
+        )
+        futures = {}
+        try:
+            for game_index, record in pending_records:
+                task = partial(
+                    run_fixed_match_summary,
+                    strategy_name=strategy_name,
+                    race=race,
+                    record=record,
+                    game_index=game_index,
+                    model=model,
+                    prefix=prefix,
+                )
+                futures[executor.submit(copy_context().run, task)] = (
+                    game_index,
+                    record,
+                )
+            for future in as_completed(futures):
+                game_index, record = futures[future]
+                try:
+                    results[game_index] = future.result()
+                except Exception as exc:  # noqa: BLE001 - preserve the remaining batch
+                    error = f"Match summary crashed: {type(exc).__name__}: {exc}"
+                    digest = evidence_digest(record, game_index)
+                    digest.summary = error
+                    results[game_index] = (
+                        digest,
+                        fallback_analysis(
+                            strategy_name=strategy_name,
+                            race=race,
+                            records=[record],
+                            reason=error,
+                        ),
+                        False,
+                        [error],
+                        [{"action": "crashed", "error": error}],
+                    )
+        except KeyboardInterrupt:
+            abandon_executor(executor, futures)
+            exit_on_keyboard_interrupt("stopped during match summaries")
+        else:
+            executor.shutdown(wait=True)
 
     digests: list[GameDigest] = []
     analyses: list[BattleAnalysis] = []
@@ -753,6 +1154,7 @@ def _summarize_matches(
                 "game_index": game_index,
                 "record_path": record.file,
                 "completed": ok,
+                "reused": str(Path(record.file).resolve()) in reused_paths,
                 "events": item_events,
                 "errors": item_errors,
             }
@@ -783,10 +1185,11 @@ def run_analysis_agent_loop(
     knowledge_mode: str = "enabled",
     prefix: str = "  ",
     checkpoint: EvolCheckpoint | None = None,
+    summary_seed_checkpoint: EvolCheckpoint | None = None,
     prior_experiences: list[Any] | None = None,
     capability_manifest: dict[str, Any] | None = None,
 ) -> AnalysisPipelineResult:
-    del capability_manifest
+    capability_manifest = capability_manifest or {}
     model = str(model or "").strip() or DEFAULT_ANALYSIS_MODEL
     if not records:
         analysis = fallback_analysis(
@@ -829,6 +1232,7 @@ def run_analysis_agent_loop(
         model=model,
         prefix=prefix,
         checkpoint=checkpoint,
+        summary_seed_checkpoint=summary_seed_checkpoint,
     )
     if completed == 0:
         analysis = fallback_analysis(
@@ -868,6 +1272,24 @@ def run_analysis_agent_loop(
         if resume_error:
             errors.append(f"old checkpoint analysis was not reusable: {resume_error}")
             payload = None
+        elif payload is not None:
+            retrieval_evidence = (
+                dict(loaded.get("retrieval_evidence") or {})
+                if isinstance(loaded.get("retrieval_evidence"), dict)
+                else {}
+            )
+            runs = checkpoint.load_knowledge_results()
+            observations = _observations_from_runs(runs, prefix=prefix) if runs else []
+            questions = [
+                {
+                    "id": run.get("question_id"),
+                    "question": run.get("question"),
+                    "query_reason": run.get("query_reason"),
+                    "evidence_refs": list(run.get("evidence_refs") or []),
+                    "hypothesis_scope": run.get("hypothesis_scope"),
+                }
+                for run in runs
+            ]
 
     if payload is None:
         if checkpoint is not None and checkpoint.has_cross_match_discovery():
@@ -896,6 +1318,7 @@ def run_analysis_agent_loop(
                 knowledge_mode=knowledge_mode,
                 model=model,
                 prior_experiences=prior_experiences,
+                capability_manifest=capability_manifest,
                 events=analysis_events,
                 prefix=prefix,
             )
@@ -925,6 +1348,33 @@ def run_analysis_agent_loop(
             )
 
         questions = list(discovery.get("knowledge_questions") or [])
+        retrieval_evidence = build_retrieval_evidence_packet(
+            records=records,
+            discovery=discovery,
+            prior_experiences=prior_experiences,
+        )
+        match_query_summary = retrieval_evidence.get("match_record_evidence") or {}
+        history_query_summary = (
+            retrieval_evidence.get("historical_experience_evidence") or {}
+        )
+        print(
+            f"{prefix}AnalysisAgent: retrieval record_refs="
+            f"{match_query_summary.get('reference_count', 0)} "
+            f"history_results={len(history_query_summary.get('results') or [])}",
+            flush=True,
+        )
+        analysis_events.append(
+            {
+                "action": "retrieve_evidence",
+                "record_reference_count": match_query_summary.get(
+                    "reference_count", 0
+                ),
+                "history_result_count": len(
+                    history_query_summary.get("results") or []
+                ),
+                "errors": list(match_query_summary.get("errors") or []),
+            }
+        )
         if knowledge_mode == "enabled" and questions:
             runs = _run_knowledge_queries(
                 questions,
@@ -942,8 +1392,10 @@ def run_analysis_agent_loop(
             knowledge_mode=knowledge_mode,
             model=model,
             prior_experiences=prior_experiences,
+            capability_manifest=capability_manifest,
             discovery=discovery,
             knowledge_runs=runs,
+            retrieval_evidence=retrieval_evidence,
             events=analysis_events,
             prefix=prefix,
         )
@@ -981,14 +1433,28 @@ def run_analysis_agent_loop(
             )
         )
     payload["knowledge_used"] = [
-        {"question_id": run.get("question_id"), "finding": run.get("answer")}
+        {
+            "question_id": run.get("question_id"),
+            "query_reason": run.get("query_reason"),
+            "evidence_refs": list(run.get("evidence_refs") or []),
+            "hypothesis_scope": run.get("hypothesis_scope"),
+            "finding": run.get("answer"),
+        }
         for run in runs
         if is_knowledge_run_verified(run)
     ]
     payload["knowledge_queries"] = [
-        {"question_id": run.get("question_id"), "ok": is_knowledge_run_verified(run)}
+        {
+            "question_id": run.get("question_id"),
+            "query_reason": run.get("query_reason"),
+            "evidence_refs": list(run.get("evidence_refs") or []),
+            "hypothesis_scope": run.get("hypothesis_scope"),
+            "ok": is_knowledge_run_verified(run),
+        }
         for run in runs
     ]
+    if retrieval_evidence:
+        payload["retrieval_evidence"] = retrieval_evidence
     if checkpoint is not None:
         checkpoint.save_batch_analysis(payload)
         print(
@@ -1007,6 +1473,7 @@ def run_analysis_agent_loop(
         "discovery": discovery,
         "questions": questions,
         "runs": runs,
+        "retrieval_evidence": retrieval_evidence,
         "failed_questions": failed_questions,
     }
     analysis_events.append(
@@ -1041,4 +1508,3 @@ def run_analysis_agent_loop(
         errors=errors,
         events=[*match_events, *analysis_events],
     )
-

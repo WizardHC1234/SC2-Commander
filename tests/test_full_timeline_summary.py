@@ -5,11 +5,14 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from evol_agent.analysis.match_record import MatchRecordReader
 from evol_agent.core.analysis_agent_loop import _summarize_matches, run_analysis_agent_loop
 from evol_agent.core.checkpoint import (
     PIPELINE_VERSION,
     EvolCheckpoint,
+    validate_analysis_seed_checkpoint,
     validate_checkpoint_fingerprint,
 )
 from evol_agent.core.context import render_single_game_analyses
@@ -212,6 +215,27 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
                     "commands": ["train_marine -> 30"],
                 }
             ],
+            "enemy_pressure_events": [
+                {
+                    "time_s": 248,
+                    "observed_cue": "enemy force reached the natural",
+                    "own_defense": "28 Marines, 6 Tanks",
+                    "enemy_observed": "visible ground army",
+                    "enemy_truth": "larger mixed army",
+                    "outcome": "army_broken",
+                }
+            ],
+            "major_engagements": [
+                {
+                    "time_s": 248,
+                    "initiator": "enemy",
+                    "own_force_before": "28 Marines, 6 Tanks",
+                    "enemy_observed": "visible ground army",
+                    "enemy_truth": "larger mixed army",
+                    "own_force_after": "small remnant",
+                    "outcome": "army_broken",
+                }
+            ],
             "opening_and_economy": ["should not be required"],
         }
 
@@ -231,6 +255,8 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
     assert analysis.raw["duration_s"] == 742
     assert isinstance(analysis.raw["events"], list)
     assert analysis.raw["events"][0]["time_s"] == 248
+    assert analysis.raw["enemy_pressure_events"][0]["outcome"] == "army_broken"
+    assert analysis.raw["major_engagements"][0]["initiator"] == "enemy"
     assert "opening_and_economy" not in analysis.raw
 
 
@@ -414,6 +440,126 @@ def test_one_failed_match_does_not_stop_the_batch(tmp_path: Path, monkeypatch) -
     assert any("match_002" in error for error in errors)
 
 
+def test_match_summary_seed_reuses_old_records_and_summarizes_only_new_records(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    records = [
+        _record_ns(_write_record(tmp_path / f"match_{index}.json", _multi_row_record()))
+        for index in range(1, 4)
+    ]
+    seed = EvolCheckpoint(tmp_path / "seed", {"stage": "created"})
+    seed.run_dir.mkdir(parents=True)
+    seed_digests = [
+        GameDigest(
+            record_path=record.file,
+            result="Defeat",
+            duration="12:22",
+            summary=f"cached-{index}",
+            raw={"record_path": record.file, "summary": f"cached-{index}"},
+        )
+        for index, record in enumerate(records[:2], 1)
+    ]
+    seed_analyses = [
+        BattleAnalysis(
+            strategy_name="tank",
+            race="terran",
+            sample_size=1,
+            record_mix="0W/1L",
+            raw={"summary": f"cached-{index}"},
+        )
+        for index in range(1, 3)
+    ]
+    seed.save_match_summaries(
+        game_digests=seed_digests,
+        single_game_analyses=seed_analyses,
+        completed_matches=2,
+        events=[
+            {"record_path": record.file, "completed": True}
+            for record in records[:2]
+        ],
+    )
+    target = EvolCheckpoint(tmp_path / "target", {"stage": "created"})
+    target.run_dir.mkdir(parents=True)
+    summarized: list[str] = []
+
+    def fake_summary(*, record, game_index: int, **_kwargs):
+        summarized.append(record.file)
+        digest = GameDigest(
+            record_path=record.file,
+            result="Defeat",
+            duration="12:22",
+            summary="new",
+            raw={"record_path": record.file, "summary": "new"},
+        )
+        analysis = BattleAnalysis(
+            strategy_name="tank",
+            race="terran",
+            sample_size=1,
+            record_mix="0W/1L",
+            raw={"summary": "new", "game_index": game_index},
+        )
+        return digest, analysis, True, [], []
+
+    monkeypatch.setattr(
+        "evol_agent.core.analysis_agent_loop.run_fixed_match_summary",
+        fake_summary,
+    )
+    digests, analyses, completed, events, errors = _summarize_matches(
+        strategy_name="tank",
+        race="terran",
+        records=records,
+        skill_texts={"strategy.md": VALID_STRATEGY},
+        model="test-model",
+        prefix="",
+        checkpoint=target,
+        summary_seed_checkpoint=seed,
+    )
+
+    assert summarized == [records[2].file]
+    assert [digest.summary for digest in digests] == ["cached-1", "cached-2", "new"]
+    assert len(analyses) == 3
+    assert completed == 3
+    assert errors == []
+    assert [event["reused"] for event in events] == [True, True, False]
+    assert target.load_match_summaries()[2] == 3
+
+
+def test_analysis_seed_accepts_a_completed_subset(tmp_path: Path) -> None:
+    current = [str((tmp_path / f"match_{index}.json").resolve()) for index in range(3)]
+    seed = EvolCheckpoint(
+        tmp_path / "seed",
+        {
+            "pipeline_version": PIPELINE_VERSION,
+            "stage": "analysis_complete",
+            "strategy_name": "tank",
+            "race": "terran",
+            "knowledge_mode": "enabled",
+            "models": {"analysis": "test-model"},
+            "record_files": current[:2],
+        },
+    )
+
+    validate_analysis_seed_checkpoint(
+        seed,
+        strategy_name="tank",
+        race="terran",
+        knowledge_mode="enabled",
+        record_files=current,
+        analysis_model="test-model",
+    )
+
+    with pytest.raises(ValueError, match="subset"):
+        validate_analysis_seed_checkpoint(
+            seed,
+            strategy_name="tank",
+            race="terran",
+            knowledge_mode="enabled",
+            record_files=current[1:],
+            analysis_model="test-model",
+        )
+
+
 def test_old_checkpoint_pipeline_version_is_rejected(tmp_path: Path) -> None:
     old = EvolCheckpoint(
         tmp_path,
@@ -454,7 +600,7 @@ def test_old_checkpoint_pipeline_version_is_rejected(tmp_path: Path) -> None:
         knowledge_mode="enabled",
         record_files=[],
     )
-    assert PIPELINE_VERSION == "full_timeline_summary_v1_cross_match_discovery_v1"
+    assert PIPELINE_VERSION == "full_timeline_summary_v1_evidence_retrieval_v1"
 
 
 def _stub_summaries():
@@ -498,16 +644,48 @@ def _propose_decision(**overrides) -> dict:
             "control_class": "strategy_fixable",
         },
         "hypothesis": "a second factory completes more tanks before contact",
+        "failure_mode_analysis": {
+            "failure_mode": "the army breaks in the first decisive engagement",
+            "survival_prerequisite": "the opener usually survives until the planned change is active",
+            "opponent_pressure_pattern": "pressure repeatedly arrives before the intended push",
+            "matchup_assessment": "the assembled force lacks enough durable combat power at contact",
+            "counterexample_check": "wins retain more force through the first contact",
+        },
+        "priority_alignment": {
+            "selected_priority": "decisive combat viability",
+            "higher_priority_assessment": "no higher-priority combat issue is better supported",
+            "downstream_combat_effect": "the completed package improves first-engagement survival",
+        },
+        "retrieval_assessment": {
+            "query_summary": "record, history, and static facts support the selected diagnosis",
+            "match_evidence_used": [],
+            "historical_experience_used": [],
+            "knowledge_used": [],
+            "conflicting_evidence": [],
+            "confidence": "medium",
+        },
         "mechanism_prediction": {
             "expected_change": "the selected army package is more complete before contact",
             "minimum_material_change": "the candidate must materially improve pre-contact completion",
             "outcome_prediction": "the first engagement becomes more competitive",
+            "combat_success_measure": "first-engagement force retention improves",
             "disproof_condition": "completion materially improves but the same first-engagement failure persists",
         },
         "next_action": "propose_strategy_patch",
         "action_reason": "the first fight is repeatedly too weak",
         "plan": {
             "direction": "Build a second Factory before marine scaling.",
+            "material_behavior_change": "field a materially more complete fighting package at first contact",
+            "coordinated_changes": [
+                {
+                    "change": "shift production capacity toward the delayed core force",
+                    "why_required": "the core force otherwise remains incomplete at contact",
+                },
+                {
+                    "change": "retain enough early defense while production shifts",
+                    "why_required": "the strategy must survive until the package is active",
+                },
+            ],
             "preserve": ["two-base opener"],
         },
         "evidence_limits": [],
@@ -566,7 +744,7 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
     assert "Do not query the knowledge database again" in prompt
     assert "tank production cap" in prompt
     assert "primary causal hypothesis" in prompt
-    assert "coherent strategy package" in prompt
+    assert "coherent intervention package" in prompt
     assert "not an exhaustive enum" in prompt
     assert "Do not combine unrelated improvements" in prompt
     assert "2-4 strongest plausible" in prompt
@@ -611,6 +789,7 @@ def test_shared_prompt_instructions_do_not_embed_a_specific_strategy() -> None:
         assert strategy_specific_term not in instruction_text
 
     source = Path("evol_agent/core/prompts.py").read_text(encoding="utf-8").lower()
+    assert "smallest coherent area" not in source
     assert '"commands": ["build_factory' not in source
     assert '"entities":["siege tank"]' not in source
     assert "marine/tank push" not in source
@@ -665,7 +844,11 @@ def test_cross_match_queries_knowledge_once_then_decides(monkeypatch) -> None:
             return discovery
         assert "Cross-Match Decision Agent" in prompt
         assert "Earlier completion was infeasible" in prompt
-        return _propose_decision()
+        decision = _propose_decision()
+        decision["retrieval_assessment"]["knowledge_used"] = [
+            "Q1: verified production requirements"
+        ]
+        return decision
 
     def fake_knowledge(questions, **kwargs):
         knowledge_calls.append(questions)
@@ -797,7 +980,11 @@ def test_resume_skips_discovery_and_reuses_knowledge_cache(tmp_path: Path, monke
         assert "Cross-Match Discovery Agent" not in prompt
         assert "Cross-Match Decision Agent" in prompt
         assert "Earlier completion was infeasible" in prompt
-        return _propose_decision()
+        decision = _propose_decision()
+        decision["retrieval_assessment"]["knowledge_used"] = [
+            "Q1: verified production requirements"
+        ]
+        return decision
 
     def boom_knowledge(*args, **kwargs):
         knowledge_llm_calls.append(1)
@@ -871,4 +1058,3 @@ def test_rejected_experiments_are_visible_in_round2(monkeypatch) -> None:
     assert "candidate_minus_parent" in decision_prompt
     assert "Do not suppress a hypothesis merely because a previous candidate was rejected" in decision_prompt
     assert "hypothesis_verdict=contradicted" in decision_prompt
-

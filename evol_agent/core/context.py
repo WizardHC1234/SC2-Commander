@@ -57,6 +57,9 @@ def render_knowledge_results(runs: list[dict[str, Any]]) -> str:
         row: dict[str, Any] = {
             "question_id": str(run.get("question_id") or run.get("id") or "").strip(),
             "question": str(run.get("question") or "").strip(),
+            "query_reason": str(run.get("query_reason") or "").strip(),
+            "evidence_refs": list(run.get("evidence_refs") or []),
+            "hypothesis_scope": str(run.get("hypothesis_scope") or "").strip(),
             "ok": bool(run.get("ok")),
         }
         if row["ok"]:
@@ -67,6 +70,13 @@ def render_knowledge_results(runs: list[dict[str, Any]]) -> str:
     if not rows:
         return "[]"
     return json_compact_block(rows)
+
+
+def render_retrieval_evidence(packet: dict[str, Any]) -> str:
+    """Render deterministic record/history query results as one evidence packet."""
+    if not isinstance(packet, dict) or not packet:
+        return "{}"
+    return json_compact_block(packet)
 
 
 def render_optimizer_decision(decision: dict[str, Any]) -> str:
@@ -83,12 +93,34 @@ def render_optimizer_decision(decision: dict[str, Any]) -> str:
             "control_class": str(priority.get("control_class") or "").strip(),
         },
         "hypothesis": str(decision.get("hypothesis") or "").strip(),
+        "failure_mode_analysis": (
+            dict(decision.get("failure_mode_analysis"))
+            if isinstance(decision.get("failure_mode_analysis"), dict)
+            else {}
+        ),
+        "priority_alignment": (
+            dict(decision.get("priority_alignment"))
+            if isinstance(decision.get("priority_alignment"), dict)
+            else {}
+        ),
         "mechanism_prediction": (
             dict(decision.get("mechanism_prediction"))
             if isinstance(decision.get("mechanism_prediction"), dict)
             else {}
         ),
-        "plan": {"direction": str(plan.get("direction") or "").strip()},
+        "retrieval_assessment": (
+            dict(decision.get("retrieval_assessment"))
+            if isinstance(decision.get("retrieval_assessment"), dict)
+            else {}
+        ),
+        "plan": {
+            "direction": str(plan.get("direction") or "").strip(),
+            "material_behavior_change": str(
+                plan.get("material_behavior_change") or ""
+            ).strip(),
+            "coordinated_changes": list(plan.get("coordinated_changes") or []),
+            "preserve": list(plan.get("preserve") or []),
+        },
     }
     return json_compact_block(payload)
 
@@ -99,6 +131,9 @@ def render_discovery_findings(discovery: dict[str, Any]) -> str:
         "strengths": discovery.get("strengths") or [],
         "weaknesses": discovery.get("weaknesses") or [],
         "unknowns": discovery.get("unknowns") or [],
+        "opponent_pressure_patterns": discovery.get("opponent_pressure_patterns") or [],
+        "matchup_patterns": discovery.get("matchup_patterns") or [],
+        "query_plan": discovery.get("query_plan") or {},
     }
     return json_compact_block(payload)
 
@@ -141,8 +176,8 @@ __all__ = [
     "render_discovery_findings",
     "render_knowledge_results",
     "render_optimizer_decision",
+    "render_retrieval_evidence",
     "render_sc2_knowledge",
     "render_single_game_analyses",
     "render_skill_context",
 ]
-
