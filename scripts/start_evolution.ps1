@@ -5,6 +5,7 @@
     [string]$DIFFICULTIES = "",
     [Nullable[int]]$MATCHES = $null,
     [Nullable[int]]$CANDIDATE_MATCHES = $null,
+    [Nullable[int]]$CANDIDATE_GENERATION_RETRIES = $null,
     [Nullable[int]]$CONFIRMATION_MATCHES = $null,
     [Nullable[int]]$CONCURRENCY = $null,
     [Nullable[int]]$MAX_GENERATIONS = $null,
@@ -27,9 +28,10 @@ $CFG_EVOLUTION_MODEL = "kimi-k2.5"   # empty = same as commander
 $CFG_DIFFICULTIES = "harder,veryhard,cheatvision,cheatmoney,cheatinsane"
 $CFG_MATCHES = 10
 $CFG_CANDIDATE_MATCHES = 10
-$CFG_CONFIRMATION_MATCHES = 4
+$CFG_CANDIDATE_GENERATION_RETRIES = 3
+$CFG_CONFIRMATION_MATCHES = 5
 $CFG_CONCURRENCY = 4
-$CFG_MAX_GENERATIONS = 10
+$CFG_MAX_GENERATIONS = 15
 $CFG_MAX_GENERATIONS_PER_DIFFICULTY = 10
 $CFG_MASTERY_SCORE_THRESHOLD = 0.90
 $CFG_RUN_DIR = "evolution_runs\tank\20260818_134320"                       # resume: evolution_runs\...
@@ -44,6 +46,7 @@ if (-not [string]::IsNullOrWhiteSpace($EVOLUTION_MODEL)) { $CFG_EVOLUTION_MODEL 
 if (-not [string]::IsNullOrWhiteSpace($DIFFICULTIES)) { $CFG_DIFFICULTIES = $DIFFICULTIES }
 if ($null -ne $MATCHES) { $CFG_MATCHES = [int]$MATCHES }
 if ($null -ne $CANDIDATE_MATCHES) { $CFG_CANDIDATE_MATCHES = [int]$CANDIDATE_MATCHES }
+if ($null -ne $CANDIDATE_GENERATION_RETRIES) { $CFG_CANDIDATE_GENERATION_RETRIES = [int]$CANDIDATE_GENERATION_RETRIES }
 if ($null -ne $CONFIRMATION_MATCHES) { $CFG_CONFIRMATION_MATCHES = [int]$CONFIRMATION_MATCHES }
 if ($null -ne $CONCURRENCY) { $CFG_CONCURRENCY = [int]$CONCURRENCY }
 if ($null -ne $MAX_GENERATIONS) { $CFG_MAX_GENERATIONS = [int]$MAX_GENERATIONS }
@@ -72,6 +75,7 @@ if (-not [string]::IsNullOrWhiteSpace($CFG_EVOLUTION_MODEL)) {
 Write-Host "Difficulties : $CFG_DIFFICULTIES"
 Write-Host "Matches/gen  : $CFG_MATCHES, concurrency=$CFG_CONCURRENCY, max_gen=$CFG_MAX_GENERATIONS"
 Write-Host "Candidate    : $CFG_CANDIDATE_MATCHES evaluation games"
+Write-Host "Retry        : $CFG_CANDIDATE_GENERATION_RETRIES feedback-guided candidate regeneration attempts"
 Write-Host "Confirmation : $CFG_CONFIRMATION_MATCHES extra games per strategy when results are close"
 Write-Host "Selection    : candidate score > champion score"
 Write-Host "Mastery      : Champion win rate >= $CFG_MASTERY_SCORE_THRESHOLD"
@@ -90,6 +94,7 @@ $arguments = @(
     "--difficulties", $CFG_DIFFICULTIES,
     "--matches", $CFG_MATCHES,
     "--candidate-matches", $CFG_CANDIDATE_MATCHES,
+    "--candidate-generation-retries", $CFG_CANDIDATE_GENERATION_RETRIES,
     "--confirmation-matches", $CFG_CONFIRMATION_MATCHES,
     "--concurrency", $CFG_CONCURRENCY,
     "--max-total-generations", $CFG_MAX_GENERATIONS,

@@ -16,7 +16,8 @@ from evol_agent.core.checkpoint import (
     validate_checkpoint_fingerprint,
 )
 from evol_agent.core.context import render_single_game_analyses
-from evol_agent.core.match_summary import run_fixed_match_summary
+from evol_agent.core.experiment_audit import _normalize_audit
+from evol_agent.core.match_summary import _normalize_summary_payload, run_fixed_match_summary
 from evol_agent.core.match_summary_cache import MatchSummaryCache
 from evol_agent.core.prompts import (
     build_cross_match_decision_prompt,
@@ -234,6 +235,8 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
                     "enemy_observed": "visible ground army",
                     "enemy_truth": "larger mixed army",
                     "own_force_after": "small remnant",
+                    "runtime_override": "auto-retreat fired after the army fell to a small remnant",
+                    "loss_timing": "losses_before_override",
                     "outcome": "army_broken",
                 }
             ],
@@ -258,6 +261,12 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
     assert analysis.raw["events"][0]["time_s"] == 248
     assert analysis.raw["enemy_pressure_events"][0]["outcome"] == "army_broken"
     assert analysis.raw["major_engagements"][0]["initiator"] == "enemy"
+    assert analysis.raw["major_engagements"][0]["loss_timing"] == (
+        "losses_before_override"
+    )
+    assert "auto-retreat" in analysis.raw["major_engagements"][0][
+        "runtime_override"
+    ]
     assert "opening_and_economy" not in analysis.raw
 
 
@@ -358,6 +367,120 @@ def test_single_match_prompt_forbids_analysis() -> None:
     assert "good or bad" in lowered
     assert "opening_and_economy" not in prompt
     assert "commander_decision_summary" not in prompt
+
+
+def test_audit_focused_summary_requests_and_normalizes_mechanism_probe() -> None:
+    focus = {
+        "minimum_material_change": "at least two Vikings before first contact",
+        "expected_change": "air support is present before the decisive fight",
+    }
+    prompt = build_fixed_match_summary_prompt(
+        strategy_name="tank_opt7",
+        race="terran",
+        record_manifest={"result": "Victory"},
+        match_timeline="R 1",
+        audit_focus=focus,
+    )
+
+    assert "post-experiment mechanism audit" in prompt
+    assert focus["minimum_material_change"] in prompt
+    assert '"mechanism_probe"' in prompt
+    payload = _normalize_summary_payload(
+        {
+            "result": "Victory",
+            "duration_s": 600,
+            "events": [],
+            "enemy_pressure_events": [],
+            "major_engagements": [],
+            "mechanism_probe": {
+                "status": "observed",
+                "observations": [
+                    {"time_s": 540, "fact": "2 Vikings present before contact"}
+                ],
+                "evidence_limit": "",
+            },
+        },
+        manifest={"result": "Victory"},
+        duration_s=600,
+    )
+
+    assert payload is not None
+    assert payload["mechanism_probe"] == {
+        "status": "observed",
+        "observations": [
+            {"time_s": 540, "fact": "2 Vikings present before contact"}
+        ],
+        "evidence_limit": "",
+    }
+
+
+def test_audit_probe_without_timestamp_is_unknown() -> None:
+    payload = _normalize_summary_payload(
+        {
+            "result": "Victory",
+            "duration_s": 600,
+            "events": [],
+            "enemy_pressure_events": [],
+            "major_engagements": [],
+            "mechanism_probe": {
+                "status": "observed",
+                "observations": [{"fact": "Vikings were present"}],
+                "evidence_limit": "",
+            },
+        },
+        manifest={"result": "Victory"},
+        duration_s=600,
+    )
+
+    assert payload is not None
+    assert payload["mechanism_probe"]["status"] == "unknown"
+    assert "no recorded timestamp" in payload["mechanism_probe"]["evidence_limit"]
+
+
+def test_audit_requires_two_observed_candidate_probes_for_implemented() -> None:
+    raw = {
+        "implementation_verdict": "implemented",
+        "hypothesis_verdict": "supported",
+        "evidence_limits": [],
+    }
+    one_observed = [
+        {
+            "summary": {
+                "mechanism_probe": {
+                    "status": "observed",
+                    "observations": [{"time_s": 540, "fact": "4 Vikings present"}],
+                }
+            }
+        }
+    ]
+
+    thin = _normalize_audit(
+        raw,
+        candidate_summaries=one_observed,
+        require_observed_probes=True,
+    )
+    implemented = _normalize_audit(
+        raw,
+        candidate_summaries=[
+            *one_observed,
+            {
+                "summary": {
+                    "mechanism_probe": {
+                        "status": "observed",
+                        "observations": [
+                            {"time_s": 565, "fact": "4 Vikings present"}
+                        ],
+                    }
+                }
+            },
+        ],
+        require_observed_probes=True,
+    )
+
+    assert thin["implementation_verdict"] == "underpowered"
+    assert thin["hypothesis_verdict"] == "not_tested"
+    assert implemented["implementation_verdict"] == "implemented"
+    assert implemented["hypothesis_verdict"] == "supported"
 
 
 def test_cross_match_prompt_keeps_complete_events() -> None:
@@ -760,6 +883,14 @@ def _propose_decision(**overrides) -> dict:
             "opponent_pressure_pattern": "pressure repeatedly arrives before the intended push",
             "matchup_assessment": "the assembled force lacks enough durable combat power at contact",
             "counterexample_check": "wins retain more force through the first contact",
+            "covered_failures": [
+                "Game 2 @ 430s: the army breaks at first contact",
+                "Game 5 @ 510s: the incomplete army breaks under repeated pressure",
+            ],
+            "unexplained_failures": [],
+            "counterexamples": [
+                "Game 1 @ 620s: the completed force survives first contact"
+            ],
         },
         "priority_alignment": {
             "selected_priority": "decisive combat viability",
@@ -816,7 +947,24 @@ def _verified_knowledge_run() -> dict:
         "answer": "Earlier completion was infeasible at that producer count.",
         "error": "",
         "verification_schema": KNOWLEDGE_VERIFICATION_SCHEMA,
-        "dataset_evidence": [{"tool": "get_strategy_knowledge", "result": {}}],
+        "dataset_evidence": [
+            {
+                "tool": "get_strategy_knowledge",
+                "result": {
+                    "schema": KNOWLEDGE_VERIFICATION_SCHEMA,
+                    "coverage": {
+                        "unresolved_entities": [],
+                        "unresolved_actions": [],
+                        "unsupported_claims": [],
+                        "complete": True,
+                    },
+                    "requested_calculation_count": 0,
+                    "calculations": [],
+                    "calculation_errors": [],
+                    "missing": [],
+                },
+            }
+        ],
     }
 
 

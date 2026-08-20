@@ -27,8 +27,8 @@ $FORCE_STRATEGY = "tank"
 # 2. Commander model (must exist in llm/config.json -> llm_agents_pool)
 # =============================================================================
 # $COMMANDER_MODEL = "qwen3-32b"
-$COMMANDER_MODEL = "qwen3.5-27b"
-# $COMMANDER_MODEL = "kimi-k2.5"
+# $COMMANDER_MODEL = "qwen3.5-27b"
+$COMMANDER_MODEL = "kimi-k2.5"
 # $COMMANDER_MODEL = "deepseek-v4-flash"
 # $COMMANDER_MODEL = "qwen3-32b-reasoning"
 
@@ -36,7 +36,7 @@ $COMMANDER_MODEL = "qwen3.5-27b"
 # 3. Run control
 # =============================================================================
 $DEFAULT_MATCHES_PER_EXPERIMENT = 10
-$CONCURRENCY = 4
+$CONCURRENCY = 5
 
 # =============================================================================
 # 4. Experiment list
@@ -67,9 +67,9 @@ $EXPERIMENTS = @(
     # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
     # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20}
     # @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20  }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20 }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20  }
+    # @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20 }
     @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
     @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20  }
     @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20 }

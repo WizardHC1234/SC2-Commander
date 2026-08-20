@@ -20,6 +20,35 @@ If recovery rebuilds toward an attack threshold, recover until that same gate is
 satisfied. Do not hard-code a lower rebuild count that the gate can immediately
 raise.
 
+Mandatory candidate-wide production-target audit: before returning patches,
+enumerate every unit whose production the complete candidate says to resume,
+restart, re-enable, return to, or continue. Give each unit its own explicit
+numerical stage production target. If its production remains enabled during the
+attack, reinforcement, recovery, or late-game phase, that unit must also appear
+with an explicit numerical count or cap in Ultimate Goal. A stage target alone is
+not sufficient for a continuously reinforced unit. The only exception is a unit
+explicitly declared temporary: the strategy must state the stage count and exactly
+when its production stops, and must not later say to continue or resume it.
+
+A condition that says when production resumes is not a quantity target. For
+example, "resume train_marauder after 8 Tanks" remains incomplete until Marauders
+receive their own stage target; if Marauder production continues during
+reinforcement, Ultimate Goal must also list the final Marauder count. Never infer a
+missing count from remaining supply, producer capacity, resources, or general
+composition prose.
+
+This is a blocking completeness rule for the entire candidate, including inherited
+text. It overrides the instruction to leave unrelated paragraphs unchanged: if the
+parent already contains an unbounded resumed-production instruction, patch the
+production-owning paragraph and the stage/final-target paragraph needed to bound it,
+even when the current causal intervention concerns another strategy area. Treat
+this as repairing an execution contract, not as introducing a second optimization
+objective. Return the audit in production_target_audit; no continuously reinforced
+unit may have an empty stage_target or ultimate_goal_target. Recompute final_supply
+from the complete Ultimate Goal, including workers and every combat/support unit at
+its full supply cost, and keep it at or below 200. Do not omit a unit from the
+supply calculation merely because its count is written in another paragraph.
+
 Use only observable information: living unit counts, last-seen enemy contents
 and recency, Orbital energy / scan readiness, and current army progress. Request
 a scan or scout when needed, then re-decide on a later wake. Never require
@@ -64,6 +93,15 @@ def build_candidate_prompt(
     decision_payload = decision or dict(battle_analysis.raw or {})
     knowledge_text = render_knowledge_results(knowledge_runs or [])
     capability_text = json.dumps(capability_manifest or {}, ensure_ascii=False, indent=2)
+    retry_feedback = (
+        """
+Prior generation attempts failed. Repair these concrete errors in this candidate;
+do not repeat their invalid assumptions:
+{errors}
+""".format(errors=errors)
+        if validation_errors
+        else ""
+    )
 
     if isinstance(candidate, dict) and validation_errors:
         return f"""You are revising an invalid paragraph patch.
@@ -126,6 +164,10 @@ Return one JSON object only:
     "revise":[{{"item":"parent mechanism changed","reason":"why this revision is required"}}],
     "remove":[{{"item":"parent mechanism removed","reason":"evidence-based reason"}}]
   }},
+  "production_target_audit":[
+    {{"unit":"unit whose production resumes or continues","instruction":"source instruction","stage_target":"its explicit numerical production target","ultimate_goal_target":"its explicit numerical count in Ultimate Goal","temporary_stop_rule":"explicit stop condition, or empty when continuously reinforced"}}
+  ],
+  "final_supply":{{"total":0,"calculation":"complete workers plus combat and support unit supply calculation; must be <=200"}},
   "expected_effect":"expected match effect",
   "main_risk":"possible regression"
 }}
@@ -180,6 +222,12 @@ information only when it changes one of those higher-priority combat decisions.
 Never replace a required higher-priority package component with an easier
 lower-priority patch.
 
+Do not implement construction of static defensive structures as the primary
+evolution mechanism. They cannot accompany the mobile fighting force, and the
+executor places them around owned bases rather than arbitrary forward staging
+zones. If the supplied plan depends on forward or mobile static defense, it is not
+an executable strategy patch.
+
 Keep the candidate concise. Prefer one observable rule over repeated warnings,
 copied gates, or many narrow exceptions. Never add strategy text to compensate for
 runtime-owned transformations, transport loading, abilities, targeting, formation,
@@ -188,6 +236,8 @@ the candidate is execution-invalid rather than a strategy patch.
 
 Your job is only to implement the supplied hypothesis as a coherent paragraph
 patch to the current strategy.md.
+
+{retry_feedback}
 
 {RUNTIME_CONTRACT}
 {SC2_STRATEGIC_PRIORITY}
@@ -284,6 +334,10 @@ Return one JSON object only:
     "revise":[{{"item":"parent mechanism changed","reason":"relation to the selected hypothesis"}}],
     "remove":[{{"item":"parent mechanism removed","reason":"evidence-based reason; empty when none"}}]
   }},
+  "production_target_audit":[
+    {{"unit":"unit whose production resumes or continues","instruction":"source instruction","stage_target":"its explicit numerical production target","ultimate_goal_target":"its explicit numerical count in Ultimate Goal","temporary_stop_rule":"explicit stop condition, or empty when continuously reinforced"}}
+  ],
+  "final_supply":{{"total":0,"calculation":"complete workers plus combat and support unit supply calculation; must be <=200"}},
   "expected_effect":"expected match effect",
   "main_risk":"possible regression to evaluate in games"
 }}

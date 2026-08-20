@@ -64,6 +64,32 @@ def render_knowledge_results(runs: list[dict[str, Any]]) -> str:
         }
         if row["ok"]:
             row["answer"] = str(run.get("answer") or "").strip()
+            packets: list[dict[str, Any]] = []
+            for evidence in run.get("dataset_evidence") or []:
+                if not isinstance(evidence, dict):
+                    continue
+                packet = evidence.get("result")
+                if not isinstance(packet, dict):
+                    continue
+                packets.append(
+                    {
+                        key: packet.get(key)
+                        for key in (
+                            "schema",
+                            "coverage",
+                            "action_facts",
+                            "entity_facts",
+                            "production",
+                            "control_effects",
+                            "relations",
+                            "calculations",
+                            "missing",
+                        )
+                        if packet.get(key) not in (None, [], {})
+                    }
+                )
+            if packets:
+                row["verified_packets"] = packets
         else:
             row["error"] = str(run.get("error") or "knowledge query failed").strip()
         rows.append(row)

@@ -3,17 +3,42 @@ from __future__ import annotations
 from pathlib import Path
 
 from evol_agent.core.optimization_agent_loop import (
+    _candidate_knowledge_run,
+    _knowledge_runs_for_optimizer,
     _normalize_optimizer_candidate,
     _patches_to_operations,
     run_optimization_agent_loop,
 )
+from evol_agent.core.capabilities import build_executor_capability_manifest
 from evol_agent.core.prompts import build_candidate_prompt
-from evol_agent.core.types import BattleAnalysis
+from evol_agent.core.types import BattleAnalysis, ToolObservation
 from evol_agent.optimization.strategy_document import StrategyDocument, paragraph_hash
 from evol_agent.validation import validate_strategy_markdown
 
 
 TANK_STRATEGY = Path("skills/terran/tank/strategy.md").read_text(encoding="utf-8")
+
+
+def _semantic_payload(*, valid: bool = True, errors: list | None = None) -> dict:
+    return {
+        "valid": valid,
+        "production_target_audit": [
+            {
+                "unit": "Marine",
+                "instruction": "continue Marine production",
+                "stage_target": "40 Marines",
+                "ultimate_goal_target": "75 Marines",
+                "temporary_stop_rule": "",
+                "verdict": "bounded",
+            }
+        ],
+        "final_supply": {
+            "total": 119,
+            "calculation": "75 Marines plus 44 SCVs equals 119 supply",
+            "verdict": "valid",
+        },
+        "errors": list(errors or []),
+    }
 
 
 def _decision_analysis(**overrides) -> BattleAnalysis:
@@ -62,6 +87,121 @@ def _patch(document: StrategyDocument, detail_id: str, replacement: str, why: st
         "replacement": replacement,
         "why_required": why,
     }
+
+
+def test_candidate_knowledge_covers_actions_named_by_complete_strategy() -> None:
+    run = _candidate_knowledge_run(
+        candidate_text=(
+            TANK_STRATEGY
+            + "\nUse train_marine and train_siege_tank as explicit production actions."
+        ),
+        race="terran",
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+
+    assert run is not None
+    assert run["ok"] is True
+    packet = run["dataset_evidence"][0]["result"]
+    actions = {row["action"] for row in packet["action_facts"]}
+    assert "train_marine" in actions
+    assert "train_siege_tank" in actions
+    assert packet["coverage"]["complete"] is True
+
+
+def test_optimizer_preserves_structured_knowledge_from_analysis_observation() -> None:
+    structured = {
+        "question_id": "Q1",
+        "question": "What does train_siege_tank require?",
+        "answer": "verified answer",
+        "ok": True,
+        "verification_schema": "strategy_knowledge.v3",
+        "dataset_evidence": [
+            {
+                "tool": "get_strategy_knowledge",
+                "result": {
+                    "schema": "strategy_knowledge.v3",
+                    "coverage": {"complete": True},
+                    "action_facts": [{"action": "train_siege_tank"}],
+                },
+            }
+        ],
+    }
+    observation = ToolObservation(
+        tool="sc2_knowledge",
+        args={"question_id": "Q1"},
+        result={"knowledge_run": structured},
+        ok=True,
+    )
+
+    runs = _knowledge_runs_for_optimizer(
+        {"knowledge_used": [{"question_id": "Q1", "finding": "summary"}]},
+        [observation],
+    )
+
+    assert runs == [structured]
+    assert runs[0]["dataset_evidence"][0]["result"]["action_facts"] == [
+        {"action": "train_siege_tank"}
+    ]
+
+
+def test_optimizer_withholds_prose_knowledge_without_deterministic_packet() -> None:
+    runs = _knowledge_runs_for_optimizer(
+        {"knowledge_used": [{"question_id": "Q1", "finding": "LLM-only claim"}]},
+        [],
+    )
+
+    assert runs == [
+        {
+            "question_id": "Q1",
+            "question": "",
+            "answer": "",
+            "ok": False,
+            "error": (
+                "verified deterministic packet unavailable; "
+                "the prose finding was withheld"
+            ),
+        }
+    ]
+
+
+def test_optimizer_includes_outer_generation_retry_feedback(monkeypatch) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    prompts: list[str] = []
+
+    def fake_llm(prompt: str, **kwargs):
+        if "You are validating a strategy patch" in prompt:
+            return _semantic_payload()
+        prompts.append(prompt)
+        return {
+            "action": "draft_candidate",
+            "patches": [
+                _patch(
+                    document,
+                    "main_attack_gate",
+                    "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
+                    "This changes the readiness rule selected by the hypothesis.",
+                )
+            ],
+            "expected_effect": "earlier first attack",
+            "main_risk": "smaller force",
+        }
+
+    monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm", fake_llm
+    )
+    result, improvement, _obs, _errors, _events = run_optimization_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=_decision_analysis(),
+        skill_texts={"strategy.md": TANK_STRATEGY},
+        initial_tool_observations=[],
+        retry_feedback=["Candidate-generation attempt 1/4 failed: missing dependency"],
+    )
+
+    assert result.ok is True
+    assert improvement is not None
+    assert "Candidate-generation attempt 1/4 failed" in prompts[0]
 
 
 def test_apply_patch_allows_five_detail_replacements() -> None:
@@ -146,6 +286,14 @@ def test_optimizer_prompt_does_not_select_a_plan() -> None:
     assert "prerequisite dependencies" in prompt
     assert "resource and production dependencies" in prompt
     assert "execution dependencies" in prompt
+    assert "Mandatory candidate-wide production-target audit" in prompt
+    assert "production_target_audit" in prompt
+    assert "including inherited" in prompt
+    assert "resume train_marauder after 8" in prompt
+    assert "A stage target alone is" in prompt
+    assert "Ultimate Goal must also list" in prompt
+    assert "final_supply" in prompt
+    assert "including workers and every combat/support unit" in prompt
     assert "defining army concept and win plan" in prompt
     assert "## SC2 Strategic Priority" in prompt
     assert "viable matchup and fighting" in prompt
@@ -276,13 +424,13 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
         calls.append(prompt)
         if "You are validating a strategy patch" in prompt:
             if "rebuild to 36 Marines and 8 Siege Tanks" in prompt:
-                return {"valid": True, "errors": []}
-            return {
-                "valid": False,
-                "errors": [
+                return _semantic_payload()
+            return _semantic_payload(
+                valid=False,
+                errors=[
                     "Recovery and Cleanup still uses the old readiness threshold."
                 ],
-            }
+            )
         optimizer_prompts = [
             item for item in calls if "You are validating a strategy patch" not in item
         ]
@@ -349,7 +497,7 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
     del recovery
 
 
-def test_semantic_retry_exhaustion_uses_latest_structurally_valid_candidate(
+def test_blocking_semantic_retry_exhaustion_does_not_use_candidate(
     monkeypatch,
 ) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
@@ -358,9 +506,9 @@ def test_semantic_retry_exhaustion_uses_latest_structurally_valid_candidate(
     def fake_llm(prompt: str, **kwargs):
         nonlocal optimizer_calls
         if "You are validating a strategy patch" in prompt:
-            return {
-                "valid": False,
-                "errors": [
+            return _semantic_payload(
+                valid=False,
+                errors=[
                     {
                         "type": "missing_dependency",
                         "location": "Recovery and Cleanup",
@@ -368,7 +516,61 @@ def test_semantic_retry_exhaustion_uses_latest_structurally_valid_candidate(
                         "severity": "blocking",
                     }
                 ],
-            }
+            )
+        optimizer_calls += 1
+        return {
+            "action": "draft_candidate" if optimizer_calls == 1 else "revise_candidate",
+            "patches": [
+                _patch(
+                    document,
+                    "main_attack_gate",
+                    f"Begin the planned attack with {36 - optimizer_calls} Marines and 8 Siege Tanks.",
+                    "This changes the readiness rule selected by the hypothesis.",
+                )
+            ],
+            "expected_effect": "earlier first attack",
+            "main_risk": "smaller force",
+        }
+
+    monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm", fake_llm
+    )
+    result, improvement, _obs, errors, events = run_optimization_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=_decision_analysis(),
+        skill_texts={"strategy.md": TANK_STRATEGY},
+        initial_tool_observations=[],
+    )
+
+    assert result.ok is False
+    assert improvement is None
+    assert optimizer_calls == 5
+    assert errors
+    assert events[-1]["action"] == "strategy_patch_semantics"
+
+
+def test_underpowered_semantic_retry_exhaustion_uses_latest_candidate(
+    monkeypatch,
+) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    optimizer_calls = 0
+
+    def fake_llm(prompt: str, **kwargs):
+        nonlocal optimizer_calls
+        if "You are validating a strategy patch" in prompt:
+            return _semantic_payload(
+                valid=False,
+                errors=[
+                    {
+                        "type": "underpowered_implementation",
+                        "location": "Main Attack Gate",
+                        "description": "the candidate is executable but may be too weak",
+                        "severity": "blocking",
+                    }
+                ],
+            )
         optimizer_calls += 1
         return {
             "action": "draft_candidate" if optimizer_calls == 1 else "revise_candidate",
@@ -398,15 +600,179 @@ def test_semantic_retry_exhaustion_uses_latest_structurally_valid_candidate(
 
     assert result.ok is True
     assert improvement is not None
-    assert optimizer_calls == 3
+    assert optimizer_calls == 5
     assert improvement.analysis["semantic_validation"]["status"] == (
         "accepted_after_semantic_retry_exhausted"
     )
+    assert improvement.analysis["validation_fallback"]["failure_stage"] == "semantic"
     assert errors
     assert events[-1]["action"] == (
-        "accept_latest_candidate_after_semantic_retry_exhausted"
+        "accept_latest_candidate_after_validation_retry_exhausted"
     )
-    assert "33 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
+    assert "31 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
+
+
+def test_mixed_underpowered_and_blocking_semantic_errors_do_not_fallback(
+    monkeypatch,
+) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    optimizer_calls = 0
+
+    def fake_llm(prompt: str, **kwargs):
+        nonlocal optimizer_calls
+        if "You are validating a strategy patch" in prompt:
+            return _semantic_payload(
+                valid=False,
+                errors=[
+                    {
+                        "type": "underpowered_implementation",
+                        "location": "Main Attack Gate",
+                        "description": "the intended change is too weak",
+                        "severity": "blocking",
+                    },
+                    {
+                        "type": "missing_dependency",
+                        "location": "Recovery and Cleanup",
+                        "description": "the follow-up transition is missing",
+                        "severity": "blocking",
+                    },
+                ],
+            )
+        optimizer_calls += 1
+        return {
+            "action": "draft_candidate" if optimizer_calls == 1 else "revise_candidate",
+            "patches": [
+                _patch(
+                    document,
+                    "main_attack_gate",
+                    f"Begin the planned attack with {36 - optimizer_calls} Marines and 8 Siege Tanks.",
+                    "This changes the readiness rule selected by the hypothesis.",
+                )
+            ],
+            "expected_effect": "earlier first attack",
+            "main_risk": "smaller force",
+        }
+
+    monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm", fake_llm
+    )
+    result, improvement, _obs, errors, events = run_optimization_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=_decision_analysis(),
+        skill_texts={"strategy.md": TANK_STRATEGY},
+        initial_tool_observations=[],
+    )
+
+    assert result.ok is False
+    assert improvement is None
+    assert optimizer_calls == 5
+    assert any("underpowered_implementation" in error for error in errors)
+    assert any("missing_dependency" in error for error in errors)
+    assert events[-1]["action"] == "strategy_patch_semantics"
+
+
+def test_basic_retry_exhaustion_does_not_use_invalid_candidate(
+    monkeypatch,
+) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    optimizer_calls = 0
+
+    def fake_llm(prompt: str, **kwargs):
+        nonlocal optimizer_calls
+        optimizer_calls += 1
+        return {
+            "action": "draft_candidate" if optimizer_calls == 1 else "revise_candidate",
+            "patches": [
+                _patch(
+                    document,
+                    "main_attack_gate",
+                    (
+                        f"At revision {optimizer_calls}, address the attacking army "
+                        "by unit tags before issuing the attack."
+                    ),
+                    "This changes the readiness rule selected by the hypothesis.",
+                )
+            ],
+            "expected_effect": "earlier first attack",
+            "main_risk": "smaller force",
+        }
+
+    monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
+    result, improvement, _obs, errors, events = run_optimization_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=_decision_analysis(),
+        skill_texts={"strategy.md": TANK_STRATEGY},
+        initial_tool_observations=[],
+    )
+
+    assert result.ok is False
+    assert improvement is None
+    assert optimizer_calls == 5
+    assert errors
+    assert events[-1]["valid"] is False
+    assert "units by tag" in events[-1]["error"]
+
+
+def test_optimizer_ignores_one_unchanged_patch_and_uses_other_generated_changes(
+    monkeypatch,
+) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    ultimate_goal = next(
+        item for item in document.details if item.id == "ultimate_goal"
+    )
+    optimizer_calls = 0
+
+    def fake_llm(prompt: str, **kwargs):
+        nonlocal optimizer_calls
+        if "You are validating a strategy patch" in prompt:
+            return _semantic_payload()
+        optimizer_calls += 1
+        return {
+            "action": "draft_candidate",
+            "patches": [
+                _patch(
+                    document,
+                    "main_attack_gate",
+                    "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
+                    "This changes the readiness rule selected by the hypothesis.",
+                ),
+                _patch(
+                    document,
+                    "ultimate_goal",
+                    ultimate_goal.value,
+                    "The existing end state already supports the revised gate.",
+                ),
+            ],
+            "expected_effect": "earlier first attack",
+            "main_risk": "smaller force",
+        }
+
+    monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm", fake_llm
+    )
+    result, improvement, _obs, errors, events = run_optimization_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=_decision_analysis(),
+        skill_texts={"strategy.md": TANK_STRATEGY},
+        initial_tool_observations=[],
+    )
+
+    assert result.ok is True
+    assert improvement is not None
+    assert optimizer_calls == 1
+    assert errors == []
+    assert any(
+        event.get("action") == "ignore_unchanged_patches"
+        and event.get("ignored_targets") == ["ultimate_goal"]
+        for event in events
+    )
+    assert "36 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
+    assert ultimate_goal.value in improvement.files["strategy.md"]
 
 
 def test_unrelated_paragraphs_and_titles_remain() -> None:

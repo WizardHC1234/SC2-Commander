@@ -96,6 +96,7 @@ class EvolRunRequest:
     analysis_seed_dir: Optional[Path] = None
     match_summary_cache_path: Optional[Path] = None
     prior_experiences: list[Any] = field(default_factory=list)
+    retry_feedback: list[str] = field(default_factory=list)
 
 
 @dataclass

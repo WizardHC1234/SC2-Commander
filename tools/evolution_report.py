@@ -124,7 +124,7 @@ def mean_interval(
     values: Iterable[float],
     z: float = 1.959963984540054,
 ) -> tuple[Optional[float], Optional[float], Optional[float], float]:
-    """Return n, mean, and clipped normal-approximation 95% bounds."""
+    """Return mean, clipped normal-approximation 95% bounds, and SD."""
     finite = [float(value) for value in values if math.isfinite(float(value))]
     if not finite:
         return None, None, None, 0.0
@@ -319,6 +319,80 @@ def summarize_consistency(
     return metric_summary, relation_summary, outcome_summary
 
 
+def summarize_resources(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Aggregate game-time and interaction budget by strategy and difficulty."""
+    groups: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        groups[
+            (
+                str(row.get("strategy") or "unknown"),
+                str(row.get("difficulty") or "unknown"),
+            )
+        ].append(row)
+
+    output: list[dict[str, Any]] = []
+    for (strategy, difficulty), group in sorted(
+        groups.items(),
+        key=lambda item: (item[0][0], difficulty_sort_key(item[0][1])),
+    ):
+        durations = [
+            value
+            for row in group
+            if (value := _float(row.get("duration_s"))) is not None
+        ]
+        llm_calls = [
+            value
+            for row in group
+            if (value := _float(row.get("llm_interaction_count"))) is not None
+        ]
+        record_counts = [
+            value
+            for row in group
+            if (value := _float(row.get("record_count"))) is not None
+        ]
+        commander_decisions = [
+            value
+            for row in group
+            if (value := _float(row.get("commander_decision_count"))) is not None
+        ]
+        output.append(
+            {
+                "strategy": strategy,
+                "difficulty": difficulty,
+                "games": len(group),
+                "duration_n": len(durations),
+                "total_game_duration_s": sum(durations),
+                "total_game_duration_h": sum(durations) / 3600,
+                "mean_game_duration_s": (
+                    statistics.fmean(durations) if durations else None
+                ),
+                "median_game_duration_s": (
+                    statistics.median(durations) if durations else None
+                ),
+                "llm_interaction_n": len(llm_calls),
+                "total_llm_interactions": sum(llm_calls) if llm_calls else None,
+                "mean_llm_interactions_per_game": (
+                    statistics.fmean(llm_calls) if llm_calls else None
+                ),
+                "record_count_n": len(record_counts),
+                "total_records": sum(record_counts) if record_counts else None,
+                "mean_records_per_game": (
+                    statistics.fmean(record_counts) if record_counts else None
+                ),
+                "commander_decision_n": len(commander_decisions),
+                "total_commander_decisions": (
+                    sum(commander_decisions) if commander_decisions else None
+                ),
+                "mean_commander_decisions_per_game": (
+                    statistics.fmean(commander_decisions)
+                    if commander_decisions
+                    else None
+                ),
+            }
+        )
+    return output
+
+
 def _matplotlib() -> Any:
     try:
         import matplotlib
@@ -373,9 +447,21 @@ def plot_evolution_progress(
     plt = _matplotlib()
     figure, axes = plt.subplots(2, 1, figsize=(7.2, 6.0), sharex=True)
     xs = [row["evaluation_index"] for row in rows]
-    progress = [row["curriculum_progress_score"] for row in rows]
-    axes[0].plot(xs, progress, color=PALETTE[0], linewidth=1.7, zorder=1)
+    progress_points = [
+        (row["evaluation_index"], row["curriculum_progress_score"])
+        for row in rows
+        if row["curriculum_progress_score"] is not None
+    ]
+    axes[0].plot(
+        [point[0] for point in progress_points],
+        [point[1] for point in progress_points],
+        color=PALETTE[0],
+        linewidth=1.7,
+        zorder=1,
+    )
     for row in rows:
+        if row["curriculum_progress_score"] is None:
+            continue
         accepted = row["accepted"]
         axes[0].scatter(
             row["evaluation_index"],
@@ -491,10 +577,11 @@ def plot_candidate_deltas(
     axis.bar(xs, deltas, color=colors, width=0.62, alpha=0.9)
     axis.axhline(0, color="#555555", linewidth=0.8)
     for x, row in zip(xs, usable):
+        decision_label = str(row.get("decision") or "unknown")
         axis.text(
             x,
             row["score_delta"] + (0.012 if row["score_delta"] >= 0 else -0.012),
-            "accepted" if row["accepted"] else "rejected",
+            decision_label,
             ha="center",
             va="bottom" if row["score_delta"] >= 0 else "top",
             fontsize=7.5,
@@ -614,6 +701,54 @@ def plot_winrate_consistency(
     return paths
 
 
+def plot_resource_usage(
+    rows: list[dict[str, Any]],
+    output_base: Path,
+    formats: Iterable[str],
+    dpi: int,
+) -> list[str]:
+    if not rows:
+        return []
+    plt = _matplotlib()
+    labels = [f"{row['strategy']} · {row['difficulty']}" for row in rows]
+    xs = list(range(len(rows)))
+    has_llm = any(row.get("total_llm_interactions") is not None for row in rows)
+    panel_count = 2 if has_llm else 1
+    figure, axes = plt.subplots(
+        1,
+        panel_count,
+        figsize=(7.2, 3.6),
+        squeeze=False,
+    )
+    duration_axis = axes[0][0]
+    duration_axis.bar(
+        xs,
+        [row["total_game_duration_h"] for row in rows],
+        color=PALETTE[0],
+        width=0.66,
+    )
+    duration_axis.set_ylabel("Total game time (hours)")
+    duration_axis.set_title("(a) Environment time", loc="left")
+    duration_axis.set_xticks(xs, labels, rotation=28, ha="right")
+    duration_axis.grid(axis="y", color="#D9D9D9", linewidth=0.6, alpha=0.7)
+    if has_llm:
+        llm_axis = axes[0][1]
+        llm_axis.bar(
+            xs,
+            [row.get("total_llm_interactions") or 0 for row in rows],
+            color=PALETTE[1],
+            width=0.66,
+        )
+        llm_axis.set_ylabel("Game-side LLM interactions")
+        llm_axis.set_title("(b) Decision-model calls", loc="left")
+        llm_axis.set_xticks(xs, labels, rotation=28, ha="right")
+        llm_axis.grid(axis="y", color="#D9D9D9", linewidth=0.6, alpha=0.7)
+    figure.tight_layout()
+    paths = _save_figure(figure, output_base, formats, dpi)
+    plt.close(figure)
+    return paths
+
+
 def build_summary(
     history: list[dict[str, Any]],
     decisions: list[dict[str, Any]],
@@ -630,12 +765,15 @@ def build_summary(
                 "curriculum_progress_score": row["curriculum_progress_score"],
             }
     candidate_decisions = [row for row in decisions if row.get("candidate")]
+    decision_counts: dict[str, int] = defaultdict(int)
+    for row in candidate_decisions:
+        decision_counts[str(row.get("decision") or "unknown")] += 1
     return {
         "history_rows": len(history),
         "decision_rows": len(decisions),
         "total_evaluation_games": sum(row["games"] for row in history),
         "accepted_candidates": sum(row["accepted"] for row in candidate_decisions),
-        "rejected_candidates": sum(not row["accepted"] for row in candidate_decisions),
+        "candidate_decisions_by_outcome": dict(sorted(decision_counts.items())),
         "latest_accepted_by_difficulty": accepted_by_difficulty,
         "consistency_groups": consistency_relation,
         "metric_notes": {
@@ -666,7 +804,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--out-dir",
-        help="Output directory (default: <run-dir>/report).",
+        help=(
+            "Output directory (default: "
+            "analysis_results/evolution/<run-directory-name>)."
+        ),
     )
     parser.add_argument(
         "--formats",
@@ -694,7 +835,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     out_dir = (
         Path(args.out_dir).expanduser().resolve()
         if args.out_dir
-        else run_dir / "report"
+        else (
+            Path(__file__).resolve().parents[1]
+            / "analysis_results"
+            / "evolution"
+            / run_dir.name
+        )
     )
     data_dir = out_dir / "data"
     figure_dir = out_dir / "figures"
@@ -704,6 +850,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     consistency_metrics: list[dict[str, Any]] = []
     consistency_relation: list[dict[str, Any]] = []
     consistency_outcomes: list[dict[str, Any]] = []
+    resource_summary: list[dict[str, Any]] = []
     if args.consistency_csv:
         consistency_path = Path(args.consistency_csv).expanduser().resolve()
         if not consistency_path.is_file():
@@ -712,12 +859,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         consistency_metrics, consistency_relation, consistency_outcomes = (
             summarize_consistency(_read_csv(consistency_path))
         )
+        resource_summary = summarize_resources(_read_csv(consistency_path))
 
     write_csv(data_dir / "evolution_history.csv", history)
     write_csv(data_dir / "candidate_decisions.csv", decisions)
     write_csv(data_dir / "strategy_consistency.csv", consistency_metrics)
     write_csv(data_dir / "winrate_consistency.csv", consistency_relation)
     write_csv(data_dir / "consistency_by_outcome.csv", consistency_outcomes)
+    write_csv(data_dir / "resource_usage.csv", resource_summary)
 
     summary = build_summary(history, decisions, consistency_relation)
     figures: list[str] = []
@@ -759,6 +908,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 plot_winrate_consistency(
                     consistency_relation,
                     figure_dir / "winrate_vs_consistency",
+                    args.formats,
+                    args.dpi,
+                )
+            )
+            figures.extend(
+                plot_resource_usage(
+                    resource_summary,
+                    figure_dir / "resource_usage",
                     args.formats,
                     args.dpi,
                 )

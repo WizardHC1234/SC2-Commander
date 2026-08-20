@@ -112,6 +112,43 @@ The complete candidate strategy must not contain contradictory thresholds,
 production targets, priorities, technology requirements, attack conditions,
 recovery conditions, or information requirements.
 
+Perform a mandatory candidate-wide production_target_audit. Enumerate every unit
+whose production the complete candidate says to resume, restart, re-enable, return
+to, or continue. Require that unit's own explicit numerical stage production
+target. If production remains enabled during attack, reinforcement, recovery, or
+late game, require that unit to also appear with an explicit numerical count or cap
+in Ultimate Goal. A stage target alone is insufficient. Exclude a unit from
+Ultimate Goal only when the strategy explicitly declares it temporary, gives its
+stage count and production stop condition, and never later resumes or continues it.
+
+A condition that merely states when production resumes is not a quantity target.
+For example, "resume train_marauder after 8 Tanks" is invalid without a Marauder
+stage target; if Marauders remain in reinforcement production, Ultimate Goal must
+also list their final count. Do not infer a count from remaining supply, producer
+capacity, resources, or composition prose.
+
+Audit the complete candidate, not only modified paragraphs. An inherited omission
+is still blocking even when the current hypothesis concerns another strategy area
+and the optimizer marked the incomplete text as preserved. If any resumed or
+continued unit lacks its own explicit quantity, set valid=false and return a
+blocking missing_dependency error naming the unit and paragraph. Do not waive this
+as an unrelated parent issue.
+
+Recompute final_supply from the complete Ultimate Goal using workers and every
+combat/support unit at full supply cost. Any continuously produced unit missing
+from Ultimate Goal is also missing from this calculation and is blocking. Reject a
+total above 200 and reject a claimed total that omits an explicitly produced unit.
+
+Build a small cross-paragraph consistency table before deciding. For every unit or
+technology whose production is delayed, record the exact unlock conjunction from
+Production, Technology, Main Attack Gate, Recovery, and Ultimate Goal. Reject when
+one paragraph unlocks it earlier or under weaker conditions than another paragraph.
+When the parent has a time-bounded commitment fallback and inheritance marks it as
+preserved, compare the complete prerequisites of the parent's and candidate's final
+time condition. Any newly added prerequisite means the fallback was weakened or
+removed and must be rejected unless inheritance explicitly revises or removes it
+with evidence.
+
 4. Analysis-optimization priority alignment
 The candidate must preserve the same strategic priority used by Cross-Match
 Analysis. Reject a candidate that replaces a required combat-package, survival,
@@ -192,6 +229,21 @@ Candidate strategy.md:
 Return JSON only:
 {{
   "valid": true,
+  "production_target_audit": [
+    {{
+      "unit": "unit whose production resumes or continues",
+      "instruction": "the production instruction being audited",
+      "stage_target": "the unit's explicit numerical production target, or empty",
+      "ultimate_goal_target": "the unit's explicit numerical count in Ultimate Goal, or empty",
+      "temporary_stop_rule": "explicit stop condition, or empty when continuously reinforced",
+      "verdict": "bounded|missing_stage_target|missing_ultimate_goal_target|invalid_temporary_exception"
+    }}
+  ],
+  "final_supply": {{
+    "total": 0,
+    "calculation": "workers plus every Ultimate Goal combat/support unit at full supply cost",
+    "verdict": "valid|over_200|incomplete"
+  }},
   "errors": [
     {{
       "type": "decision_grounding|unrelated_patch|missing_dependency|underpowered_implementation|internal_inconsistency|preserved_strengths|strategy_identity|runtime_boundary",
@@ -295,6 +347,15 @@ def _runtime_boundary_errors(
             str(name)
             for name in (capability_manifest.get("control_actions") or {}).keys()
         ),
+        *(
+            str(name)
+            for name in (
+                (capability_manifest.get("macro_contract") or {}).get(
+                    "available_actions"
+                )
+                or []
+            )
+        ),
     }
     for clause in re.split(r"[.;\n]", haystack):
         if "wake" not in clause:
@@ -322,6 +383,138 @@ def _semantic_issue(item: Any) -> tuple[str, str]:
     return "blocking", str(item).strip()
 
 
+_MISSING_TARGET_MARKERS = (
+    "no explicit",
+    "not explicit",
+    "not specified",
+    "not listed",
+    "not stated",
+    "missing",
+    "unspecified",
+    "unknown",
+    "none",
+    "n/a",
+)
+
+
+def _audit_value_is_missing(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return not text or any(marker in text for marker in _MISSING_TARGET_MARKERS)
+
+
+def _production_contract_errors(payload: dict[str, Any]) -> list[str]:
+    """Enforce the validator's structured production and supply audit.
+
+    The LLM may correctly describe a missing bound while still labelling the row
+    ``bounded`` or the issue ``non-blocking``.  These fields are an execution
+    contract, so their basic consistency is checked here instead of trusting the
+    model's severity label.
+    """
+    errors: list[str] = []
+    audit = payload.get("production_target_audit")
+    if not isinstance(audit, list) or not audit:
+        errors.append(
+            "missing_dependency — production_target_audit — "
+            "semantic validator must return the candidate-wide production audit"
+        )
+    else:
+        seen_units: set[str] = set()
+        continuing_markers = (
+            "continue",
+            "continuously",
+            "resume",
+            "restart",
+            "re-enable",
+            "reenable",
+            "return to",
+        )
+        for index, row in enumerate(audit, start=1):
+            if not isinstance(row, dict):
+                errors.append(
+                    f"missing_dependency — production_target_audit[{index}] — "
+                    "audit row must be an object"
+                )
+                continue
+            unit = str(row.get("unit") or "").strip()
+            label = unit or f"row {index}"
+            unit_key = unit.casefold()
+            if not unit:
+                errors.append(
+                    f"missing_dependency — production_target_audit[{index}] — "
+                    "unit is required"
+                )
+            elif unit_key in seen_units:
+                errors.append(
+                    f"internal_inconsistency — production_target_audit — "
+                    f"duplicate audit row for {unit}"
+                )
+            else:
+                seen_units.add(unit_key)
+
+            instruction = str(row.get("instruction") or "").strip().lower()
+            stage_missing = _audit_value_is_missing(row.get("stage_target"))
+            ultimate_missing = _audit_value_is_missing(
+                row.get("ultimate_goal_target")
+            )
+            stop_missing = _audit_value_is_missing(row.get("temporary_stop_rule"))
+            continues_or_resumes = any(
+                marker in instruction for marker in continuing_markers
+            )
+            verdict = str(row.get("verdict") or "").strip().lower()
+
+            if stage_missing:
+                errors.append(
+                    f"missing_dependency — production target for {label} — "
+                    "explicit numerical stage target is required"
+                )
+            if ultimate_missing and continues_or_resumes:
+                errors.append(
+                    f"missing_dependency — Ultimate Goal for {label} — "
+                    "resumed or continuing production requires an explicit final count or cap"
+                )
+            elif ultimate_missing and stop_missing:
+                errors.append(
+                    f"missing_dependency — production bound for {label} — "
+                    "provide an Ultimate Goal count or an explicit temporary stop rule"
+                )
+            if verdict != "bounded":
+                errors.append(
+                    f"missing_dependency — production_target_audit for {label} — "
+                    f"verdict must be bounded, got {verdict or 'empty'}"
+                )
+
+    final_supply = payload.get("final_supply")
+    if not isinstance(final_supply, dict):
+        errors.append(
+            "missing_dependency — final_supply — semantic validator must return "
+            "the complete final supply audit"
+        )
+    else:
+        total = final_supply.get("total")
+        if isinstance(total, bool) or not isinstance(total, (int, float)):
+            errors.append(
+                "missing_dependency — final_supply.total — numeric total is required"
+            )
+        elif total < 0 or total > 200:
+            errors.append(
+                f"internal_inconsistency — final_supply.total — {total} exceeds "
+                "the valid 0-200 supply range"
+            )
+        calculation = str(final_supply.get("calculation") or "").strip()
+        if not calculation:
+            errors.append(
+                "missing_dependency — final_supply.calculation — complete supply "
+                "calculation is required"
+            )
+        verdict = str(final_supply.get("verdict") or "").strip().lower()
+        if verdict != "valid":
+            errors.append(
+                "internal_inconsistency — final_supply.verdict — "
+                f"expected valid, got {verdict or 'empty'}"
+            )
+    return list(dict.fromkeys(errors))
+
+
 def _blocking_semantic_errors(payload: dict[str, Any]) -> list[str]:
     reported = payload.get("errors") or []
     blocking: list[str] = []
@@ -337,6 +530,7 @@ def _blocking_semantic_errors(payload: dict[str, Any]) -> list[str]:
             continue
         blocking.append(message)
     valid = payload.get("valid")
+    blocking.extend(_production_contract_errors(payload))
     if blocking:
         return list(dict.fromkeys(blocking))
     if valid is True or (valid is False and has_non_blocking):

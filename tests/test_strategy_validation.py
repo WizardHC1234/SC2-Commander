@@ -67,3 +67,32 @@ A reusable Terran macro strategy.
 
     assert error is not None
     assert "fifth Refinery" in error
+
+
+def test_supply_budget_does_not_add_attack_gate_to_larger_end_state() -> None:
+    strategy = """# Summary
+
+A reusable Terran attack strategy.
+
+# Details
+
+* Ultimate Goal: Continue toward 75 Marines, 14 Siege Tanks, 4 Medivacs, and 44 SCVs; the earlier attack gate remains 45 Marines, 8 Siege Tanks, and 2 Medivacs.
+"""
+
+    assert validate_strategy_markdown(strategy, race="terran") is None
+
+
+def test_supply_budget_still_rejects_a_true_oversized_end_state() -> None:
+    strategy = """# Summary
+
+A reusable Terran attack strategy.
+
+# Details
+
+* Ultimate Goal: Continue toward 100 Marines, 20 Siege Tanks, 4 Medivacs, and 44 SCVs.
+"""
+
+    error = validate_strategy_markdown(strategy, race="terran")
+
+    assert error is not None
+    assert "212 supply" in error

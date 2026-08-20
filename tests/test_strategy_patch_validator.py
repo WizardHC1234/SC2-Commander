@@ -8,6 +8,7 @@ from evol_agent.core.optimization_agent_loop import (
     run_optimization_agent_loop,
 )
 from evol_agent.core.strategy_patch_validator import (
+    _blocking_semantic_errors,
     build_strategy_patch_validation_prompt,
     validate_strategy_patch_semantics,
     validate_strategy_patch_structure,
@@ -17,6 +18,28 @@ from evol_agent.optimization.strategy_document import StrategyDocument, paragrap
 
 
 TANK_STRATEGY = Path("skills/terran/tank/strategy.md").read_text(encoding="utf-8")
+
+
+def _semantic_payload(*, valid: bool = True, errors: list | None = None) -> dict:
+    return {
+        "valid": valid,
+        "production_target_audit": [
+            {
+                "unit": "Marine",
+                "instruction": "continue Marine production",
+                "stage_target": "40 Marines",
+                "ultimate_goal_target": "75 Marines",
+                "temporary_stop_rule": "",
+                "verdict": "bounded",
+            }
+        ],
+        "final_supply": {
+            "total": 119,
+            "calculation": "75 Marines plus 44 SCVs equals 119 supply",
+            "verdict": "valid",
+        },
+        "errors": list(errors or []),
+    }
 
 
 def _decision(**overrides) -> dict:
@@ -279,7 +302,7 @@ def test_consistent_readiness_dependency_patches_pass(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: {"valid": True, "errors": []},
+        lambda prompt, **kwargs: _semantic_payload(),
     )
     assert (
         validate_strategy_patch_structure(
@@ -380,7 +403,7 @@ def test_runtime_micro_requirements_are_rejected(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: {"valid": True, "errors": []},
+        lambda prompt, **kwargs: _semantic_payload(),
     )
     errors = validate_strategy_patch_semantics(
         decision=_decision(),
@@ -405,7 +428,7 @@ def test_scan_safety_requirement_is_rejected(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: {"valid": True, "errors": []},
+        lambda prompt, **kwargs: _semantic_payload(),
     )
     errors = validate_strategy_patch_semantics(
         decision=_decision(),
@@ -433,7 +456,7 @@ def test_unsupported_wake_condition_is_rejected(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: {"valid": True, "errors": []},
+        lambda prompt, **kwargs: _semantic_payload(),
     )
     errors = validate_strategy_patch_semantics(
         decision=_decision(),
@@ -443,6 +466,38 @@ def test_unsupported_wake_condition_is_rejected(monkeypatch) -> None:
         capability_manifest=build_executor_capability_manifest("terran"),
     )
     assert "unsupported wake condition in strategy: enemy_visible_in_target_zone" in errors
+
+
+def test_macro_action_in_wake_clause_is_not_treated_as_wake_condition(
+    monkeypatch,
+) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    patches = [
+        _patch(
+            document,
+            "pre_attack_army_posture",
+            (
+                "At the next wake, if enemy air is observed, add train_viking "
+                "to the macro targets and set a wake event for game_time_at_least."
+            ),
+            "The strategy rechecks a supported observation before changing production.",
+        )
+    ]
+    patched, _changes = document.apply_patch(_patches_to_operations(patches))
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        lambda prompt, **kwargs: _semantic_payload(),
+    )
+
+    errors = validate_strategy_patch_semantics(
+        decision=_decision(),
+        parent_text=TANK_STRATEGY,
+        candidate_text=patched,
+        patches=patches,
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+
+    assert "unsupported wake condition in strategy: train_viking" not in errors
 
 
 def test_precise_maximum_range_requirement_is_rejected(monkeypatch) -> None:
@@ -458,7 +513,7 @@ def test_precise_maximum_range_requirement_is_rejected(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: {"valid": True, "errors": []},
+        lambda prompt, **kwargs: _semantic_payload(),
     )
     errors = validate_strategy_patch_semantics(
         decision=_decision(),
@@ -489,9 +544,9 @@ def test_non_blocking_semantic_notes_do_not_fail(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: {
-            "valid": False,
-            "errors": [
+        lambda prompt, **kwargs: _semantic_payload(
+            valid=False,
+            errors=[
                 {
                     "type": "scope",
                     "location": "Pre-Attack Army Posture",
@@ -505,7 +560,7 @@ def test_non_blocking_semantic_notes_do_not_fail(monkeypatch) -> None:
                     "severity": "non-blocking",
                 },
             ],
-        },
+        ),
     )
     assert (
         validate_strategy_patch_semantics(
@@ -517,6 +572,52 @@ def test_non_blocking_semantic_notes_do_not_fail(monkeypatch) -> None:
         )
         == []
     )
+
+
+def test_resumed_unit_without_ultimate_goal_target_is_always_blocking() -> None:
+    payload = _semantic_payload()
+    payload["production_target_audit"] = [
+        {
+            "unit": "Marauder",
+            "instruction": "resume train_marauder after eight Siege Tanks",
+            "stage_target": "4 Marauders",
+            "ultimate_goal_target": "",
+            "temporary_stop_rule": "no explicit cap in the strategy",
+            "verdict": "bounded",
+        }
+    ]
+
+    errors = _blocking_semantic_errors(payload)
+
+    assert any("Ultimate Goal for Marauder" in error for error in errors)
+
+
+def test_complete_resumed_unit_and_supply_audit_can_pass() -> None:
+    payload = _semantic_payload()
+    payload["production_target_audit"] = [
+        {
+            "unit": "Marauder",
+            "instruction": "resume train_marauder after eight Siege Tanks",
+            "stage_target": "4 Marauders",
+            "ultimate_goal_target": "4 Marauders",
+            "temporary_stop_rule": "",
+            "verdict": "bounded",
+        }
+    ]
+    payload["final_supply"] = {
+        "total": 185,
+        "calculation": "75 + 42 + 8 + 8 + 8 + 44 = 185 supply",
+        "verdict": "valid",
+    }
+
+    assert _blocking_semantic_errors(payload) == []
+
+
+def test_missing_production_and_supply_audits_are_blocking() -> None:
+    errors = _blocking_semantic_errors({"valid": True, "errors": []})
+
+    assert any("production_target_audit" in error for error in errors)
+    assert any("final_supply" in error for error in errors)
 
 
 def test_blocking_dict_errors_are_formatted(monkeypatch) -> None:
@@ -574,7 +675,7 @@ def test_validator_does_not_reject_a_legal_but_weak_patch(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: {"valid": True, "errors": []},
+        lambda prompt, **kwargs: _semantic_payload(),
     )
     assert (
         validate_strategy_patch_structure(
@@ -604,7 +705,7 @@ def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
         calls.append(prompt)
         if "You are validating a strategy patch" in prompt:
             if "rebuild to 36 Marines and 8 Siege Tanks" in prompt:
-                return {"valid": True, "errors": []}
+                return _semantic_payload()
             return {
                 "valid": False,
                 "errors": [

@@ -56,6 +56,7 @@ MAX_CONCURRENT_MATCH_SUBAGENTS = 3
 MIN_KNOWLEDGE_QUERIES = 0
 MAX_KNOWLEDGE_QUERIES = 4
 
-# Candidate retries are only for basic strategy.md validation failures.
-MAX_VALIDATION_RETRIES = 2
-
+# Candidate retries feed every structural, deterministic-knowledge, basic, and
+# semantic validation error back to the optimizer. Keep this bounded: retries
+# are for repairing a concrete error, not for unconstrained strategy search.
+MAX_VALIDATION_RETRIES = 4

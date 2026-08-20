@@ -53,6 +53,57 @@ HISTORY_FIELDS = (
     "batch",
 )
 
+_MECHANISM_RENAME_NOISE = {
+    "a",
+    "air",
+    "and",
+    "against",
+    "balance",
+    "count",
+    "denial",
+    "earlier",
+    "early",
+    "for",
+    "from",
+    "improve",
+    "improved",
+    "improvement",
+    "increase",
+    "increased",
+    "late",
+    "later",
+    "matchup",
+    "mechanism",
+    "of",
+    "package",
+    "response",
+    "strategy",
+    "support",
+    "the",
+    "timing",
+    "to",
+    "unit",
+    "units",
+    "versus",
+    "vs",
+    "with",
+}
+
+
+def canonical_mechanism_signature(value: Any) -> str:
+    """Collapse cosmetic family renames while retaining causal anchor terms."""
+    tokens = re.findall(r"[a-z0-9]+", str(value or "").casefold())
+    anchors = sorted(
+        {
+            token
+            for token in tokens
+            if len(token) > 1 and token not in _MECHANISM_RENAME_NOISE
+        }
+    )
+    if anchors:
+        return "_".join(anchors)
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").casefold()).strip("_")
+
 
 @dataclass(frozen=True)
 class EvolutionConfig:
@@ -66,6 +117,7 @@ class EvolutionConfig:
     difficulties: tuple[str, ...] = DEFAULT_DIFFICULTIES
     matches_per_batch: int = 10
     candidate_matches: int = 10
+    candidate_generation_retries: int = 3
     confirmation_matches: int = 0
     concurrency: int = 5
     mastery_score_threshold: float = 0.90
@@ -90,6 +142,8 @@ class EvolutionConfig:
             raise ValueError("matches_per_batch and concurrency must be positive")
         if self.candidate_matches <= 0:
             raise ValueError("candidate_matches must be positive")
+        if self.candidate_generation_retries < 0:
+            raise ValueError("candidate_generation_retries cannot be negative")
         if self.confirmation_matches < 0:
             raise ValueError("confirmation_matches cannot be negative")
         if not 0.0 <= self.mastery_score_threshold <= 1.0:
@@ -363,6 +417,7 @@ class EvolutionRunner:
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
             saved = state.get("config") or {}
             current = {**asdict(self.config), "difficulties": list(self.config.difficulties)}
+            config_changed = False
             legacy_candidate_matches = saved.get("candidate_max_matches")
             for obsolete in (
                 "candidate_initial_matches",
@@ -370,22 +425,34 @@ class EvolutionRunner:
                 "candidate_step_matches",
                 "promotion_probability_threshold",
             ):
-                saved.pop(obsolete, None)
+                if obsolete in saved:
+                    saved.pop(obsolete)
+                    config_changed = True
             if "candidate_matches" not in saved:
                 saved["candidate_matches"] = int(
                     legacy_candidate_matches or current["candidate_matches"]
                 )
+                config_changed = True
+            if "candidate_generation_retries" not in saved:
+                saved["candidate_generation_retries"] = current[
+                    "candidate_generation_retries"
+                ]
+                config_changed = True
             if "max_total_generations" not in saved:
                 saved["max_total_generations"] = current["max_total_generations"]
+                config_changed = True
             if "mastery_score_threshold" not in saved:
                 saved["mastery_score_threshold"] = current["mastery_score_threshold"]
+                config_changed = True
             for obsolete in (
                 "pass_score",
                 "max_generations",
                 "candidate_accept_probability",
                 "candidate_reject_probability",
             ):
-                saved.pop(obsolete, None)
+                if obsolete in saved:
+                    saved.pop(obsolete)
+                    config_changed = True
             for key in (
                 "baseline_batch_dir",
                 "analysis_batch_games",
@@ -393,11 +460,14 @@ class EvolutionRunner:
                 "max_generations_per_difficulty",
                 "confirmation_matches",
             ):
-                saved.setdefault(key, current[key])
+                if key not in saved:
+                    saved[key] = current[key]
+                    config_changed = True
             if saved != current:
                 raise ValueError("resume configuration does not match state.json")
             state["config"] = saved
-            changed = self._migrate_experiment_history(state)
+            changed = config_changed
+            changed = self._migrate_experiment_history(state) or changed
             changed = self._backfill_experiment_evidence(state) or changed
             changed = self._migrate_evidence_pool(state) or changed
             changed = self._migrate_lifecycle_state(state) or changed
@@ -813,6 +883,18 @@ class EvolutionRunner:
         if "inconclusive_streak" not in state:
             state["inconclusive_streak"] = 0
             changed = True
+        resume_dir = str(state.get("candidate_resume_dir") or "").strip()
+        if (
+            state.get("status") == "evol_agent_failed"
+            and state.get("pending_candidate") is None
+            and resume_dir
+            and Path(resume_dir).is_dir()
+        ):
+            # Candidate generation failures preserve an analysis-complete
+            # checkpoint. A later invocation should retry only optimization
+            # instead of remaining permanently stopped in the failed status.
+            state["status"] = "running"
+            changed = True
         search_parent = str(state.get("search_parent") or state.get("champion") or "")
         search_parent_batch = state.get("search_parent_batch")
         if search_parent and not isinstance(search_parent_batch, dict):
@@ -948,6 +1030,23 @@ class EvolutionRunner:
                 continue
             if stage_reached(checkpoint.stage, "candidate"):
                 continue
+            if stage_reached(checkpoint.stage, "analysis_complete"):
+                try:
+                    completed_analysis = json.loads(
+                        (path / "analysis.json").read_text(encoding="utf-8-sig")
+                    )
+                except (OSError, ValueError):
+                    completed_analysis = {}
+                completed_action = str(
+                    completed_analysis.get("next_action")
+                    if isinstance(completed_analysis, dict)
+                    else ""
+                ).strip()
+                # Only a completed proposal has unfinished optimization work.
+                # Terminal analysis decisions must be reconsidered on a later
+                # invocation so prompt/validator/runtime repairs can take effect.
+                if completed_action and completed_action != "propose_strategy_patch":
+                    continue
             if str(meta.get("strategy_name") or "") != strategy:
                 continue
             if str(meta.get("race") or "").lower() != self.config.race.lower():
@@ -1088,6 +1187,7 @@ class EvolutionRunner:
         difficulty: str,
     ) -> dict[str, str]:
         attempts: dict[str, int] = {}
+        representative: dict[str, str] = {}
         blocked: dict[str, str] = {}
         for item in state.get("experiment_history") or []:
             if not isinstance(item, dict):
@@ -1097,19 +1197,37 @@ class EvolutionRunner:
             family = str(item.get("mechanism_family") or "").strip().lower()
             if not family:
                 continue
+            signature = canonical_mechanism_signature(family)
+            representative.setdefault(signature, family)
             decision = str(item.get("decision") or "")
             implementation = str(item.get("implementation_verdict") or "")
             hypothesis = str(item.get("hypothesis_verdict") or "")
             if decision != "accepted":
-                attempts[family] = attempts.get(family, 0) + 1
+                attempts[signature] = attempts.get(signature, 0) + 1
             if implementation == "execution_invalid":
-                blocked[family] = "depends on an unsupported execution capability"
+                blocked[representative[signature]] = (
+                    "depends on an unsupported execution capability"
+                )
             elif implementation == "implemented" and hypothesis == "contradicted":
-                blocked[family] = "implemented experiment contradicted the hypothesis"
-        for family, count in attempts.items():
+                blocked[representative[signature]] = (
+                    "implemented experiment contradicted the hypothesis"
+                )
+        for signature, count in attempts.items():
+            family = representative[signature]
             if count >= 2:
                 blocked.setdefault(family, f"already has {count} non-accepted attempts")
         return blocked
+
+    def _blocked_mechanism_reason(
+        self,
+        blocked: dict[str, str],
+        candidate_family: str,
+    ) -> tuple[str, str]:
+        candidate_signature = canonical_mechanism_signature(candidate_family)
+        for blocked_family, reason in blocked.items():
+            if canonical_mechanism_signature(blocked_family) == candidate_signature:
+                return blocked_family, reason
+        return "", ""
 
     def _previous_result_was_statistically_inconclusive(
         self,
@@ -1146,6 +1264,10 @@ class EvolutionRunner:
         spec.setdefault("hypothesis", str(rationale.get("hypothesis") or ""))
         spec.setdefault(
             "mechanism_family", str(rationale.get("mechanism_family") or "").strip()
+        )
+        spec.setdefault(
+            "mechanism_signature",
+            canonical_mechanism_signature(spec.get("mechanism_family")),
         )
         if "mechanism_prediction" not in spec:
             mechanism_prediction = rationale.get("mechanism_prediction")
@@ -1368,6 +1490,7 @@ class EvolutionRunner:
         evidence_batches: list[BatchResult] | None = None,
         resume_dir: Path | None = None,
         analysis_seed_dir: Path | None = None,
+        retry_feedback: list[str] | None = None,
     ) -> EvolRunResult:
         if self._candidate_generator is not None:
             return self._candidate_generator(champion, champion_batch, prior_experiences)
@@ -1387,6 +1510,7 @@ class EvolutionRunner:
                 match_summary_cache_path=(
                     self.run_dir / "experiment_match_summary_cache.json"
                 ),
+                retry_feedback=list(retry_feedback or []),
             )
         )
 
@@ -1701,52 +1825,30 @@ class EvolutionRunner:
             strategy=search_parent,
             record_paths=list(dict.fromkeys(record_paths)),
         )
-        candidate_result = self.generate_candidate(
-            search_parent,
-            search_parent_batch,
-            self._prior_experiences(state, difficulty=difficulty),
-            evidence_batches=parent_evidence_batches,
-            resume_dir=Path(resume_value) if resume_value else None,
-            analysis_seed_dir=analysis_seed_dir,
-        )
-        self._remember_analysis_checkpoint(
-            state,
-            difficulty=difficulty,
-            strategy=search_parent,
-            checkpoint_dir=candidate_result.checkpoint_dir,
-        )
-        if not candidate_result.ok:
-            failure = {
-                "kind": "candidate_generation_failure",
-                "generation": int(state["generation"]),
-                "attempt": 1,
-                "difficulty": difficulty,
-                "parent": search_parent,
-                "comparison_champion": champion,
-                "message": str(candidate_result.message),
-                "checkpoint_dir": str(candidate_result.checkpoint_dir or ""),
-                "created_at": datetime.now().isoformat(),
-            }
-            state.setdefault("candidate_generation_failures", []).append(failure)
-            state["candidate_resume_dir"] = str(
-                candidate_result.checkpoint_dir or resume_value
+        retry_feedback: list[str] = []
+        candidate_result: EvolRunResult | None = None
+        total_attempts = self.config.candidate_generation_retries + 1
+        for attempt in range(1, total_attempts + 1):
+            candidate_result = self.generate_candidate(
+                search_parent,
+                search_parent_batch,
+                self._prior_experiences(state, difficulty=difficulty),
+                evidence_batches=parent_evidence_batches,
+                resume_dir=Path(resume_value) if resume_value else None,
+                analysis_seed_dir=analysis_seed_dir,
+                retry_feedback=retry_feedback,
             )
-            self._save_state(state)
-            print(
-                "EvolAgent candidate generation stopped after one analysis; "
-                "the checkpoint is saved for optimization-only resume: "
-                f"{candidate_result.message}",
-                flush=True,
+            self._remember_analysis_checkpoint(
+                state,
+                difficulty=difficulty,
+                strategy=search_parent,
+                checkpoint_dir=candidate_result.checkpoint_dir,
             )
-        else:
-            state["candidate_resume_dir"] = None
-        if (
-            not candidate_result.ok
-            or candidate_result.output_dir is None
-        ):
+            if candidate_result.ok and candidate_result.output_dir is not None:
+                state["candidate_resume_dir"] = None
+                break
             if (
-                candidate_result is not None
-                and candidate_result.ok
+                candidate_result.ok
                 and candidate_result.decision_action != "propose_strategy_patch"
             ):
                 return self._handle_analysis_decision(
@@ -1755,6 +1857,51 @@ class EvolutionRunner:
                     difficulty=difficulty,
                     champion=search_parent,
                 )
+
+            message = str(candidate_result.message or "candidate generation failed")
+            failure = {
+                "kind": "candidate_generation_failure",
+                "generation": int(state["generation"]),
+                "attempt": attempt,
+                "max_attempts": total_attempts,
+                "difficulty": difficulty,
+                "parent": search_parent,
+                "comparison_champion": champion,
+                "message": message,
+                "checkpoint_dir": str(candidate_result.checkpoint_dir or ""),
+                "created_at": datetime.now().isoformat(),
+            }
+            state.setdefault("candidate_generation_failures", []).append(failure)
+            checkpoint_value = str(candidate_result.checkpoint_dir or resume_value)
+            state["candidate_resume_dir"] = checkpoint_value
+            if attempt >= total_attempts:
+                break
+
+            retry_feedback.append(
+                f"Candidate-generation attempt {attempt}/{total_attempts} failed: {message}"
+            )
+            # A broken resume checkpoint cannot repair itself; restart from the
+            # compatible analysis seed while retaining the explicit feedback.
+            if message.startswith("failed to load checkpoint:") or message.startswith(
+                "strategy mismatch with checkpoint:"
+            ):
+                resume_value = ""
+                state["candidate_resume_dir"] = ""
+            else:
+                resume_value = checkpoint_value
+            self._save_state(state)
+            print(
+                f"EvolAgent candidate generation failed; retrying "
+                f"({attempt + 1}/{total_attempts}) with feedback: {message}",
+                flush=True,
+            )
+
+        if candidate_result is None:
+            raise RuntimeError("candidate generation produced no result")
+        if (
+            not candidate_result.ok
+            or candidate_result.output_dir is None
+        ):
             state["status"] = "evol_agent_failed"
             self._save_state(state)
             print(
@@ -1775,14 +1922,22 @@ class EvolutionRunner:
         blocked_families = self._blocked_mechanism_families(
             state, difficulty=difficulty
         )
-        if mechanism_family and mechanism_family in blocked_families:
+        blocked_family, blocked_reason = self._blocked_mechanism_reason(
+            blocked_families,
+            mechanism_family,
+        )
+        if mechanism_family and blocked_reason:
             rejection = {
                 "kind": "mechanism_policy_rejection",
                 "generation": int(state["generation"]),
                 "difficulty": difficulty,
                 "candidate": candidate_result.output_dir.name,
                 "mechanism_family": mechanism_family,
-                "reason": blocked_families[mechanism_family],
+                "mechanism_signature": canonical_mechanism_signature(
+                    mechanism_family
+                ),
+                "equivalent_blocked_family": blocked_family,
+                "reason": blocked_reason,
                 "decision": "policy_rejected_before_matches",
                 "created_at": datetime.now().isoformat(),
             }
@@ -1798,7 +1953,8 @@ class EvolutionRunner:
             self._save_state(state)
             print(
                 "EvolAgent candidate blocked before matches by mechanism policy: "
-                f"{mechanism_family} ({blocked_families[mechanism_family]})",
+                f"{mechanism_family} is equivalent to {blocked_family} "
+                f"({blocked_reason})",
                 flush=True,
             )
             return retries < 2
@@ -1825,6 +1981,9 @@ class EvolutionRunner:
             "main_risk": str(rationale.get("main_risk") or ""),
             "hypothesis": str(rationale.get("hypothesis") or ""),
             "mechanism_family": str(rationale.get("mechanism_family") or "").strip(),
+            "mechanism_signature": canonical_mechanism_signature(
+                rationale.get("mechanism_family")
+            ),
             "mechanism_prediction": (
                 dict(rationale.get("mechanism_prediction"))
                 if isinstance(rationale.get("mechanism_prediction"), dict)
@@ -2268,6 +2427,47 @@ class EvolutionRunner:
         implementation_verdict = str(
             mechanism_audit.get("implementation_verdict") or "unknown"
         )
+        hypothesis_verdict = str(
+            mechanism_audit.get("hypothesis_verdict") or "inconclusive"
+        )
+        if accepted and implementation_verdict == "implemented":
+            performance_gain_cause = (
+                "supported_mechanism"
+                if hypothesis_verdict == "supported"
+                else "unknown"
+            )
+        elif accepted:
+            performance_gain_cause = "unverified"
+        else:
+            performance_gain_cause = "not_applicable"
+        mechanism_family = str(
+            experiment_spec.get("mechanism_family")
+            or pending.get("mechanism_family")
+            or ""
+        ).strip()
+        prior_family_attempts = sum(
+            1
+            for item in (state.get("mechanism_ledger") or [])
+            if isinstance(item, dict)
+            and str(item.get("difficulty") or "") == difficulty
+            and str(item.get("mechanism_family") or "").strip().casefold()
+            == mechanism_family.casefold()
+            and str(item.get("decision") or "") != "accepted"
+        )
+        repairable_underpowered = bool(
+            not accepted
+            and mechanism_family
+            and implementation_verdict == "underpowered"
+            and hypothesis_verdict in {"inconclusive", "not_tested"}
+            and prior_family_attempts == 0
+        )
+        underpowered_retry_exhausted = bool(
+            not accepted
+            and mechanism_family
+            and implementation_verdict == "underpowered"
+            and hypothesis_verdict in {"inconclusive", "not_tested"}
+            and prior_family_attempts >= 1
+        )
         streak_before = int(state.get("inconclusive_streak") or 0)
         valid_inconclusive = bool(
             base_outcome == "inconclusive"
@@ -2300,6 +2500,16 @@ class EvolutionRunner:
         elif valid_inconclusive:
             search_parent_after = candidate
             streak_after = streak_before + 1
+        elif repairable_underpowered:
+            # Keep Champion selection unchanged, but allow one implementation
+            # repair to inherit the concrete candidate instead of rebuilding the
+            # same mechanism from Champion. A second failed family attempt returns
+            # to Champion through the normal rejected path.
+            search_parent_after = candidate
+            streak_after = 0
+        elif underpowered_retry_exhausted:
+            search_parent_after = champion
+            streak_after = 0
         else:
             search_parent_after = str(state.get("search_parent") or mutation_parent)
             streak_after = 0 if base_outcome == "rejected" else streak_before
@@ -2339,6 +2549,9 @@ class EvolutionRunner:
             "hypothesis_verdict": str(
                 mechanism_audit.get("hypothesis_verdict") or "inconclusive"
             ),
+            "performance_result": outcome,
+            "causal_result": hypothesis_verdict,
+            "performance_gain_cause": performance_gain_cause,
             "posterior_probability_better": probability,
             "selection_rule": (
                 "force_latest_candidate_after_two_consecutive_inconclusive"
@@ -2363,6 +2576,8 @@ class EvolutionRunner:
             "mastery_win_rate_threshold": self.config.mastery_score_threshold,
             "posterior_used_for_selection": False,
             "promotion_blocked_by_audit": promotion_blocked_by_audit,
+            "repairable_underpowered_retry": repairable_underpowered,
+            "underpowered_retry_exhausted": underpowered_retry_exhausted,
             "champion_evidence_games": comparison_champion.games,
             "candidate_evidence_games": comparison_candidate.games,
             "evaluation_rounds": [
@@ -2401,6 +2616,10 @@ class EvolutionRunner:
                 experiment_spec.get("mechanism_family")
                 or pending.get("mechanism_family")
                 or ""
+            ),
+            "mechanism_signature": canonical_mechanism_signature(
+                experiment_spec.get("mechanism_family")
+                or pending.get("mechanism_family")
             ),
             "mechanism_prediction": (
                 dict(experiment_spec.get("mechanism_prediction"))
@@ -2454,8 +2673,10 @@ class EvolutionRunner:
             state["champion"] = candidate
             self._sync_champion_baseline(state, comparison_candidate)
             self._sync_search_parent(state, candidate, comparison_candidate)
-        elif valid_inconclusive:
+        elif valid_inconclusive or repairable_underpowered:
             self._sync_search_parent(state, candidate, comparison_candidate)
+        elif underpowered_retry_exhausted:
+            self._sync_search_parent(state, champion, comparison_champion)
         state["inconclusive_streak"] = streak_after
         parent_evidence = {
             **aggregate_outcomes([mutation_parent_result.to_dict()]),
@@ -2522,6 +2743,10 @@ class EvolutionRunner:
             "candidate": candidate,
             "hypothesis": str(decision.get("hypothesis") or ""),
             "mechanism_family": str(decision.get("mechanism_family") or ""),
+            "mechanism_signature": str(
+                decision.get("mechanism_signature")
+                or canonical_mechanism_signature(decision.get("mechanism_family"))
+            ),
             "mechanism_prediction": (
                 dict(decision.get("mechanism_prediction"))
                 if isinstance(decision.get("mechanism_prediction"), dict)
@@ -2559,6 +2784,9 @@ class EvolutionRunner:
             "hypothesis_verdict": str(
                 decision.get("hypothesis_verdict") or "inconclusive"
             ),
+            "performance_result": outcome,
+            "causal_result": hypothesis_verdict,
+            "performance_gain_cause": performance_gain_cause,
             "plan_direction": str(decision.get("plan_direction") or ""),
             "patches": _dict_list(decision.get("patches")),
             "decision": outcome,
@@ -2566,6 +2794,8 @@ class EvolutionRunner:
             "forced_promotion_after_inconclusive": (
                 forced_promotion_after_inconclusive
             ),
+            "repairable_underpowered_retry": repairable_underpowered,
+            "underpowered_retry_exhausted": underpowered_retry_exhausted,
             "search_parent_before": str(decision.get("search_parent_before") or ""),
             "search_parent_after": search_parent_after,
             "inconclusive_streak_before": streak_before,
@@ -2647,10 +2877,20 @@ class EvolutionRunner:
                     "mechanism_family": str(
                         decision.get("mechanism_family") or ""
                     ),
+                    "mechanism_signature": str(
+                        decision.get("mechanism_signature")
+                        or canonical_mechanism_signature(
+                            decision.get("mechanism_family")
+                        )
+                    ),
                     "inheritance": dict(experience.get("inheritance") or {}),
                     "base_decision": base_outcome,
                     "decision": outcome,
                     "implementation_verdict": implementation_verdict,
+                    "hypothesis_verdict": hypothesis_verdict,
+                    "performance_gain_cause": performance_gain_cause,
+                    "repairable_underpowered_retry": repairable_underpowered,
+                    "underpowered_retry_exhausted": underpowered_retry_exhausted,
                     "search_parent_before": str(
                         decision.get("search_parent_before") or ""
                     ),

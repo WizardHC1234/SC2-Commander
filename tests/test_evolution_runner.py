@@ -58,11 +58,18 @@ def test_generate_candidate_passes_shared_match_summary_cache(
     )
     batch = _batch("tank", "harder", 5, tmp_path)
 
-    runner.generate_candidate("tank", batch, [], evidence_batches=[batch])
+    runner.generate_candidate(
+        "tank",
+        batch,
+        [],
+        evidence_batches=[batch],
+        retry_feedback=["candidate contract rejected"],
+    )
 
     assert captured["request"].match_summary_cache_path == (
         tmp_path / "run" / "experiment_match_summary_cache.json"
     )
+    assert captured["request"].retry_feedback == ["candidate contract rejected"]
 
 
 def test_evolution_accepts_only_strict_improvement_and_advances(tmp_path: Path) -> None:
@@ -248,6 +255,46 @@ def test_runner_recovers_latest_unfinished_checkpoint_for_exact_records(
     )
 
     assert recovered == checkpoint_dir.resolve()
+
+
+def test_runner_does_not_resume_completed_terminal_analysis(
+    tmp_path: Path,
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(strategy="tank", commander_model="test-model"),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    record = tmp_path / "match.json"
+    record.write_text("{}", encoding="utf-8")
+    checkpoint_dir = tmp_path / "evol_agent" / "logs" / "tank" / "terminal"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "checkpoint.json").write_text(
+        json.dumps(
+            {
+                "schema": CHECKPOINT_SCHEMA,
+                "pipeline_version": PIPELINE_VERSION,
+                "stage": "analysis_complete",
+                "strategy_name": "tank",
+                "race": "terran",
+                "knowledge_mode": "enabled",
+                "models": {"analysis": "test-model"},
+                "record_files": [str(record.resolve())],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (checkpoint_dir / "analysis.json").write_text(
+        json.dumps({"next_action": "inspect_runtime"}),
+        encoding="utf-8",
+    )
+
+    recovered = runner._find_resumable_analysis_checkpoint(
+        strategy="tank",
+        record_paths=[record],
+    )
+
+    assert recovered is None
 
 
 def test_legacy_history_migrates_to_per_strategy_games(tmp_path: Path) -> None:
@@ -762,6 +809,79 @@ def test_execution_invalid_audit_blocks_candidate_promotion(tmp_path: Path) -> N
     assert decision["promotion_blocked_by_audit"] is True
 
 
+def test_accepted_candidate_keeps_score_gain_separate_from_contradicted_cause(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "skills" / "terran" / "tank"
+    parent.mkdir(parents=True)
+    (parent / "strategy.md").write_text("parent", encoding="utf-8")
+
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 5 if strategy == "tank" else 6, tmp_path)
+
+    def evolve(
+        champion: str, batch: BatchResult, experiences: list[object]
+    ) -> EvolRunResult:
+        candidate = tmp_path / "skills" / "terran" / "tank_opt1"
+        candidate.mkdir(parents=True, exist_ok=True)
+        (candidate / "strategy.md").write_text("candidate", encoding="utf-8")
+        improvement = EvolImprovement(
+            analysis={
+                "mechanism_family": "viking_air_denial_vs_liberator",
+                "hypothesis": "the air response explains repeated losses",
+            },
+            files={"strategy.md": "candidate"},
+        )
+        return EvolRunResult(
+            ok=True,
+            message="OK",
+            output_dir=candidate,
+            improvement=improvement,
+        )
+
+    def audit(**_kwargs: object) -> dict[str, object]:
+        return {
+            "implementation_verdict": "implemented",
+            "hypothesis_verdict": "contradicted",
+            "mechanism_evidence": ["the requested unit was produced"],
+            "combat_evidence": ["losses persisted without the predicted cause"],
+            "runtime_findings": [],
+            "evidence_limits": [],
+            "lesson": "The score improved, but the selected mechanism was contradicted.",
+        }
+
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_total_generations=1,
+            confirmation_matches=0,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+        experiment_auditor=audit,
+    )
+    state = runner.run()
+
+    record = state["experiment_history"][0]
+    assert state["champion"] == "tank_opt1"
+    assert record["decision"] == "accepted"
+    assert record["performance_result"] == "accepted"
+    assert record["causal_result"] == "contradicted"
+    assert record["performance_gain_cause"] == "unknown"
+    assert record["mechanism_signature"] == "liberator_viking"
+    blocked = runner._blocked_mechanism_families(state, difficulty="harder")
+    blocked_family, reason = runner._blocked_mechanism_reason(
+        blocked,
+        "viking_count_and_timing_vs_liberator",
+    )
+    assert blocked_family == "viking_air_denial_vs_liberator"
+    assert "contradicted" in reason
+
+
 def test_close_batch_results_uses_one_outcome_point_threshold(tmp_path: Path) -> None:
     champion = _batch("tank", "harder", 5, tmp_path)
     assert close_batch_results(champion, _batch("tank_opt1", "harder", 6, tmp_path))
@@ -842,6 +962,33 @@ def test_execution_invalid_blocks_mechanism_family_immediately(
     assert blocked["runtime_transformation_gate"].startswith("depends on")
 
 
+def test_mechanism_policy_blocks_cosmetic_family_renames(tmp_path: Path) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(strategy="tank", commander_model="model"),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    state = runner._new_state()
+    state["experiment_history"] = [
+        {
+            "difficulty": "harder",
+            "mechanism_family": "viking_air_denial_vs_liberator",
+            "decision": "accepted",
+            "implementation_verdict": "implemented",
+            "hypothesis_verdict": "contradicted",
+        }
+    ]
+
+    blocked = runner._blocked_mechanism_families(state, difficulty="harder")
+    blocked_family, reason = runner._blocked_mechanism_reason(
+        blocked,
+        "viking_count_and_timing_vs_liberator",
+    )
+
+    assert blocked_family == "viking_air_denial_vs_liberator"
+    assert "contradicted" in reason
+
+
 def test_completed_record_count_ignores_autosaves(tmp_path: Path) -> None:
     batch = tmp_path / "batch"
     match = batch / "match"
@@ -858,7 +1005,7 @@ def test_completed_record_count_ignores_autosaves(tmp_path: Path) -> None:
     assert completed_record_count(batch, strategy="tank") == 1
 
 
-def test_candidate_generation_failure_stops_without_reanalyzing(tmp_path: Path) -> None:
+def test_candidate_generation_failure_retries_within_the_same_run(tmp_path: Path) -> None:
     attempts = 0
 
     def play(strategy: str, difficulty: str) -> BatchResult:
@@ -867,10 +1014,16 @@ def test_candidate_generation_failure_stops_without_reanalyzing(tmp_path: Path) 
     def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
         nonlocal attempts
         attempts += 1
+        if attempts > 1:
+            candidate = tmp_path / "skills" / "terran" / "tank_opt1"
+            candidate.mkdir(parents=True, exist_ok=True)
+            return EvolRunResult(ok=True, message="OK", output_dir=candidate)
+        checkpoint = tmp_path / "analysis_checkpoint"
+        checkpoint.mkdir(parents=True, exist_ok=True)
         return EvolRunResult(
             ok=False,
             message="candidate contract rejected",
-            checkpoint_dir=tmp_path / "analysis_checkpoint",
+            checkpoint_dir=checkpoint,
         )
 
     runner = EvolutionRunner(
@@ -888,16 +1041,20 @@ def test_candidate_generation_failure_stops_without_reanalyzing(tmp_path: Path) 
 
     state = runner.run()
 
-    assert state["status"] == "evol_agent_failed"
-    assert attempts == 1
-    assert state["candidate_resume_dir"] == str(tmp_path / "analysis_checkpoint")
+    assert state["status"] == "completed"
+    assert attempts == 2
+    assert state["candidate_resume_dir"] is None
     assert state["candidate_generation_failures"][0]["message"] == (
         "candidate contract rejected"
     )
+    assert state["candidate_generation_failures"][0]["attempt"] == 1
+    assert state["candidate_generation_failures"][0]["max_attempts"] == 4
     assert all(
         item.get("kind") != "candidate_generation_failure"
         for item in state.get("experiment_history") or []
     )
+
+    assert state["champion"] == "tank_opt1"
 
 
 def test_runtime_action_pauses_without_candidate_retries(tmp_path: Path) -> None:
@@ -1110,6 +1267,80 @@ def test_rejection_preserves_search_parent_but_resets_streak(tmp_path: Path) -> 
     ]
 
 
+def test_underpowered_candidate_is_inherited_once_for_implementation_repair(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "skills" / "terran" / "tank"
+    parent.mkdir(parents=True)
+    (parent / "strategy.md").write_text("parent", encoding="utf-8")
+    mutation_parents: list[str] = []
+
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 5 if strategy == "tank" else 4, tmp_path)
+
+    def evolve(
+        champion: str, batch: BatchResult, experiences: list[object]
+    ) -> EvolRunResult:
+        mutation_parents.append(champion)
+        candidate_name = f"tank_opt{len(mutation_parents)}"
+        candidate = tmp_path / "skills" / "terran" / candidate_name
+        candidate.mkdir(parents=True, exist_ok=True)
+        (candidate / "strategy.md").write_text(
+            f"candidate inherited from {champion}", encoding="utf-8"
+        )
+        improvement = EvolImprovement(
+            analysis={
+                "mechanism_family": "mobile_army_readiness",
+                "hypothesis": "a stronger implementation improves the first fight",
+                "expected_effect": "more combat power survives first contact",
+                "main_risk": "the timing may become slower",
+            },
+            files={"strategy.md": f"candidate inherited from {champion}"},
+        )
+        return EvolRunResult(
+            ok=True,
+            message="OK",
+            output_dir=candidate,
+            improvement=improvement,
+        )
+
+    def audit(**_kwargs: object) -> dict[str, object]:
+        return {
+            "implementation_verdict": "underpowered",
+            "hypothesis_verdict": "not_tested",
+            "mechanism_evidence": [],
+            "combat_evidence": [],
+            "runtime_findings": [],
+            "evidence_limits": [],
+            "lesson": "The mechanism is executable but the implementation is too weak.",
+        }
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_total_generations=2,
+            confirmation_matches=0,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+        experiment_auditor=audit,
+    ).run()
+
+    assert mutation_parents == ["tank", "tank_opt1"]
+    assert state["champion"] == "tank"
+    assert state["search_parent"] == "tank"
+    first, second = state["experiment_history"]
+    assert first["repairable_underpowered_retry"] is True
+    assert first["search_parent_after"] == "tank_opt1"
+    assert second["repairable_underpowered_retry"] is False
+    assert second["underpowered_retry_exhausted"] is True
+    assert second["search_parent_after"] == "tank"
+
+
 def test_higher_score_is_accepted_without_a_posterior_gate(
     tmp_path: Path,
 ) -> None:
@@ -1215,8 +1446,15 @@ def test_generation_failures_are_not_prior_experiences(tmp_path: Path) -> None:
     ).run()
 
     assert seen[0] == []
-    assert len(seen) == 1
+    assert len(seen) == 4
+    assert all(experiences == [] for experiences in seen)
     assert state["candidate_generation_failures"][0]["message"] == "optimizer json invalid"
+    assert [item["attempt"] for item in state["candidate_generation_failures"]] == [
+        1,
+        2,
+        3,
+        4,
+    ]
     assert state["experiment_history"] == []
 
 

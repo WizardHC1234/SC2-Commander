@@ -17,6 +17,7 @@ from evol_agent.core.analysis_agent_loop import (
     _normalize_batch_analysis,
     _normalize_cross_match_decision,
     _normalize_cross_match_discovery,
+    _static_defense_direction_error,
 )
 from evol_agent.core.checkpoint import EvolCheckpoint
 from evol_agent.core.capabilities import build_executor_capability_manifest
@@ -35,6 +36,8 @@ from evol_agent.optimization.strategy_document import (
 )
 from evol_agent.sc2_data_agent.bridge import (
     KNOWLEDGE_VERIFICATION_SCHEMA,
+    find_knowledge_run_error,
+    is_knowledge_run_verified,
     run_knowledge_query,
 )
 from evol_agent.sc2_data_agent.strategy_knowledge import (
@@ -464,6 +467,14 @@ def test_decision_rejects_an_incomplete_intervention_package() -> None:
                 "opponent_pressure_pattern": "pressure arrives before the spike",
                 "matchup_assessment": "the incomplete force cannot hold the observed attack",
                 "counterexample_check": "wins survive the corresponding pressure window",
+                "covered_failures": [
+                    "Game 2 @ 430s: the army collapses before the power spike",
+                    "Game 5 @ 510s: the incomplete force cannot hold pressure",
+                ],
+                "unexplained_failures": [],
+                "counterexamples": [
+                    "Game 1 @ 180s: a win survives the corresponding pressure window"
+                ],
             },
             "mechanism_prediction": {
                 "expected_change": "more combat power survives until the planned spike",
@@ -521,6 +532,14 @@ def test_decision_propose_requires_hypothesis_and_plan_direction() -> None:
                 "opponent_pressure_pattern": "enemy pressure reaches the army before it is complete",
                 "matchup_assessment": "the own fighting package is incomplete at contact",
                 "counterexample_check": "wins complete more of the intended package before contact",
+                "covered_failures": [
+                    "Game 2 @ 430s: the fighting package is incomplete at contact",
+                    "Game 5 @ 510s: pressure arrives before the army is complete",
+                ],
+                "unexplained_failures": [],
+                "counterexamples": [
+                    "Game 1 @ 180s: the completed package survives first contact"
+                ],
             },
             "priority_alignment": {
                 "selected_priority": "decisive combat viability",
@@ -564,6 +583,30 @@ def test_decision_propose_requires_hypothesis_and_plan_direction() -> None:
     assert payload["considered_explanations"] == []
 
 
+def test_static_defense_cannot_be_selected_as_primary_direction() -> None:
+    error = _static_defense_direction_error(
+        {
+            "direction": "Add Missile Turrets as the main forward defense.",
+            "material_behavior_change": "hold the push behind static detection",
+            "coordinated_changes": [
+                {
+                    "change": "build static defense before moving out",
+                    "why_required": "the plan relies on it for protection",
+                }
+            ],
+        }
+    )
+
+    assert "static defensive structures" in error
+    assert _static_defense_direction_error(
+        {
+            "direction": "Add mobile anti-air support to the fighting package.",
+            "material_behavior_change": "the army survives air pressure",
+            "coordinated_changes": [],
+        }
+    ) == ""
+
+
 def test_decision_keeps_considered_explanations_without_patch_fields() -> None:
     payload, error = _normalize_cross_match_decision(
         {
@@ -584,6 +627,14 @@ def test_decision_keeps_considered_explanations_without_patch_fields() -> None:
                 "opponent_pressure_pattern": "the decisive pressure occurs after the readiness gate",
                 "matchup_assessment": "the assembled force trades poorly into the observed composition",
                 "counterexample_check": "the same collapse is absent when the force retains supporting power",
+                "covered_failures": [
+                    "Game 2 @ 430s: the ready force collapses into the observed composition",
+                    "Game 6 @ 795s: the assembled force again trades poorly",
+                ],
+                "unexplained_failures": [],
+                "counterexamples": [
+                    "Game 1 @ 180s: retained supporting power prevents the same collapse"
+                ],
             },
             "priority_alignment": {
                 "selected_priority": "matchup and fighting-package viability",
@@ -743,6 +794,77 @@ def test_propose_runtime_problem_is_coerced_to_inspect_runtime() -> None:
     assert payload["candidate_plans"] == []
 
 
+def _auto_retreat_runtime_decision(evidence: list[str]) -> dict:
+    return {
+        "next_action": "inspect_runtime",
+        "action_reason": "auto-retreat appears to cause repeated main-force collapses",
+        "priority_problem": {
+            "problem": "auto-retreat interrupts decisive attacks",
+            "evidence": evidence,
+            "control_class": "runtime_execution",
+        },
+        "hypothesis": "the runtime auto-retreat gate withdraws the main force too early",
+        "failure_mode_analysis": {
+            "failure_mode": "the main force withdraws before a decisive engagement",
+            "survival_prerequisite": "the gathered force must remain engaged",
+            "opponent_pressure_pattern": "comparable enemy armies meet the push",
+            "matchup_assessment": "the assembled package should be competitive",
+            "counterexample_check": "wins do not trigger the same main-force override",
+            "covered_failures": evidence,
+            "unexplained_failures": [],
+            "counterexamples": ["Game 1 @ 620s: main force completes the attack"],
+        },
+    }
+
+
+def test_auto_retreat_runtime_action_rejects_global_or_reinforcement_attribution() -> None:
+    payload, error = _normalize_cross_match_decision(
+        _auto_retreat_runtime_decision(
+            [
+                "Game 2 @ 430s: 60 Marines existed globally when group_1 retreated",
+                "Game 5 @ 510s: reinforcement auto-retreat appeared near the fight",
+            ]
+        ),
+        strategy_name="tank",
+    )
+
+    assert payload is None
+    assert "main force/group_0" in error
+    assert "override_before_losses" in error
+
+
+def test_coerced_auto_retreat_runtime_action_cannot_bypass_attribution_gate() -> None:
+    decision = _auto_retreat_runtime_decision(
+        [
+            "Game 2 @ 430s: global army inventory changed during group_1 retreat",
+            "Game 5 @ 510s: reinforcement auto-retreat appeared near the fight",
+        ]
+    )
+    decision["next_action"] = "propose_strategy_patch"
+    decision["plan"] = {"direction": "rewrite the attack posture"}
+
+    payload, error = _normalize_cross_match_decision(decision, strategy_name="tank")
+
+    assert payload is None
+    assert "main force/group_0" in error
+
+
+def test_auto_retreat_runtime_action_accepts_repeated_main_force_causal_evidence() -> None:
+    payload, error = _normalize_cross_match_decision(
+        _auto_retreat_runtime_decision(
+            [
+                "Game 2 @ 430s: group_0 auto-retreat; loss_timing=override_before_losses",
+                "Game 5 @ 510s: main_force auto-retreat; loss_timing=override_before_losses",
+            ]
+        ),
+        strategy_name="tank",
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["next_action"] == "inspect_runtime"
+
+
 def test_request_more_matches_does_not_need_hypothesis() -> None:
     payload, error = _normalize_cross_match_decision(
         {
@@ -875,7 +997,25 @@ def test_optimizer_always_calls_llm_for_paragraph_patches(monkeypatch) -> None:
     def fake_llm(prompt: str, **kwargs):
         prompts.append(prompt)
         if "You are validating a strategy patch" in prompt:
-            return {"valid": True, "errors": []}
+            return {
+                "valid": True,
+                "production_target_audit": [
+                    {
+                        "unit": "Marine",
+                        "instruction": "continue Marine production",
+                        "stage_target": "40 Marines",
+                        "ultimate_goal_target": "75 Marines",
+                        "temporary_stop_rule": "",
+                        "verdict": "bounded",
+                    }
+                ],
+                "final_supply": {
+                    "total": 119,
+                    "calculation": "75 Marines plus 44 SCVs equals 119 supply",
+                    "verdict": "valid",
+                },
+                "errors": [],
+            }
         return {
             "action": "draft_candidate",
             "patches": [
@@ -953,7 +1093,33 @@ def test_only_current_deterministic_knowledge_is_treated_as_verified(tmp_path: P
     assert checkpoint.completed_knowledge_ids() == set()
     checkpoint.save_knowledge_result({"question_id": "Q1", "ok": True, "answer": "legacy prose only"})
     assert checkpoint.completed_knowledge_ids() == set()
-    checkpoint.save_knowledge_result({"question_id": "Q1", "ok": True, "answer": "verified", "verification_schema": KNOWLEDGE_VERIFICATION_SCHEMA, "dataset_evidence": [{"tool": "get_strategy_knowledge", "result": {"entities": ["Marine"]}}]})
+    checkpoint.save_knowledge_result(
+        {
+            "question_id": "Q1",
+            "ok": True,
+            "answer": "verified",
+            "verification_schema": KNOWLEDGE_VERIFICATION_SCHEMA,
+            "dataset_evidence": [
+                {
+                    "tool": "get_strategy_knowledge",
+                    "result": {
+                        "schema": KNOWLEDGE_VERIFICATION_SCHEMA,
+                        "entities": ["Marine"],
+                        "coverage": {
+                            "unresolved_entities": [],
+                            "unresolved_actions": [],
+                            "unsupported_claims": [],
+                            "complete": True,
+                        },
+                        "requested_calculation_count": 0,
+                        "calculations": [],
+                        "calculation_errors": [],
+                        "missing": [],
+                    },
+                }
+            ],
+        }
+    )
     assert checkpoint.completed_knowledge_ids() == {"Q1"}
 
 
@@ -1040,6 +1206,88 @@ def test_explicit_effects_need_does_not_expand_to_requirements_and_uses_scan_met
     assert "limit=energy_limited" in run["answer"]
 
 
+def test_knowledge_does_not_verify_unresolved_runtime_or_targeting_claims() -> None:
+    run = run_knowledge_query(
+        {
+            "id": "Q1",
+            "question": (
+                "What is the exact transformation time for Siege Tank to enter "
+                "Siege Mode, and does push movement mode allow it?"
+            ),
+            "entities": ["Siege Tank", "Siege Mode", "transformation"],
+            "needs": ["requirements", "effects"],
+        },
+        race="terran",
+    )
+
+    packet = run["dataset_evidence"][0]["result"]
+    resolved = {
+        row["requested"]: (row.get("entity") or {}).get("name")
+        for row in packet["coverage"]["entity_resolution"]
+    }
+    assert resolved["Siege Mode"] == "SIEGEMODE_SIEGEMODE"
+    assert resolved["transformation"] is None
+    assert run["ok"] is False
+    assert is_knowledge_run_verified(run) is False
+    assert "unresolved" in find_knowledge_run_error(run)
+    assert any(
+        "movement-mode" in item
+        for item in packet["coverage"]["unsupported_claims"]
+    )
+
+
+def test_knowledge_does_not_verify_runtime_target_priority() -> None:
+    run = run_knowledge_query(
+        {
+            "id": "Q1",
+            "question": "What targets does a Viking prioritize first?",
+            "entities": ["Viking"],
+            "needs": ["effects"],
+        },
+        race="terran",
+    )
+
+    packet = run["dataset_evidence"][0]["result"]
+    assert run["ok"] is False
+    assert is_knowledge_run_verified(run) is False
+    assert any(
+        "target-priority" in item
+        for item in packet["coverage"]["unsupported_claims"]
+    )
+
+
+def test_knowledge_verifier_rejects_non_packet_evidence() -> None:
+    run = {
+        "question_id": "Q1",
+        "ok": True,
+        "answer": "unsupported prose",
+        "verification_schema": KNOWLEDGE_VERIFICATION_SCHEMA,
+        "dataset_evidence": [{"tool": "get_strategy_knowledge", "result": "bad"}],
+    }
+
+    assert is_knowledge_run_verified(run) is False
+    assert "no deterministic knowledge packet" in find_knowledge_run_error(run)
+
+
+def test_viking_effects_use_the_combat_form_instead_of_placeholder_unit() -> None:
+    run = run_knowledge_query(
+        {
+            "id": "Q1",
+            "question": "What are the Viking Fighter air weapon stats?",
+            "entities": ["Viking"],
+            "needs": ["effects"],
+        },
+        race="terran",
+    )
+
+    assert is_knowledge_run_verified(run) is True
+    fact = run["dataset_evidence"][0]["result"]["entity_facts"][0]
+    assert fact["effect_source"] == "VikingFighter"
+    assert fact["stats"]["max_health"] == 135.0
+    assert fact["stats"]["attack_type"] == "Air"
+    assert fact["weapons"][0]["range"] == 9.0
+
+
 def test_current_fallback_renderer_includes_full_army_group_state() -> None:
     record = _current_record()
     commander_interaction = record["interactions"][-1]
@@ -1121,6 +1369,32 @@ def test_snapshot_writes_only_strategy_markdown() -> None:
             assert "immutable" in str(exc)
         else:
             raise AssertionError("an evaluated candidate directory must not be overwritten")
+    finally:
+        if root.exists():
+            shutil.rmtree(root)
+
+
+def test_snapshot_can_preserve_retry_exhausted_candidate_with_warning() -> None:
+    root = Path(__file__).resolve().parents[1] / "tmp" / f"evol-snapshot-{uuid.uuid4().hex}"
+    source = root / "tank"
+    output = root / "tank_opt1"
+    invalid_strategy = VALID_STRATEGY + "\n* Runtime Control: Address units by unit tags.\n"
+    try:
+        source.mkdir(parents=True)
+        changes = save_snapshot(
+            source_dir=source,
+            files={"strategy.md": invalid_strategy},
+            output_dir=output,
+            source_info={},
+            race="terran",
+            allow_validation_warning=True,
+        )
+
+        assert changes[0]["applied"] is True
+        assert "units by tag" in changes[0]["validation_warning"]
+        assert (output / "strategy.md").read_text(encoding="utf-8").strip() == (
+            invalid_strategy.strip()
+        )
     finally:
         if root.exists():
             shutil.rmtree(root)

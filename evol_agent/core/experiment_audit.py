@@ -95,13 +95,16 @@ def _summarize_records(
     model: str,
     label: str,
     cache: MatchSummaryCache,
+    audit_focus: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not records:
         return []
     summaries: dict[int, dict[str, Any]] = {}
     pending: list[tuple[int, GameEvidence]] = []
     for index, record in enumerate(records, 1):
-        cached = cache.get(
+        # Focused audit summaries are experiment-specific and must never reuse a
+        # generic summary that may have omitted the pre-registered mechanism.
+        cached = None if audit_focus else cache.get(
             record,
             strategy_name=strategy_name,
             race=race,
@@ -137,6 +140,7 @@ def _summarize_records(
                 game_index=index,
                 model=model,
                 prefix=f"    [{label}: {strategy_name}] ",
+                audit_focus=audit_focus,
             ): index
             for index, record in pending
         }
@@ -150,7 +154,7 @@ def _summarize_records(
                     "summary": analysis.raw,
                     "errors": errors,
                 }
-                if ok:
+                if ok and not audit_focus:
                     cache.put(
                         records[index - 1],
                         strategy_name=strategy_name,
@@ -230,6 +234,10 @@ Required reasoning discipline:
   change. Use underpowered when the strategy changed but the realized mechanism
   was too weak or inconsistent. Use unknown when the records cannot establish it.
 - supported and contradicted are valid only when implementation_verdict=implemented.
+- Candidate summaries may contain mechanism_probe. Treat an observed probe as
+  implementation evidence only for that match. not_observed and unknown never
+  prove contradiction. Require multiple observed candidate probes before using
+  implementation_verdict=implemented.
 
 Executor capability manifest:
 {json.dumps(capability_manifest, ensure_ascii=False, indent=2)}
@@ -272,7 +280,33 @@ Return JSON only:
 """
 
 
-def _normalize_audit(raw: Any) -> dict[str, Any]:
+def _observed_mechanism_probe_count(
+    candidate_summaries: list[dict[str, Any]] | None,
+) -> int:
+    count = 0
+    for item in candidate_summaries or []:
+        summary = item.get("summary") if isinstance(item, dict) else None
+        probe = summary.get("mechanism_probe") if isinstance(summary, dict) else None
+        if not isinstance(probe, dict) or probe.get("status") != "observed":
+            continue
+        observations = [
+            row
+            for row in (probe.get("observations") or [])
+            if isinstance(row, dict)
+            and str(row.get("fact") or "").strip()
+            and row.get("time_s") not in (None, "")
+        ]
+        if observations:
+            count += 1
+    return count
+
+
+def _normalize_audit(
+    raw: Any,
+    *,
+    candidate_summaries: list[dict[str, Any]] | None = None,
+    require_observed_probes: bool = False,
+) -> dict[str, Any]:
     payload = raw.get("audit") if isinstance(raw, dict) and isinstance(raw.get("audit"), dict) else raw
     if not isinstance(payload, dict):
         payload = {}
@@ -282,12 +316,25 @@ def _normalize_audit(raw: Any) -> dict[str, Any]:
     hypothesis = str(payload.get("hypothesis_verdict") or "inconclusive").strip()
     if hypothesis not in _HYPOTHESIS_VERDICTS:
         hypothesis = "inconclusive"
-    if implementation != "implemented" and hypothesis in {"supported", "contradicted"}:
-        hypothesis = "not_tested"
 
     def rows(name: str) -> list[Any]:
         value = payload.get(name)
         return list(value) if isinstance(value, list) else []
+
+    observed_probe_count = _observed_mechanism_probe_count(candidate_summaries)
+    evidence_limits = [str(item) for item in rows("evidence_limits") if str(item)]
+    if (
+        require_observed_probes
+        and implementation == "implemented"
+        and observed_probe_count < 2
+    ):
+        implementation = "underpowered" if observed_probe_count == 1 else "unknown"
+        evidence_limits.append(
+            "implementation requires observed mechanism probes in at least two "
+            f"candidate matches; found {observed_probe_count}"
+        )
+    if implementation != "implemented" and hypothesis in {"supported", "contradicted"}:
+        hypothesis = "not_tested"
 
     return {
         "implementation_verdict": implementation,
@@ -295,7 +342,7 @@ def _normalize_audit(raw: Any) -> dict[str, Any]:
         "mechanism_evidence": rows("mechanism_evidence"),
         "combat_evidence": rows("combat_evidence"),
         "runtime_findings": [str(item) for item in rows("runtime_findings") if str(item)],
-        "evidence_limits": [str(item) for item in rows("evidence_limits") if str(item)],
+        "evidence_limits": evidence_limits,
         "lesson": str(payload.get("lesson") or "").strip(),
     }
 
@@ -366,6 +413,33 @@ def audit_experiment(
         label="parent-new",
         cache=summary_cache,
     )
+    audit_focus = {
+        key: value
+        for key, value in {
+            "minimum_material_change": (
+                (experiment_spec.get("mechanism_prediction") or {}).get(
+                    "minimum_material_change"
+                )
+                if isinstance(experiment_spec.get("mechanism_prediction"), dict)
+                else ""
+            ),
+            "expected_change": (
+                (experiment_spec.get("mechanism_prediction") or {}).get(
+                    "expected_change"
+                )
+                if isinstance(experiment_spec.get("mechanism_prediction"), dict)
+                else ""
+            ),
+            "material_behavior_change": (
+                (experiment_spec.get("intervention_package") or {}).get(
+                    "material_behavior_change"
+                )
+                if isinstance(experiment_spec.get("intervention_package"), dict)
+                else ""
+            ),
+        }.items()
+        if str(value or "").strip()
+    }
     candidate_summaries = _summarize_records(
         candidate_records,
         strategy_name=candidate_strategy_name,
@@ -373,6 +447,7 @@ def audit_experiment(
         model=selected_model,
         label="candidate",
         cache=summary_cache,
+        audit_focus=audit_focus,
     )
     raw = call_json_llm(
         build_experiment_audit_prompt(
@@ -388,7 +463,11 @@ def audit_experiment(
         model=selected_model,
         is_reasoning=True,
     )
-    return _normalize_audit(raw)
+    return _normalize_audit(
+        raw,
+        candidate_summaries=candidate_summaries,
+        require_observed_probes=bool(audit_focus),
+    )
 
 
 __all__ = ["audit_experiment", "build_experiment_audit_prompt"]

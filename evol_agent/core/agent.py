@@ -79,6 +79,7 @@ def _base_run_context(
                 else ""
             ),
             "prior_experiences": list(request.prior_experiences),
+            "retry_feedback": list(request.retry_feedback),
         },
         "selected_group": {
             "strategy_name": strategy_name,
@@ -311,6 +312,13 @@ class EvolAgent:
             }
         else:
             analysis_prior_experiences = list(request.prior_experiences)
+            if request.retry_feedback:
+                analysis_prior_experiences.append(
+                    {
+                        "kind": "generation_retry_feedback",
+                        "errors": list(request.retry_feedback),
+                    }
+                )
             if analysis_seed is not None and stage_reached(
                 analysis_seed.stage, "analysis_complete"
             ):
@@ -349,6 +357,7 @@ class EvolAgent:
                 match_summary_cache_path=request.match_summary_cache_path,
                 prior_experiences=analysis_prior_experiences,
                 capability_manifest=capability_manifest,
+                retry_feedback=request.retry_feedback,
             )
             digests = analysis_result.game_digests
             battle_analysis = analysis_result.battle_analysis
@@ -516,6 +525,13 @@ class EvolAgent:
         candidate_hash = hashlib.sha256(
             improvement.files["strategy.md"].encode("utf-8")
         ).hexdigest()[:16]
+        validation_fallback = improvement.analysis.get("validation_fallback")
+        allow_validation_warning = bool(
+            isinstance(validation_fallback, dict)
+            and str(validation_fallback.get("status") or "").startswith(
+                "accepted_after_"
+            )
+        )
         changes = save_snapshot(
             source_dir=skill_dir,
             files=improvement.files,
@@ -530,6 +546,7 @@ class EvolAgent:
                 "main_lesson": improvement.analysis.get("primary_change", ""),
             },
             race=race,
+            allow_validation_warning=allow_validation_warning,
         )
         checkpoint.mark_candidate_complete()
         _save_logs(

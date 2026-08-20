@@ -20,7 +20,7 @@ from .sc2_data_store import (
 DEFAULT_DATA_PATH = DEFAULT_DATABASE_PATH
 
 
-KNOWLEDGE_PACKET_SCHEMA = "strategy_knowledge.v2"
+KNOWLEDGE_PACKET_SCHEMA = "strategy_knowledge.v3"
 GENERIC_COMMAND_ABILITIES = {
     "attackattack",
     "holdpositionhold",
@@ -94,6 +94,24 @@ ENTITY_ALIASES = {
     "战列巡航舰": "Battlecruiser",
     "大和战舰": "Battlecruiser",
     "兴奋剂": "Stimpack",
+    "Siege Mode": "SIEGEMODE_SIEGEMODE",
+    "siege mode": "SIEGEMODE_SIEGEMODE",
+    "Viking Fighter mode": "VikingFighter",
+    "viking fighter mode": "VikingFighter",
+}
+
+_GENERIC_ENTITY_MENTIONS = {
+    "ability",
+    "behavior",
+    "mode",
+    "movement",
+    "runtime",
+    "targeting",
+    "transformation",
+}
+
+_EFFECT_FORM_ALIASES = {
+    "Viking": "VikingFighter",
 }
 
 
@@ -135,14 +153,20 @@ def _fuzzy_entity(name: str, data_path: str | Path) -> dict[str, Any] | None:
     store = get_dataset_store(data_path)
     mention = ENTITY_ALIASES.get(name.strip(), name)
     wanted = normalize_key(mention)
+    if wanted in _GENERIC_ENTITY_MENTIONS:
+        return None
     ranked: list[tuple[float, dict[str, Any]]] = []
     for section in ALL_SECTIONS:
         for entity in store.data.get(section, []):
             candidate = normalize_key(entity.get("name"))
-            score = SequenceMatcher(None, wanted, candidate).ratio()
-            if wanted and wanted in candidate:
-                score += 0.25
-            if score >= 0.45:
+            similarity = SequenceMatcher(None, wanted, candidate).ratio()
+            contains = bool(
+                wanted
+                and candidate
+                and (wanted in candidate or candidate in wanted)
+            )
+            if similarity >= 0.72 or (contains and similarity >= 0.60):
+                score = similarity + (0.10 if contains else 0.0)
                 ranked.append(
                     (
                         score,
@@ -237,10 +261,16 @@ def _entity_fact(
     store = get_dataset_store(data_path)
     section = entity_ref["section"]
     entity = store.get_entity(section, entity_ref["name"]) or {}
+    effect_entity = entity
+    effect_source = _EFFECT_FORM_ALIASES.get(str(entity.get("name") or ""))
+    if section == "Unit" and "effects" in needs and effect_source:
+        effect_entity = store.get_entity(section, effect_source) or entity
     fact: dict[str, Any] = {
         "section": section,
         "name": entity.get("name") or entity_ref["name"],
     }
+    if effect_entity is not entity:
+        fact["effect_source"] = effect_entity.get("name") or effect_source
     if entity.get("race"):
         fact["race"] = entity.get("race")
     if section == "Unit" and "requirements" in needs:
@@ -252,12 +282,12 @@ def _entity_fact(
         }
     if section == "Unit" and "effects" in needs:
         fact["stats"] = {
-            key: entity.get(key)
+            key: effect_entity.get(key)
             for key in ("max_health", "armor", "speed", "attributes", "attack_type")
-            if entity.get(key) is not None
+            if effect_entity.get(key) is not None
         }
         weapons = []
-        for weapon in entity.get("weapons") or []:
+        for weapon in effect_entity.get("weapons") or []:
             weapons.append(
                 {
                     key: weapon.get(key)
@@ -592,11 +622,32 @@ def build_strategy_knowledge(
     """Build one complete knowledge packet without an LLM planning loop."""
     question = str(item.get("question") or "").strip()
     needs = infer_knowledge_needs(question, item.get("needs"))
-    entities = resolve_knowledge_entities(
-        question,
-        item.get("entities"),
-        data_path=data_path,
-    )
+    requested_entities = _clean_strings(item.get("entities"))
+    entity_resolution: list[dict[str, Any]] = []
+    entities: list[dict[str, Any]] = []
+    seen_entities: set[tuple[str, str]] = set()
+    if requested_entities:
+        for mention in requested_entities:
+            resolved = resolve_knowledge_entities(
+                question,
+                [mention],
+                data_path=data_path,
+            )
+            if not resolved:
+                entity_resolution.append(
+                    {"requested": mention, "resolved": False, "entity": None}
+                )
+                continue
+            entity = resolved[0]
+            entity_resolution.append(
+                {"requested": mention, "resolved": True, "entity": entity}
+            )
+            key = (str(entity.get("section") or ""), normalize_key(entity.get("name")))
+            if key not in seen_entities:
+                seen_entities.add(key)
+                entities.append(entity)
+    else:
+        entities = resolve_knowledge_entities(question, data_path=data_path)
     entity_names = [entity["name"] for entity in entities]
     calculation_requests = [
         request
@@ -612,13 +663,23 @@ def build_strategy_knowledge(
         ).strip()
         for request in calculation_requests
     ]
+    requested_actions = list(
+        dict.fromkeys(
+            [
+                str(action).strip()
+                for action in (item.get("actions") or [])
+                if str(action).strip()
+            ]
+            + calculation_actions
+        )
+    )
     action_facts = (
         _action_facts(
             entity_names,
             race,
-            requested_actions=calculation_actions,
+            requested_actions=requested_actions,
         )
-        if "requirements" in needs or calculation_requests
+        if "requirements" in needs or requested_actions
         else []
     )
     action_entity_names = {
@@ -659,9 +720,36 @@ def build_strategy_knowledge(
         calculation_requests, action_facts
     )
 
+    unresolved_entities = [
+        str(row.get("requested") or "")
+        for row in entity_resolution
+        if not row.get("resolved")
+    ]
+    resolved_action_keys = {
+        normalize_key(row.get("action")) for row in action_facts if row.get("action")
+    }
+    unresolved_actions = [
+        action
+        for action in requested_actions
+        if normalize_key(action) not in resolved_action_keys
+        and not any(
+            normalize_key(action)
+            == normalize_key(re.sub(r"^(train|build|research|morph)_?", "", str(row.get("action") or "")))
+            for row in action_facts
+        )
+    ]
+
     missing: list[str] = []
-    if not entities:
+    if not entities and not action_facts:
         missing.append("No canonical Unit or Upgrade entity could be resolved.")
+    if unresolved_entities:
+        missing.append(
+            "Unresolved requested entities: " + ", ".join(unresolved_entities)
+        )
+    if unresolved_actions:
+        missing.append(
+            "Unresolved requested actions: " + ", ".join(unresolved_actions)
+        )
     for need in needs:
         if need in {"synergy", "counters"} and not any(
             row.get("relation") in RELATIONS_BY_NEED[need] for row in relations
@@ -674,6 +762,71 @@ def build_strategy_knowledge(
             )
             if not has_effects:
                 missing.append("No structured effects facts were found for the resolved entities.")
+
+    need_resolution = {
+        "requirements": bool(
+            action_facts
+            or production
+            or any(row.get("cost") or row.get("tech_chain") for row in entity_facts)
+        ),
+        "effects": bool(abilities or control_effects or relations)
+        or any(
+            row.get("stats") or row.get("weapons") or row.get("ability")
+            for row in entity_facts
+        ),
+        "synergy": any(
+            row.get("relation") in RELATIONS_BY_NEED["synergy"] for row in relations
+        ),
+        "counters": any(
+            row.get("relation") in RELATIONS_BY_NEED["counters"] for row in relations
+        ),
+    }
+    for need in needs:
+        if not need_resolution.get(need, False) and not any(
+            f"structured {need}" in item or f"structured {need} facts" in item
+            for item in missing
+        ):
+            missing.append(f"No structured {need} facts were found for the request.")
+
+    folded_question = question.casefold()
+    unsupported_claims: list[str] = []
+    if "movement mode" in folded_question or re.search(
+        r"\b(?:push|regroup|hold)\s+(?:mode|movement)\b", folded_question
+    ):
+        unsupported_claims.append(
+            "runtime movement-mode behavior is not contained in static SC2 knowledge"
+        )
+    if re.search(
+        r"\b(?:prioriti[sz]\w*|priority|prefer\w*)\b.{0,80}\b(?:attack|target)\w*\b|"
+        r"\b(?:attack|target)\w*\b.{0,80}\b(?:prioriti[sz]\w*|priority|prefer\w*|first)\b",
+        folded_question,
+    ):
+        unsupported_claims.append(
+            "unit target-priority behavior is not contained in static SC2 knowledge"
+        )
+    if re.search(
+        r"(?:exact\s+)?(?:transformation|transform|morph).{0,20}\btime\b|"
+        r"\btime\b.{0,20}(?:transformation|transform|morph)",
+        folded_question,
+    ):
+        unsupported_claims.append(
+            "exact transformation duration is not available in the resolved structured facts"
+        )
+    for claim in unsupported_claims:
+        missing.append("Unsupported requested fact: " + claim)
+
+    coverage = {
+        "requested_entities": requested_entities,
+        "entity_resolution": entity_resolution,
+        "requested_actions": requested_actions,
+        "need_resolution": {
+            need: need_resolution.get(need, False) for need in needs
+        },
+        "unresolved_entities": unresolved_entities,
+        "unresolved_actions": unresolved_actions,
+        "unsupported_claims": unsupported_claims,
+        "complete": not missing and not calculation_errors,
+    }
 
     return {
         "schema": KNOWLEDGE_PACKET_SCHEMA,
@@ -689,6 +842,7 @@ def build_strategy_knowledge(
         "calculations": calculations,
         "requested_calculation_count": len(calculation_requests),
         "calculation_errors": calculation_errors,
+        "coverage": coverage,
         "missing": missing,
     }
 

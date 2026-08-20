@@ -59,17 +59,6 @@ def _observation(*, marine_count: int, attacking: bool) -> dict:
         "movement_mode": "push",
         "retreat_ratio": None,
     }
-
-
-def test_evolution_batch_directories_are_discovered(tmp_path: Path) -> None:
-    evolution_batch = tmp_path / "ev_example_g000_cand"
-    record_dir = evolution_batch / "match_0"
-    record_dir.mkdir(parents=True)
-    record = record_dir / "match.json"
-    record.write_text("{}", encoding="utf-8")
-
-    assert discover_record_files([tmp_path]) == [record]
-    assert batch_name(record) == evolution_batch.name
     return {
         "economy": {"own_base_count": 1},
         "production": {
@@ -112,6 +101,17 @@ def test_evolution_batch_directories_are_discovered(tmp_path: Path) -> None:
             "zone_topology": {"zones": []},
         },
     }
+
+
+def test_evolution_batch_directories_are_discovered(tmp_path: Path) -> None:
+    evolution_batch = tmp_path / "ev_example_g000_cand"
+    record_dir = evolution_batch / "match_0"
+    record_dir.mkdir(parents=True)
+    record = record_dir / "match.json"
+    record.write_text("{}", encoding="utf-8")
+
+    assert discover_record_files([tmp_path]) == [record]
+    assert batch_name(record) == evolution_batch.name
 
 
 def test_current_commander_record_uses_original_five_metrics(tmp_path: Path) -> None:

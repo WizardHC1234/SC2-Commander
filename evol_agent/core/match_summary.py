@@ -85,6 +85,38 @@ def _compact_evidence_row(raw: Any, fields: tuple[str, ...]) -> dict[str, Any] |
     return row or None
 
 
+def _compact_mechanism_probe(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    status = str(raw.get("status") or "unknown").strip().lower()
+    if status not in {"observed", "not_observed", "unknown"}:
+        status = "unknown"
+    observations: list[dict[str, Any]] = []
+    for item in raw.get("observations") or []:
+        if not isinstance(item, dict):
+            continue
+        fact = str(item.get("fact") or "").strip()
+        if not fact:
+            continue
+        row: dict[str, Any] = {"fact": fact}
+        if item.get("time_s") not in (None, ""):
+            row["time_s"] = item.get("time_s")
+        observations.append(row)
+    evidence_limit = str(raw.get("evidence_limit") or "").strip()
+    if status == "observed" and not any(
+        observation.get("time_s") not in (None, "") for observation in observations
+    ):
+        status = "unknown"
+        evidence_limit = evidence_limit or (
+            "observed mechanism evidence had no recorded timestamp"
+        )
+    return {
+        "status": status,
+        "observations": observations,
+        "evidence_limit": evidence_limit,
+    }
+
+
 def _normalize_summary_payload(
     result: Any,
     *,
@@ -132,6 +164,8 @@ def _normalize_summary_payload(
             "enemy_observed",
             "enemy_truth",
             "own_force_after",
+            "runtime_override",
+            "loss_timing",
             "outcome",
         )
         major_engagements = [
@@ -146,13 +180,17 @@ def _normalize_summary_payload(
             normalized_duration = int(normalized_duration)
     except (TypeError, ValueError):
         normalized_duration = duration_s
-    return {
+    payload = {
         "result": str(result.get("result") or manifest.get("result") or "").strip(),
         "duration_s": normalized_duration,
         "events": events,
         "enemy_pressure_events": pressure_events,
         "major_engagements": major_engagements,
     }
+    mechanism_probe = _compact_mechanism_probe(result.get("mechanism_probe"))
+    if mechanism_probe is not None:
+        payload["mechanism_probe"] = mechanism_probe
+    return payload
 
 
 def _degraded_payload(
@@ -180,6 +218,7 @@ def run_fixed_match_summary(
     game_index: int,
     model: str,
     prefix: str,
+    audit_focus: dict[str, Any] | None = None,
 ) -> tuple[GameDigest, BattleAnalysis, bool, list[str], list[dict[str, Any]]]:
     """Summarize one complete fixed timeline with one structured LLM call."""
     record_id = f"match_{game_index:03d}"
@@ -200,6 +239,7 @@ def run_fixed_match_summary(
             race=race,
             record_manifest=manifest,
             match_timeline=timeline,
+            audit_focus=audit_focus,
         ),
         model=model,
         is_reasoning=MATCH_SUBAGENT_ENABLE_REASONING,

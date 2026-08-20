@@ -175,24 +175,35 @@ def validate_strategy_supply_budget(content: str, *, race: str) -> Optional[str]
         match = _END_STATE_BULLET.match(raw_line.strip())
         if not match:
             continue
-        total = 0.0
-        breakdown: list[str] = []
+        # The same end-state paragraph may restate an earlier attack or recovery
+        # gate. Those counts describe a subset of the final army, not additional
+        # units. Keep the largest stated target for each canonical unit instead
+        # of summing repeated mentions.
+        targets: dict[str, tuple[int, float, str]] = {}
         for count_text, entity_text in _COUNTED_ENTITY.findall(match.group(1)):
-            supply = next(
+            entity_key = next(
                 (
-                    supply_by_name[key]
+                    key
                     for key in _singular_entity_keys(entity_text)
                     if key in supply_by_name
                 ),
                 None,
             )
-            if supply is None:
+            if entity_key is None:
                 continue
             count = int(count_text)
+            supply = supply_by_name[entity_key]
+            previous = targets.get(entity_key)
+            if previous is None or count > previous[0]:
+                targets[entity_key] = (count, supply, entity_text.strip())
+
+        total = 0.0
+        breakdown: list[str] = []
+        for count, supply, entity_text in targets.values():
             subtotal = count * supply
             total += subtotal
             subtotal_text = str(int(subtotal)) if subtotal.is_integer() else str(subtotal)
-            breakdown.append(f"{count} {entity_text.strip()}={subtotal_text}")
+            breakdown.append(f"{count} {entity_text}={subtotal_text}")
         if total > 200:
             total_text = str(int(total)) if total.is_integer() else str(total)
             return (

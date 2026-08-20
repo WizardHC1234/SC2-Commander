@@ -96,6 +96,12 @@ engagement:
 6. Treat scouting and information as valuable only when the observation changes a
    composition, production, timing, readiness, commitment, or recovery decision.
 
+Do not select construction of static defensive structures as the primary evolution
+mechanism. Static defenses cannot accompany the mobile army and the executor places
+them around owned bases rather than arbitrary forward staging zones. Existing static
+defenses may appear in evidence, but improvements must come from the mobile fighting
+package, an executable combat control, readiness, production, timing, or recovery.
+
 ## Reached-Plan Check
 
 Before selecting a production, economy, or reach-gate timing hypothesis, check
@@ -133,6 +139,7 @@ def build_fixed_match_summary_prompt(
     race: str,
     record_manifest: dict,
     match_timeline: str,
+    audit_focus: dict[str, Any] | None = None,
 ) -> str:
     """Build one factual summary prompt with a stable cacheable prefix.
 
@@ -142,6 +149,34 @@ def build_fixed_match_summary_prompt(
     Keep fixed instructions before record-specific metadata and timeline so
     providers with prefix caching can reuse the long prefix.
     """
+    focus = audit_focus if isinstance(audit_focus, dict) else {}
+    focus_instructions = ""
+    probe_schema = ""
+    if focus:
+        focus_instructions = f"""
+This summary is also being used for a post-experiment mechanism audit. Inspect
+the complete timeline specifically for the following pre-registered material
+change. This does not authorize diagnosis: report only direct observations that
+support, fail to show, or leave the material change unknown.
+
+Audit focus:
+{json.dumps(focus, ensure_ascii=False, indent=2)}
+
+Populate mechanism_probe with timestamped facts. Use status=observed only when
+the timeline directly shows the minimum material change. Use not_observed only
+when the complete relevant window is present and the condition is absent. Use
+unknown when sampling or missing fields prevent a determination. Do not infer
+implementation from strategy text or final match result.
+"""
+        probe_schema = """,
+  "mechanism_probe": {
+    "status": "observed|not_observed|unknown",
+    "observations": [
+      {"time_s": 0, "fact": "directly recorded material-change evidence"}
+    ],
+    "evidence_limit": "missing field or sampling limitation, or empty"
+  }"""
+
     return f"""You summarize one StarCraft II match for EvolAgent.
 
 Read the complete match timeline from beginning to end. Compress it into a factual interaction timeline.
@@ -165,9 +200,14 @@ record supports them:
   a defending army. Record the observable cue separately from Replay truth.
 - major_engagements: major army contacts, including both forces before/after the
   contact and whether the force held, broke through, withdrew, or was destroyed.
+  When a runtime auto-retreat appears, record the force at the last pre-contact row,
+  at the retreat trigger, and after retreat when available. State whether most losses
+  happened before or after the trigger. Never describe auto-retreat as the cause of
+  the collapse when the recorded force had already collapsed before it fired.
 
 Do not infer an attack merely because the opponent owned an army. If the record
 does not establish pressure or a major engagement, return an empty list.
+{focus_instructions}
 
 Return one JSON object with exactly these top-level fields:
 {{
@@ -201,9 +241,11 @@ Return one JSON object with exactly these top-level fields:
       "enemy_observed": "what Commander knew",
       "enemy_truth": "Replay-only force when available",
       "own_force_after": "next recorded post-contact force",
+      "runtime_override": "auto-retreat trigger and force at trigger, or empty",
+      "loss_timing": "losses_before_override|override_before_losses|not_observed",
       "outcome": "breakthrough|held|withdrawal|army_broken|unclear"
     }}
-  ]
+  ]{probe_schema}
 }}
 
 Omit any event field that the corresponding timeline row does not support. Do not include an action wrapper.
@@ -271,6 +313,20 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
             if item.get("kind") == "mechanism_search_policy":
                 experience_lines.append(
                     json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+                )
+                continue
+            if item.get("kind") == "generation_retry_feedback":
+                errors = [
+                    str(error).strip()
+                    for error in (item.get("errors") or [])
+                    if str(error).strip()
+                ]
+                experience_lines.append(
+                    json.dumps(
+                        {"kind": "generation_retry_feedback", "errors": errors[-4:]},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
                 )
                 continue
             keep = (
@@ -669,6 +725,13 @@ candidate proves only that the concrete candidate did not beat its Champion unde
 the selection rule. It does not by itself prove that the causal direction was
 wrong or that a stronger coherent implementation would fail.
 
+An accepted score does not establish the selected causal mechanism. When an
+experiment is accepted by score but has implementation_verdict=implemented and
+hypothesis_verdict=contradicted, preserve the accepted strategy as Champion but
+treat the reason for its gain as unknown. Do not strengthen, increase the dose of,
+or relabel that contradicted mechanism in the next experiment. Select a materially
+different causal mechanism.
+
 Use prior experiment fields as follows:
 - implementation_verdict=underpowered, execution_invalid, or unknown means the
   hypothesis was not adequately tested;
@@ -693,6 +756,30 @@ select a different family; after an implemented experiment is contradicted, bloc
 that family; after execution_invalid, block every retry that depends on the same
 unsupported Commander/runtime capability. Do not evade the policy by renaming a
 materially equivalent mechanism.
+
+Use structured engagement timing as a hard causal constraint. When an engagement
+has loss_timing=losses_before_override, an auto-retreat or other runtime override
+may be recorded as a consequence but cannot be selected as the cause of that
+collapse. A runtime override may be causal only when evidence shows
+override_before_losses.
+
+Attribute every auto-retreat to the exact army group that triggered it. The global
+living army inventory is not the affected force. A reinforcement group retreating
+with one or a few units is expected survival behavior and is not evidence that the
+main force was auto-retreated. Before choosing inspect_runtime for auto-retreat,
+cite at least two distinct failed matches whose evidence identifies main_force or
+group_0 at the trigger and explicitly states loss_timing=override_before_losses.
+Write that timing token verbatim in priority_problem.evidence and
+failure_mode_analysis.covered_failures. If group attribution or causal ordering is
+missing, request more evidence or choose a supported strategy-fixable contributor;
+do not escalate a runtime defect.
+
+Before selecting one primary mechanism, enumerate the failed matches it explains,
+the failed matches it does not explain, and concrete counterexamples. A proposed
+primary mechanism must cover at least two distinct failed matches. If losses belong
+to materially different failure modes and no mechanism covers a repeated subset,
+request more matches or select an earlier shared prerequisite instead of forcing
+them into one unit-counter explanation.
 
 When repeated decisive fights fail after the current attack gate is met or
 exceeded, explicitly consider unit composition / support balance, matchup-dependent
@@ -801,7 +888,10 @@ Return one JSON object only:
       "survival_prerequisite":"whether the strategy survives until its intended power spike and supporting evidence",
       "opponent_pressure_pattern":"cross-match pressure pattern or why it is not decisive",
       "matchup_assessment":"composition, counters, support, upgrades, and engagement conditions across outcomes",
-      "counterexample_check":"why wins or resolved cases do not refute the selected failure mode"
+      "counterexample_check":"why wins or resolved cases do not refute the selected failure mode",
+      "covered_failures":["Game 2 @ 390s: exact failure explained by this mechanism","Game 5 @ 510s: second independent failure explained"],
+      "unexplained_failures":["Game 7 @ 440s: materially different failure not explained, or empty when all are covered"],
+      "counterexamples":["Game 1 @ 620s: strongest concrete counterexample and why it does not disprove the selected mechanism"]
     }},
     "priority_alignment":{{
       "selected_priority":"the highest evidence-supported level from SC2 Strategic Priority",

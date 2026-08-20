@@ -19,6 +19,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--matches", type=int, default=10)
     parser.add_argument("--candidate-matches", type=int, default=10)
     parser.add_argument(
+        "--candidate-generation-retries",
+        type=int,
+        default=3,
+        help="Retry a failed candidate-generation attempt this many times with its failure feedback",
+    )
+    parser.add_argument(
         "--confirmation-matches",
         type=int,
         default=4,
@@ -55,6 +61,7 @@ def main() -> None:
         difficulties=difficulties,
         matches_per_batch=args.matches,
         candidate_matches=args.candidate_matches,
+        candidate_generation_retries=args.candidate_generation_retries,
         confirmation_matches=args.confirmation_matches,
         concurrency=args.concurrency,
         mastery_score_threshold=args.mastery_score_threshold,

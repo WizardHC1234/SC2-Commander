@@ -1762,6 +1762,17 @@ def evaluate_match(
         "map_name": str(metadata.get("map_name") or ""),
         "result": str(metadata.get("result") or ""),
         "duration_s": match.end_time,
+        "record_count": (
+            int(number(metadata.get("record_count")))
+            if metadata.get("record_count") is not None
+            else None
+        ),
+        "llm_interaction_count": (
+            int(number(metadata.get("llm_interaction_count")))
+            if metadata.get("llm_interaction_count") is not None
+            else None
+        ),
+        "commander_decision_count": len(logical_army_decision_snapshots(match)),
         "economy_completion": economy_completion,
         "technology_completion": technology_completion,
         "army_completion": army_completion,
@@ -1850,6 +1861,9 @@ MAIN_METRICS = (
     "strict_requirement_pass_rate",
     "gate_reached",
     "duration_s",
+    "record_count",
+    "llm_interaction_count",
+    "commander_decision_count",
 )
 
 

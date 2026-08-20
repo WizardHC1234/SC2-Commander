@@ -43,7 +43,9 @@ from ..sc2_data_agent import (
 )
 
 
-_ANALYSIS_ATTEMPTS = 2
+# Each rejection is returned verbatim in the next prompt, so allow enough
+# attempts for the model to repair a malformed or weakly grounded decision.
+_ANALYSIS_ATTEMPTS = 4
 _KNOWLEDGE_NEEDS = {"effects", "synergy", "counters", "requirements"}
 _FINAL_NEXT_ACTIONS = frozenset(
     {
@@ -400,7 +402,7 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
 
 def _normalize_failure_mode_analysis(
     raw: Any,
-) -> tuple[dict[str, str] | None, str]:
+) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(raw, dict):
         return None, "failure_mode_analysis must be an object"
     fields = (
@@ -414,6 +416,23 @@ def _normalize_failure_mode_analysis(
     missing = [field for field, value in normalized.items() if not value]
     if missing:
         return None, "failure_mode_analysis requires " + ", ".join(missing)
+    covered_failures = _clean_strings(raw.get("covered_failures"), limit=10)
+    unexplained_failures = _clean_strings(raw.get("unexplained_failures"), limit=10)
+    counterexamples = _clean_strings(raw.get("counterexamples"), limit=10)
+    if len({item.casefold() for item in covered_failures}) < 2:
+        return None, (
+            "failure_mode_analysis.covered_failures requires at least two "
+            "distinct match failures for a repeated primary mechanism"
+        )
+    if not counterexamples:
+        return None, "failure_mode_analysis.counterexamples requires at least one item"
+    normalized.update(
+        {
+            "covered_failures": covered_failures,
+            "unexplained_failures": unexplained_failures,
+            "counterexamples": counterexamples,
+        }
+    )
     return normalized, ""
 
 
@@ -462,6 +481,96 @@ def _normalize_retrieval_assessment(
         },
         "",
     )
+
+
+_STATIC_DEFENSE_DIRECTION_TERMS = (
+    "missile turret",
+    "photon cannon",
+    "spore crawler",
+    "spine crawler",
+    "bunker",
+    "static defense",
+    "static detection",
+    "防空塔",
+    "光子炮",
+    "地堡",
+    "静态防御",
+)
+
+
+def _static_defense_direction_error(plan: dict[str, Any] | None) -> str:
+    """Keep static base structures out of the selected evolution mechanism."""
+    if not isinstance(plan, dict):
+        return ""
+    selected_text = " ".join(
+        [
+            str(plan.get("direction") or ""),
+            str(plan.get("material_behavior_change") or ""),
+            *[
+                " ".join(
+                    [
+                        str(item.get("change") or ""),
+                        str(item.get("why_required") or ""),
+                    ]
+                )
+                for item in (plan.get("coordinated_changes") or [])
+                if isinstance(item, dict)
+            ],
+        ]
+    ).casefold()
+    if any(term in selected_text for term in _STATIC_DEFENSE_DIRECTION_TERMS):
+        return (
+            "the selected optimization direction cannot use static defensive "
+            "structures as its primary mechanism; choose a mobile army, executable "
+            "combat control, readiness, production, timing, or recovery change"
+        )
+    return ""
+
+
+def _runtime_attribution_error(
+    *,
+    next_action: str,
+    action_reason: str,
+    priority: dict[str, Any] | None,
+    hypothesis: str,
+    failure_mode_analysis: dict[str, Any] | None,
+) -> str:
+    """Require group-level causal evidence before escalating auto-retreat."""
+    if next_action != "inspect_runtime":
+        return ""
+    evidence = _clean_strings((priority or {}).get("evidence"), limit=20)
+    covered = _clean_strings(
+        (failure_mode_analysis or {}).get("covered_failures"), limit=20
+    )
+    combined = " ".join([action_reason, hypothesis, *evidence, *covered]).casefold()
+    if "auto-retreat" not in combined and "auto retreat" not in combined:
+        return ""
+
+    causal_items: list[str] = []
+    for item in [*evidence, *covered]:
+        folded = item.casefold()
+        identifies_main_force = (
+            "main_force" in folded
+            or "main force" in folded
+            or "group_0" in folded
+        )
+        establishes_order = (
+            "loss_timing=override_before_losses" in folded
+            or "override_before_losses" in folded
+            or "retreat before losses" in folded
+            or "retreat preceded losses" in folded
+        )
+        if identifies_main_force and establishes_order:
+            causal_items.append(item)
+    if len({item.casefold() for item in causal_items}) < 2:
+        return (
+            "inspect_runtime based on auto-retreat requires at least two distinct "
+            "match evidence items that identify the affected main force/group_0 "
+            "and explicitly establish loss_timing=override_before_losses; a "
+            "reinforcement-group retreat or a global army inventory at the same "
+            "timestamp does not establish a runtime-caused main-force collapse"
+        )
+    return ""
 
 
 def _validate_retrieval_assessment_links(
@@ -691,20 +800,41 @@ def _normalize_cross_match_decision(
     )
     if plan_error and next_action == "propose_strategy_patch":
         return None, plan_error
+    runtime_attribution_error = _runtime_attribution_error(
+        next_action=next_action,
+        action_reason=action_reason,
+        priority=priority,
+        hypothesis=hypothesis,
+        failure_mode_analysis=failure_mode_analysis,
+    )
+    if runtime_attribution_error:
+        return None, runtime_attribution_error
 
     if next_action == "propose_strategy_patch":
         control = str((priority or {}).get("control_class") or "")
+        static_defense_error = _static_defense_direction_error(plan)
         if control in {"runtime_execution", "commander_execution"}:
             next_action = "inspect_runtime"
             action_reason = action_reason or (
                 "Priority problem is an execution defect, not a strategy.md change."
             )
+            runtime_attribution_error = _runtime_attribution_error(
+                next_action=next_action,
+                action_reason=action_reason,
+                priority=priority,
+                hypothesis=hypothesis,
+                failure_mode_analysis=failure_mode_analysis,
+            )
+            if runtime_attribution_error:
+                return None, runtime_attribution_error
             plan = None
             hypothesis = ""
         elif not priority or not priority.get("problem") or not priority.get("evidence"):
             return None, "propose_strategy_patch requires priority_problem with evidence"
         elif not priority.get("strategy_fixable"):
             return None, "propose_strategy_patch requires control_class=strategy_fixable"
+        elif static_defense_error:
+            return None, static_defense_error
         elif not hypothesis:
             return None, "propose_strategy_patch requires hypothesis"
         elif not plan:
@@ -946,7 +1076,11 @@ def _observations_from_runs(
                     "evidence_refs": list(run.get("evidence_refs") or []),
                     "hypothesis_scope": run.get("hypothesis_scope"),
                 },
-                result={"answer": run.get("answer"), "error": error},
+                result={
+                    "answer": run.get("answer"),
+                    "error": error,
+                    "knowledge_run": dict(run),
+                },
                 ok=verified,
                 summary=str(run.get("answer") if verified else error),
                 status="complete" if verified else "failed",
@@ -1255,8 +1389,23 @@ def run_analysis_agent_loop(
     match_summary_cache_path: Path | None = None,
     prior_experiences: list[Any] | None = None,
     capability_manifest: dict[str, Any] | None = None,
+    retry_feedback: list[str] | None = None,
 ) -> AnalysisPipelineResult:
     capability_manifest = capability_manifest or {}
+    prior_experiences = list(prior_experiences or [])
+    # A generation retry must carry the preceding failure into both the
+    # cross-match analysis and the later optimizer.  Keep this argument
+    # optional so existing callers that only supply prior_experiences remain
+    # source-compatible, and avoid adding the same context twice when the
+    # caller already recorded it there.
+    feedback = [str(item).strip() for item in (retry_feedback or []) if str(item).strip()]
+    if feedback and not any(
+        isinstance(item, dict) and item.get("kind") == "generation_retry_feedback"
+        for item in prior_experiences
+    ):
+        prior_experiences.append(
+            {"kind": "generation_retry_feedback", "errors": feedback}
+        )
     model = str(model or "").strip() or DEFAULT_ANALYSIS_MODEL
     if not records:
         analysis = fallback_analysis(
