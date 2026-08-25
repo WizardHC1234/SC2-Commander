@@ -11,8 +11,10 @@ from evol_agent.analysis.record_reader import (
     find_record_jsons,
     group_records_by_strategy,
     is_completed_match_record,
+    skill_dir_for_record,
 )
 from evol_agent.core import config
+from evol_agent.core.config import resolve_skill_dir
 from evol_agent.core.analysis_agent_loop import (
     _normalize_batch_analysis,
     _normalize_cross_match_decision,
@@ -29,7 +31,7 @@ from evol_agent.core.prompts import (
     build_cross_match_discovery_prompt,
 )
 from evol_agent.core.types import BattleAnalysis
-from evol_agent.optimization.snapshot import save_snapshot
+from evol_agent.optimization.snapshot import output_dir_for_strategy, save_snapshot
 from evol_agent.optimization.strategy_document import (
     StrategyDocument,
     paragraph_hash,
@@ -1408,3 +1410,31 @@ def test_evol_agent_paths_and_vendored_dataset_are_local() -> None:
     fusion_core = get_dataset_store().get_entity("Unit", "Fusion Core")
     assert fusion_core is not None
     assert fusion_core.get("name") == "FusionCore"
+
+
+def test_output_dir_for_strategy_uses_overlay_not_skills(tmp_path: Path) -> None:
+    overlay = tmp_path / "strategies"
+    (overlay / "tank_opt1").mkdir(parents=True)
+    next_dir = output_dir_for_strategy("tank", "terran", overlay_root=overlay)
+    assert next_dir == overlay / "tank_opt2"
+    assert "skills" not in next_dir.parts
+
+
+def test_resolve_skill_dir_prefers_overlay(tmp_path: Path, monkeypatch) -> None:
+    overlay = tmp_path / "overlay"
+    skill = overlay / "tank_opt1"
+    skill.mkdir(parents=True)
+    (skill / "strategy.md").write_text(VALID_STRATEGY, encoding="utf-8")
+    monkeypatch.delenv(config.STRATEGY_ROOT_ENV, raising=False)
+    assert resolve_skill_dir("tank_opt1", overlay_root=overlay) == skill
+
+
+def test_skill_dir_for_record_prefers_match_sidecar(tmp_path: Path) -> None:
+    match_dir = tmp_path / "game_records" / "ev_batch" / "match_1"
+    match_dir.mkdir(parents=True)
+    (match_dir / "strategy.md").write_text(VALID_STRATEGY, encoding="utf-8")
+    record_path = match_dir / "current.json"
+    record_path.write_text(json.dumps(_current_record()), encoding="utf-8")
+    assert skill_dir_for_record(record_path, "tank") == match_dir
+    _, _, skill_dir, _ = build_record_evidence_baseline(record_path)
+    assert skill_dir == match_dir

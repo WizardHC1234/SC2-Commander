@@ -28,7 +28,11 @@ EvolAgent 是 SC2-Commander 的离线候选策略生成器。它读取一批完�
 
 EvolAgent 负责提出候选，不负责判断候选是否更强。候选必须由外层实验流程实际进行 10 局评测：胜率高于当前 Champion 才能接受，否则保留 Champion，并把失败原因作为后续优化经验。
 
-策略目录是不可变版本。默认输出使用下一个可用的 `skills/<race>/<base>_optN/`。已经包含文件的候选目录不会被覆盖，因此相同名称不会再混入多个不同策略内容。
+策略目录是不可变版本。进化跑次把候选写到
+`evolution_runs/<strategy>/<timestamp>/strategies/<base>_optN/`，并在
+`game_records/` 的 batch/match 目录旁保存 `strategy.md`。单独调用 EvolAgent
+且未指定 `--output-dir` 时，仍会使用下一个可用的
+`skills/<race>/<base>_optN/`。已经包含文件的候选目录不会被覆盖。
 
 ## 策略文件
 

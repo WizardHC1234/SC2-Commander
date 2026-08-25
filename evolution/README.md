@@ -73,8 +73,11 @@ Resume a run with the same configuration:
 
 Run state and curve-ready data are saved under
 `evolution_runs/<strategy>/<timestamp>/state.json` and `history.csv`. Raw match
-records remain under `game_records/`, while immutable candidate strategies
-remain under `skills/<race>/`.
+records remain under `game_records/`. Candidate strategies live under
+`evolution_runs/<strategy>/<timestamp>/strategies/` and a copy of
+`strategy.md` is written next to each batch and match record. Seed
+strategies (`tank`, `marine`, …) stay in `skills/<race>/`; evolution does
+not add `_optN` folders there.
 
 `history.csv` uses baseline generation 0 and the first candidate as generation 1.
 `games` is the number of matches contributing to that strategy row, and `win_rate`

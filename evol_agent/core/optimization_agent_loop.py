@@ -326,27 +326,9 @@ def _drop_unchanged_patches(
 
 
 def _fallback_is_safe(*, failure_stage: str, errors: list[str]) -> bool:
-    """Allow only a weak-but-executable semantic candidate to reach matches."""
-    if failure_stage != "semantic" or not errors:
-        return False
-    blocking = (
-        "missing_dependency",
-        "internal_inconsistency",
-        "runtime_boundary",
-        "unsupported_capability",
-        "unsupported capability",
-        "decision_grounding",
-        "preserved_strengths",
-        "strategy_identity",
-        "semantic validator returned no json object",
-        "semantic validator rejected the patch",
-    )
-    normalized = [str(error).strip().casefold() for error in errors if str(error).strip()]
-    if not normalized or any(
-        marker in error for error in normalized for marker in blocking
-    ):
-        return False
-    return all("underpowered_implementation" in error for error in normalized)
+    """After retries, evaluate the last patched candidate instead of aborting."""
+    del errors
+    return bool(failure_stage)
 
 
 def _candidate_rationale(
@@ -796,7 +778,7 @@ def run_optimization_agent_loop(
         )
         print(
             f"{prefix}OptimizationAgent: validation retries exhausted; "
-            "using the latest applicable generated candidate with warnings",
+            "using the latest generated candidate and continuing to match evaluation",
             flush=True,
         )
         return (

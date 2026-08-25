@@ -4,23 +4,35 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..core.config import SKILL_ROOT
+from ..core.config import SKILL_ROOT, canonical_strategy_folder
 from ..validation import validate_strategy_markdown
 
 
-def output_dir_for_strategy(strategy_name: str, race: str) -> Path:
-    base_name = re.sub(r"_opt\d+$", "", strategy_name)
+def output_dir_for_strategy(
+    strategy_name: str,
+    race: str,
+    *,
+    overlay_root: Path | None = None,
+) -> Path:
+    """Allocate the next immutable candidate directory.
+
+    Evolution passes ``overlay_root`` (typically ``evolution_runs/.../strategies``)
+    so candidates are not written into ``skills/<race>/``.
+    """
+    folder = canonical_strategy_folder(strategy_name)
+    base_name = re.sub(r"_opt\d+$", "", folder)
     max_n = 0
-    skill_race_dir = SKILL_ROOT / race
-    if skill_race_dir.exists():
+    search_dir = Path(overlay_root) if overlay_root is not None else (SKILL_ROOT / race)
+    if search_dir.exists():
         pattern = re.compile(rf"^{re.escape(base_name)}_opt(\d+)$")
-        for entry in skill_race_dir.iterdir():
+        for entry in search_dir.iterdir():
             if not entry.is_dir():
                 continue
             match = pattern.match(entry.name)
             if match:
                 max_n = max(max_n, int(match.group(1)))
-    return skill_race_dir / f"{base_name}_opt{max_n + 1}"
+    search_dir.mkdir(parents=True, exist_ok=True)
+    return search_dir / f"{base_name}_opt{max_n + 1}"
 
 
 def write_file(path: Path, content: str) -> None:

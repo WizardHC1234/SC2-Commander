@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -7,6 +8,45 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
 SKILL_ROOT = PROJECT_ROOT / "skills"
 OPTIMIZATION_LOG_DIR = PACKAGE_ROOT / "logs"
+
+# Evolution writes candidates here instead of skills/<race>/. Child match
+# processes inherit this via the environment so Commander can load them.
+STRATEGY_ROOT_ENV = "SC2_STRATEGY_ROOT"
+STRATEGY_FOLDER_ALIASES = {
+    "early_marine": "marine",
+    "mid_tank": "tank",
+    "late_battlecruiser": "battlecruiser",
+}
+
+
+def canonical_strategy_folder(name: str) -> str:
+    key = str(name or "").strip()
+    if not key:
+        return key
+    return STRATEGY_FOLDER_ALIASES.get(key.lower(), key)
+
+
+def resolve_skill_dir(
+    strategy_name: str,
+    race: str = "terran",
+    *,
+    overlay_root: str | Path | None = None,
+    skill_root: str | Path | None = None,
+) -> Path:
+    """Prefer a run-local strategy overlay, then skills/<race>/<name>."""
+    folder = canonical_strategy_folder(strategy_name)
+    roots: list[Path] = []
+    if overlay_root:
+        roots.append(Path(overlay_root))
+    env_root = str(os.environ.get(STRATEGY_ROOT_ENV) or "").strip()
+    if env_root:
+        roots.append(Path(env_root))
+    for root in roots:
+        candidate = root / folder
+        if (candidate / "strategy.md").is_file():
+            return candidate
+    skills = Path(skill_root) if skill_root is not None else SKILL_ROOT
+    return skills / str(race or "terran").strip().lower() / folder
 
 # EvolAgent reads and rewrites only the natural-language strategy.
 SKILL_FILES = ["strategy.md"]

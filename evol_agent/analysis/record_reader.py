@@ -11,7 +11,7 @@ from ..interaction_schema import (
     interaction_get_str,
 )
 
-from ..core.config import SKILL_FILES, SKILL_ROOT
+from ..core.config import SKILL_FILES, resolve_skill_dir
 from ..core.types import GameEvidence
 
 
@@ -65,6 +65,21 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content.strip() + "\n", encoding="utf-8")
 
 
+def skill_dir_for_record(
+    record_path: Path,
+    strategy_name: str,
+    race: str = "terran",
+) -> Path:
+    """Use the strategy.md saved beside a match/batch record when present."""
+    match_dir = record_path.parent
+    if (match_dir / "strategy.md").is_file():
+        return match_dir
+    batch_dir = match_dir.parent
+    if (batch_dir / "strategy.md").is_file():
+        return batch_dir
+    return resolve_skill_dir(strategy_name, race)
+
+
 def load_skill_texts(skill_dir: Path) -> dict[str, str]:
     texts: dict[str, str] = {}
     for fname in SKILL_FILES:
@@ -99,8 +114,8 @@ def build_record_evidence_baseline(
         raise ValueError(f"Could not extract strategy from {record_path}")
 
     race = str(meta.get("my_race") or "terran").lower()
-    skill_dir = SKILL_ROOT / race / strategy_name
-    if not skill_dir.exists():
+    skill_dir = skill_dir_for_record(record_path, strategy_name, race)
+    if not (skill_dir / "strategy.md").is_file():
         raise FileNotFoundError(f"Skill directory not found: {skill_dir}")
 
     evidence = GameEvidence(

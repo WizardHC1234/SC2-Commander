@@ -497,7 +497,7 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
     del recovery
 
 
-def test_blocking_semantic_retry_exhaustion_does_not_use_candidate(
+def test_blocking_semantic_retry_exhaustion_uses_latest_candidate(
     monkeypatch,
 ) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
@@ -544,11 +544,13 @@ def test_blocking_semantic_retry_exhaustion_does_not_use_candidate(
         initial_tool_observations=[],
     )
 
-    assert result.ok is False
-    assert improvement is None
+    assert result.ok is True
+    assert improvement is not None
     assert optimizer_calls == 5
     assert errors
-    assert events[-1]["action"] == "strategy_patch_semantics"
+    assert events[-1]["action"] == (
+        "accept_latest_candidate_after_validation_retry_exhausted"
+    )
 
 
 def test_underpowered_semantic_retry_exhaustion_uses_latest_candidate(
@@ -612,7 +614,7 @@ def test_underpowered_semantic_retry_exhaustion_uses_latest_candidate(
     assert "31 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
 
 
-def test_mixed_underpowered_and_blocking_semantic_errors_do_not_fallback(
+def test_mixed_underpowered_and_blocking_semantic_errors_use_latest_candidate(
     monkeypatch,
 ) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
@@ -665,15 +667,17 @@ def test_mixed_underpowered_and_blocking_semantic_errors_do_not_fallback(
         initial_tool_observations=[],
     )
 
-    assert result.ok is False
-    assert improvement is None
+    assert result.ok is True
+    assert improvement is not None
     assert optimizer_calls == 5
     assert any("underpowered_implementation" in error for error in errors)
     assert any("missing_dependency" in error for error in errors)
-    assert events[-1]["action"] == "strategy_patch_semantics"
+    assert events[-1]["action"] == (
+        "accept_latest_candidate_after_validation_retry_exhausted"
+    )
 
 
-def test_basic_retry_exhaustion_does_not_use_invalid_candidate(
+def test_basic_retry_exhaustion_uses_latest_generated_candidate(
     monkeypatch,
 ) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
@@ -708,12 +712,15 @@ def test_basic_retry_exhaustion_does_not_use_invalid_candidate(
         initial_tool_observations=[],
     )
 
-    assert result.ok is False
-    assert improvement is None
+    assert result.ok is True
+    assert improvement is not None
     assert optimizer_calls == 5
     assert errors
-    assert events[-1]["valid"] is False
-    assert "units by tag" in events[-1]["error"]
+    assert events[-1]["action"] == (
+        "accept_latest_candidate_after_validation_retry_exhausted"
+    )
+    assert improvement.analysis["validation_fallback"]["failure_stage"] == "basic"
+    assert "unit tags" in improvement.files["strategy.md"]
 
 
 def test_optimizer_ignores_one_unchanged_patch_and_uses_other_generated_changes(

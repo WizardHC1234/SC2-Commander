@@ -3,8 +3,10 @@
 Edit the ``DEFAULT_*`` values below for convenient local experiments, or pass
 explicit CLI arguments. ``--force-strategy <name>`` selects
 ``skills/<race>/<name>/strategy.md`` (e.g. ``tank``, ``marine``,
-``battlecruiser``). Use ``--force-strategy none`` to skip a forced folder
-(Commander still needs a resolvable strategy at game start).
+``battlecruiser``). During evolution, ``SC2_STRATEGY_ROOT`` can point at a
+run-local overlay so candidates are loaded without writing into ``skills/``.
+Use ``--force-strategy none`` to skip a forced folder (Commander still needs
+a resolvable strategy at game start).
 """
 from __future__ import annotations
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ from .checkpoint import (
     validate_checkpoint_fingerprint,
 )
 from .loop_helpers import fallback_analysis
-from .config import KNOWLEDGE_MODES, resolve_model
+from .config import KNOWLEDGE_MODES, STRATEGY_ROOT_ENV, resolve_model
 from .optimization_agent_loop import run_optimization_agent_loop
 from .run_recorder import reset_run_events
 from .types import EvolRunRequest, EvolRunResult, ValidationResult
@@ -521,7 +522,17 @@ class EvolAgent:
                 tool_observations=observations,
             )
 
-        out_dir = request.output_dir or output_dir_for_strategy(strategy_name, race)
+        overlay = str(os.environ.get(STRATEGY_ROOT_ENV) or "").strip()
+        if request.output_dir is not None:
+            out_dir = request.output_dir
+        elif overlay:
+            out_dir = output_dir_for_strategy(
+                strategy_name,
+                race,
+                overlay_root=Path(overlay),
+            )
+        else:
+            out_dir = output_dir_for_strategy(strategy_name, race)
         candidate_hash = hashlib.sha256(
             improvement.files["strategy.md"].encode("utf-8")
         ).hexdigest()[:16]

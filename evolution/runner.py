@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -13,8 +14,10 @@ from typing import Any, Callable
 from evol_agent import EvolAgent
 from evol_agent.analysis.record_reader import find_record_jsons, is_completed_match_record
 from evol_agent.core.checkpoint import PIPELINE_VERSION, load_checkpoint, stage_reached
+from evol_agent.core.config import STRATEGY_ROOT_ENV, canonical_strategy_folder, resolve_skill_dir
 from evol_agent.core.experiment_audit import audit_experiment
 from evol_agent.core.types import EvolRunRequest, EvolRunResult
+from evol_agent.optimization.snapshot import output_dir_for_strategy
 from .feedback import (
     combine_batch_evidence,
     compare_batch_evidence,
@@ -371,6 +374,8 @@ class EvolutionRunner:
         self._batch_executor = batch_executor
         self._candidate_generator = candidate_generator
         self._experiment_auditor = experiment_auditor
+        self.strategies_dir = self.run_dir / "strategies"
+        self.strategies_dir.mkdir(parents=True, exist_ok=True)
 
     def _new_state(self) -> dict[str, Any]:
         selection_protocol = (
@@ -645,7 +650,7 @@ class EvolutionRunner:
                     ("champ_confirm", str(state.get("champion") or "")),
                     ("cand_confirm", str(pending.get("strategy") or "")),
                 ):
-                    name = self._batch_name(generation, role)
+                    name = self._batch_name(generation, role, difficulty)
                     add_path(self.project_root / "game_records" / name, strategy, difficulty)
 
         previous_games = int(state.get("games_used") or 0)
@@ -1331,7 +1336,14 @@ class EvolutionRunner:
         champion_batch = state.get("champion_batch")
         if not isinstance(champion_batch, dict):
             raise RuntimeError("champion evaluation baseline is missing")
-        return BatchResult.from_dict(champion_batch)
+        batch = BatchResult.from_dict(champion_batch)
+        current = self._current_difficulty(state)
+        if current is not None and batch.difficulty != current:
+            raise RuntimeError(
+                "champion evaluation baseline is for "
+                f"{batch.difficulty}, but the current difficulty is {current}"
+            )
+        return batch
 
     def _backfill_experiment_evidence(self, state: dict[str, Any]) -> bool:
         """Enrich pre-v3 rejection memory from immutable decision/batch artifacts."""
@@ -1395,8 +1407,64 @@ class EvolutionRunner:
         state["updated_at"] = datetime.now().isoformat()
         _write_json(self.state_path, state)
 
-    def _batch_name(self, generation: int, role: str) -> str:
-        return _safe_name(f"ev_{self.run_id}_g{generation:03d}_{role}", 40)
+    def _batch_name(self, generation: int, role: str, difficulty: str = "") -> str:
+        # Include difficulty so a mastered champion baseline is not reused as
+        # the next curriculum level (same generation/role, different AI).
+        parts = [f"ev_{self.run_id}", f"g{generation:03d}"]
+        if difficulty:
+            parts.append(difficulty)
+        parts.append(role)
+        return _safe_name("_".join(parts), 56)
+
+    def _strategy_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env[STRATEGY_ROOT_ENV] = str(self.strategies_dir)
+        return env
+
+    def _stage_strategy(self, name: str) -> Path:
+        dest = self.strategies_dir / canonical_strategy_folder(name)
+        dest.mkdir(parents=True, exist_ok=True)
+        dest_md = dest / "strategy.md"
+        if dest_md.is_file():
+            return dest
+        src = resolve_skill_dir(
+            name,
+            self.config.race,
+            overlay_root=self.strategies_dir,
+            skill_root=self.project_root / "skills",
+        )
+        src_md = src / "strategy.md"
+        if src_md.is_file() and src.resolve() != dest.resolve():
+            shutil.copy2(src_md, dest_md)
+        return dest
+
+    def _copy_strategy_sidecar(self, name: str, dest_dir: Path) -> None:
+        src = self._stage_strategy(name) / "strategy.md"
+        if not src.is_file():
+            return
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest_dir / "strategy.md")
+
+    def _read_strategy_text(
+        self,
+        name: str,
+        *,
+        batch_dirs: list[Path] | None = None,
+    ) -> str:
+        for batch_dir in batch_dirs or []:
+            sidecar = Path(batch_dir) / "strategy.md"
+            if sidecar.is_file():
+                return sidecar.read_text(encoding="utf-8-sig")
+        path = (
+            resolve_skill_dir(
+                name,
+                self.config.race,
+                overlay_root=self.strategies_dir,
+                skill_root=self.project_root / "skills",
+            )
+            / "strategy.md"
+        )
+        return path.read_text(encoding="utf-8-sig")
 
     def run_batch(
         self,
@@ -1416,7 +1484,7 @@ class EvolutionRunner:
         expected_games = int(target_games or self.config.matches_per_batch)
         if expected_games <= 0:
             raise ValueError("target_games must be positive")
-        batch_name = self._batch_name(generation, role)
+        batch_name = self._batch_name(generation, role, difficulty)
         batch_dir = self.project_root / "game_records" / batch_name
         completed = completed_record_count(batch_dir, strategy=strategy)
         if completed == expected_games:
@@ -1433,6 +1501,7 @@ class EvolutionRunner:
                 f"requested {expected_games}"
             )
         remaining = expected_games - completed
+        self._copy_strategy_sidecar(strategy, batch_dir)
         if os.name == "nt":
             command = [
                 "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
@@ -1472,7 +1541,13 @@ class EvolutionRunner:
             ]
             if self.config.bot_instruct:
                 command.extend(["--bot-instruct", self.config.bot_instruct])
-        subprocess.run(command, cwd=self.project_root, check=True)
+        subprocess.run(
+            command,
+            cwd=self.project_root,
+            check=True,
+            env=self._strategy_env(),
+        )
+        self._copy_strategy_sidecar(strategy, batch_dir)
         return read_batch_result(
             batch_dir,
             name=batch_name,
@@ -1497,11 +1572,24 @@ class EvolutionRunner:
         record_paths: list[Path] = []
         for batch in evidence_batches or [champion_batch]:
             record_paths.extend(find_record_jsons(batch.path))
+        skill_dir = resolve_skill_dir(
+            champion,
+            self.config.race,
+            overlay_root=self.strategies_dir,
+            skill_root=self.project_root / "skills",
+        )
+        output_dir = output_dir_for_strategy(
+            champion,
+            self.config.race,
+            overlay_root=self.strategies_dir,
+        )
         return EvolAgent(model=self.config.evolution_model).run(
             EvolRunRequest(
                 record_paths=list(dict.fromkeys(record_paths)),
                 strategy_name=champion,
                 race=self.config.race,
+                skill_dir=skill_dir,
+                output_dir=output_dir,
                 model=self.config.evolution_model,
                 knowledge_mode=self.config.knowledge_mode,
                 prior_experiences=prior_experiences,
@@ -2316,20 +2404,14 @@ class EvolutionRunner:
             auditor = audit_experiment
         if auditor is not None:
             try:
-                parent_strategy_text = (
-                    self.project_root
-                    / "skills"
-                    / self.config.race
-                    / mutation_parent
-                    / "strategy.md"
-                ).read_text(encoding="utf-8-sig")
-                candidate_strategy_text = (
-                    self.project_root
-                    / "skills"
-                    / self.config.race
-                    / candidate
-                    / "strategy.md"
-                ).read_text(encoding="utf-8-sig")
+                parent_strategy_text = self._read_strategy_text(
+                    mutation_parent,
+                    batch_dirs=parent_batch_dirs,
+                )
+                candidate_strategy_text = self._read_strategy_text(
+                    candidate,
+                    batch_dirs=candidate_batch_dirs,
+                )
                 audit_kwargs: dict[str, Any] = {
                     "race": self.config.race,
                     "parent_strategy_name": mutation_parent,

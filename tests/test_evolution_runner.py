@@ -70,6 +70,9 @@ def test_generate_candidate_passes_shared_match_summary_cache(
         tmp_path / "run" / "experiment_match_summary_cache.json"
     )
     assert captured["request"].retry_feedback == ["candidate contract rejected"]
+    assert captured["request"].output_dir == (
+        tmp_path / "run" / "strategies" / "tank_opt1"
+    )
 
 
 def test_evolution_accepts_only_strict_improvement_and_advances(tmp_path: Path) -> None:
@@ -1543,7 +1546,7 @@ def test_run_batch_requests_only_remaining_games(tmp_path: Path, monkeypatch) ->
         run_dir=tmp_path / "run",
         project_root=tmp_path,
     )
-    batch_name = runner._batch_name(0, "cand")
+    batch_name = runner._batch_name(0, "cand", "harder")
     batch_dir = tmp_path / "game_records" / batch_name
     for index in range(7):
         match = batch_dir / f"match_{index:03d}"
@@ -1599,6 +1602,65 @@ def test_run_batch_requests_only_remaining_games(tmp_path: Path, monkeypatch) ->
     assert result.games == 10
     assert result.wins == 7
     assert result.losses == 3
+
+
+def _write_completed_matches(
+    batch_dir: Path, *, strategy: str, count: int, result: str = "Victory"
+) -> None:
+    for index in range(count):
+        match = batch_dir / f"match_{index:03d}"
+        match.mkdir(parents=True)
+        (match / "final.json").write_text(
+            json.dumps(
+                {
+                    "metadata": {
+                        "strategy_id": strategy,
+                        "save_reason": "match_runner_finally",
+                        "result": result,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+
+def test_champion_baseline_does_not_reuse_batch_across_difficulties(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="marine",
+            commander_model="model",
+            difficulties=("hard", "harder"),
+            matches_per_batch=10,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    hard_dir = tmp_path / "game_records" / runner._batch_name(0, "champ", "hard")
+    _write_completed_matches(hard_dir, strategy="marine", count=10)
+    launched: list[str] = []
+
+    def fake_run(command, **kwargs):
+        launched.append(" ".join(str(item) for item in command))
+        harder_dir = tmp_path / "game_records" / runner._batch_name(0, "champ", "harder")
+        _write_completed_matches(harder_dir, strategy="marine", count=10)
+
+    monkeypatch.setattr("evolution.runner.subprocess.run", fake_run)
+    hard = runner.run_batch(
+        "marine", "hard", generation=0, role="champ", target_games=10
+    )
+    harder = runner.run_batch(
+        "marine", "harder", generation=0, role="champ", target_games=10
+    )
+
+    assert hard.path != harder.path
+    assert hard.difficulty == "hard"
+    assert harder.difficulty == "harder"
+    assert launched, "harder must launch a new batch instead of reusing hard's records"
+    assert runner._batch_name(0, "champ", "hard") != runner._batch_name(
+        0, "champ", "harder"
+    )
 
 
 def test_six_patches_produce_one_experiment_record(tmp_path: Path) -> None:

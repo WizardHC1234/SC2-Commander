@@ -7,6 +7,7 @@ import importlib
 import logging
 import os
 import re
+import shutil
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from sc2.data import Race
@@ -42,6 +43,9 @@ _RACE_MAP = {
     "protoss": Race.Protoss,
     "random": Race.Random,
 }
+
+# Overlay used by evolution so candidates are not stored under skills/.
+_STRATEGY_ROOT_ENV = "SC2_STRATEGY_ROOT"
 
 # Legacy multi-agent folder names → current skills/<race>/<name> directories.
 _STRATEGY_FOLDER_ALIASES = {
@@ -140,6 +144,20 @@ class CommanderBot(KnowledgeBot):
     def _skills_race_dir(self) -> str:
         return os.path.normpath(os.path.join(self._skills_root, self.race_name))
 
+    def _resolve_strategy_dir(self, folder: str) -> str:
+        roots: list[str] = []
+        overlay = str(os.environ.get(_STRATEGY_ROOT_ENV) or "").strip()
+        if overlay:
+            roots.append(os.path.normpath(overlay))
+        roots.append(self._skills_race_dir)
+        for root in roots:
+            candidate = os.path.join(root, folder)
+            if os.path.isfile(os.path.join(candidate, "strategy.md")):
+                return candidate
+        raise FileNotFoundError(
+            f"strategy folder not found for {folder!r} (searched {roots})"
+        )
+
     def _load_race_action_module(self) -> None:
         module_path = f"commander.races.{self.race_name}.actions"
         try:
@@ -163,10 +181,10 @@ class CommanderBot(KnowledgeBot):
     def _apply_forced_strategy(self, name: str) -> None:
         key = str(name or "").strip()
         folder = _STRATEGY_FOLDER_ALIASES.get(key.lower(), key)
-        target_dir = os.path.join(self._skills_race_dir, folder)
+        target_dir = self._resolve_strategy_dir(folder)
         md_path = os.path.join(target_dir, "strategy.md")
-        if not os.path.isdir(target_dir):
-            raise FileNotFoundError(f"strategy folder not found: {target_dir}")
+        if not os.path.isfile(md_path):
+            raise FileNotFoundError(f"strategy.md not found: {md_path}")
 
         raw = ""
         detail = ""
@@ -198,6 +216,13 @@ class CommanderBot(KnowledgeBot):
                 "strategy_description": detail,
             }
         )
+        self._copy_strategy_to_record_dir(md_path)
+
+    def _copy_strategy_to_record_dir(self, md_path: str) -> None:
+        if not self.record_dir or not os.path.isfile(md_path):
+            return
+        os.makedirs(self.record_dir, exist_ok=True)
+        shutil.copy2(md_path, os.path.join(self.record_dir, "strategy.md"))
 
     def _select_strategy_tools(self) -> None:
         """Once per match: semantic selection plus dependency expansion."""
