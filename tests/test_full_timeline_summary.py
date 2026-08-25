@@ -527,6 +527,8 @@ def test_cross_match_prompt_keeps_complete_events() -> None:
     assert '"time_s":431' in prompt
     assert '"enemy_observed":"visible marines"' in prompt
     assert '"enemy_truth":"hidden tanks"' in prompt
+    assert "composition as a time-varying relationship" in prompt
+    assert "actual contact" in prompt
 
 
 def test_one_failed_match_does_not_stop_the_batch(tmp_path: Path, monkeypatch) -> None:
@@ -1033,6 +1035,7 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
         },
         knowledge_runs=[],
     )
+    compact_prompt = " ".join(prompt.split())
     assert "Cross-Match Decision Agent" in prompt
     assert "re-evaluate the strategy contract inferred in discovery" in prompt
     assert '"strategy_mechanism_assessment"' in prompt
@@ -1053,6 +1056,20 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
     assert "Use one ordered analysis" in prompt
     assert "critical relative power window" in prompt
     assert "own gains exceed opponent growth" in prompt
+    assert "earlier contact with a smaller own force" in prompt
+    assert "lower readiness threshold" in compact_prompt
+    assert "faster attainment of the current threshold" in compact_prompt
+    assert "do not preserve the current threshold by default" in compact_prompt
+    assert "directional trajectory" in compact_prompt
+    assert "failed increase disproves further waiting" in compact_prompt
+    assert "do not conclude that the original gate is immutable" in compact_prompt
+    assert "do not treat the current numerical attack gate as immutable" in compact_prompt
+    assert "Merely appearing in" in compact_prompt
+    assert "does not make a number a core commitment" in compact_prompt
+    assert '"core_mechanism_guard"' in prompt
+    assert '"first_commitment_effect":"earlier|same|later|conditional"' in prompt
+    assert "does not exhaust the strategy" in prompt
+    assert "evaluate an earlier-window intervention" in prompt
     assert "For timing strategies" in prompt
     assert "If losing games" in prompt
     assert "reached the planned gate" in prompt

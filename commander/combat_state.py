@@ -600,7 +600,11 @@ def _zone_topology(zones: list, gather_points: set) -> Dict[str, Any]:
     another zone's center (triangle inequality + waypoint proximity).
     """
     if not zones:
-        return {"primary_route": [], "zones": []}
+        return {
+            "primary_route": [],
+            "default_pre_attack_staging_zone_id": None,
+            "zones": [],
+        }
 
     zone_count = len(zones)
     enemy_main_index = zone_count - 1
@@ -675,8 +679,18 @@ def _zone_topology(zones: list, gather_points: set) -> Dict[str, Any]:
             }
         )
 
+    default_pre_attack_staging_zone_id = next(
+        (
+            zone["zone_id"]
+            for zone in topology_zones
+            if zone["zone_role"] == "own_natural" and not zone["is_island"]
+        ),
+        "zone_0",
+    )
+
     return {
         "primary_route": primary_route,
+        "default_pre_attack_staging_zone_id": default_pre_attack_staging_zone_id,
         "zones": topology_zones,
     }
 

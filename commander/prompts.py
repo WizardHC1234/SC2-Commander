@@ -85,7 +85,7 @@ Zones:
 - In the Zone State Table, follow columns and row_count. own_contents excludes army_groups; visible_enemy_contents is current and last_seen_enemy_contents is fogged memory. A fogged or partially visible zone without visible enemies is not confirmed empty.
 
 move_group:
-- Emit exactly one move_group per current army_groups entry; none if empty. Command every group even before the attack gate: hold main_force at a safe own staging zone and regroup reinforcement to it. After the offensive starts, reinforcement joins the same objective, never an independent attack, harass, or search.
+- Emit exactly one move_group per current army_groups entry; none if empty. Before the first offensive, normally hold main_force at [8] default_pre_attack_staging_zone_id and regroup reinforcement to it. Use own_main instead only to answer a current threat, when that staging zone is unsafe or unreachable, or when [8] provides no external staging zone. After the offensive starts, reinforcement joins the same objective, never an independent attack, harass, or search.
 - Before the first offensive, is_fragmented=yes means a group is spatially split and must not be treated as gathered. After the main_force is already advancing, fragmentation or a lagging reinforcement is not by itself permission to replace the main_force command with hold or regroup.
 - Movement modes:
   - regroup: relocate to a safe own staging zone without stopping; do not park there, use hold to defend.

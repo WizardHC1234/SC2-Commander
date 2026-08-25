@@ -1216,6 +1216,12 @@ def _normalize_cross_match_decision(
             return None, strategy_mechanism_error or (
                 "propose_strategy_patch requires strategy_mechanism_assessment"
             )
+        if require_strategy_identity and (
+            core_guard_error or not core_mechanism_guard
+        ):
+            return None, core_guard_error or (
+                "propose_strategy_patch requires core_mechanism_guard"
+            )
         if information_grounding_error:
             return None, information_grounding_error
         if control in {"runtime_execution", "commander_execution"}:

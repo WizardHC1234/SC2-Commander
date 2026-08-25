@@ -997,6 +997,12 @@ def format_map_topology(topology: Dict[str, Any]) -> str:
     topo_zones = [_dict(zone) for zone in _list(topology.get("zones"))]
 
     lines: List[str] = ["[8] Map Topology"]
+    staging_zone_id = topology.get("default_pre_attack_staging_zone_id")
+    if staging_zone_id:
+        lines.append(
+            "default_pre_attack_staging_zone_id="
+            f"{_value(staging_zone_id)}"
+        )
     if topo_zones:
         lines.append("zone_id|role|ramp|island|neighbors|path_to_enemy_main")
         for zone in topo_zones:

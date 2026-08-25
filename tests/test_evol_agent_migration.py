@@ -640,6 +640,47 @@ def test_live_decision_requires_core_mechanism_assessment() -> None:
     assert "strategy_mechanism_assessment" in error
 
 
+def test_live_decision_requires_core_mechanism_guard() -> None:
+    payload, error = _normalize_cross_match_decision(
+        {
+            "next_action": "propose_strategy_patch",
+            "priority_problem": {
+                "problem": "the intended pressure window is missed",
+                "evidence": ["Game 2 @ 300s: first contact follows enemy tech completion"],
+                "control_class": "strategy_fixable",
+            },
+            "strategy_mechanism_assessment": {
+                "core_mechanism_realization": "wins contact before the counter package matures",
+                "critical_timing_comparison": "losses contact after the counter package matures",
+                "failure_stage": "during_core_mechanism",
+                "optimization_implication": "restore a more favorable relative power window",
+            },
+            "hypothesis": "restoring production tempo restores the relative power window",
+            "plan": {
+                "direction": "restore the intended timing window",
+                "material_behavior_change": "commit before the counter package matures",
+                "coordinated_changes": [
+                    {
+                        "change": "remove the production diversion",
+                        "why_required": "it delays the core mechanism",
+                    }
+                ],
+            },
+        },
+        strategy_name="example",
+        require_strategy_identity=True,
+        fallback_strategy_contract={
+            "style": "early pressure",
+            "core_win_mechanism": "win through an early relative power advantage",
+            "critical_timing_or_power_spike": "first infantry timing",
+            "core_commitments": ["attack before advanced defense"],
+        },
+    )
+
+    assert payload is None
+    assert "core_mechanism_guard" in error
+
+
 def test_discovery_does_not_require_a_plan() -> None:
     payload, error = _normalize_cross_match_discovery(
         {
