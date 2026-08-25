@@ -22,20 +22,20 @@
 # =============================================================================
 # Config
 # =============================================================================
-$CFG_STRATEGY = "tank"
+$CFG_STRATEGY = "marine"
 $CFG_COMMANDER_MODEL = "kimi-k2.5"
 $CFG_EVOLUTION_MODEL = "kimi-k2.5"   # empty = same as commander
 $CFG_DIFFICULTIES = "harder,veryhard,cheatvision,cheatmoney,cheatinsane"
 $CFG_MATCHES = 10
 $CFG_CANDIDATE_MATCHES = 10
 $CFG_CANDIDATE_GENERATION_RETRIES = 3
-$CFG_CONFIRMATION_MATCHES = 5
-$CFG_CONCURRENCY = 4
-$CFG_MAX_GENERATIONS = 15
+$CFG_CONFIRMATION_MATCHES = 4
+$CFG_CONCURRENCY = 5
+$CFG_MAX_GENERATIONS = 10
 $CFG_MAX_GENERATIONS_PER_DIFFICULTY = 10
 $CFG_MASTERY_SCORE_THRESHOLD = 0.90
-$CFG_RUN_DIR = "evolution_runs\tank\20260818_134320"                       # resume: evolution_runs\...
-$CFG_BASELINE_BATCH_DIR = "game_records\ev_20260818_134320_g000_champ"  # reuse the retained 10-game tank baseline
+$CFG_RUN_DIR = "evolution_runs\marine\20260825_175700"                       # resume: evolution_runs\...
+$CFG_BASELINE_BATCH_DIR = ""  # reuse the retained 10-game tank baseline
 # =============================================================================
 
 $ErrorActionPreference = "Stop"

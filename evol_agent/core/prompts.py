@@ -34,16 +34,25 @@ RUNTIME_CONTRACT = """Current runtime contract:
 - At most one SCV scout is active. Scanner Sweep costs Orbital energy. Every decision has one observable wake condition plus a runtime fallback deadline.
 - Observable enemy information includes currently visible contents and last_seen_enemy_contents with seconds_since_last_seen. Scan readiness is observable. Each Commander cycle is one decision; later wakes re-evaluate the same strategy after a scan or scout request.
 - Do not require judging whether a Scanner Sweep is "safe", hidden opponent truth, or finishing a scan-then-commit sequence inside one decision frame.
+- A scan request and scan_ready may trigger a later decision, but strategy.md cannot remember that a scan completed, test whether scan_ready previously fired, or use raw observation-field names such as last_seen_enemy_contents as stateful conditions. Do not use runtime transformation identifiers (for example SiegeTankSieged or VikingFighter) as strategy conditions; transformations and their states are runtime-owned evidence only.
 - Python/Sharpy handles worker distribution, mining micro, repairs, pathfinding, formations, abilities, targeting, transport handling, transformations, and other unit-level micro.
 """
 
 
 CONTROLLABLE_OPTIMIZATION_SCOPE = """Controllable strategy scope:
 - Objective: improve expected match win rate across repeated games while preserving the strategy's defining style where it remains viable. Completeness, variety, and use of every available action are not objectives.
-- Macro: workers, bases, gas, production, technology, upgrades, unit targets, supply, and resource priority.
-- Army: gather/readiness conditions, semantic objective, movement intent, reinforcement, retreat, rebuild, and re-engagement.
-- Information and redecision: scout/scan purpose, observable request conditions, required information, and meaningful wake checkpoints.
+- The only primary optimization domains are: economy and expansion targets;
+  production-building and unit-count targets; technology and upgrade paths; army
+  composition; and attack-readiness conditions and strategic objectives.
+- Scouting, scanning, wake events, decision-cycle protocols, reinforcement routing,
+  retreat, recovery, and cleanup are not optimization domains. Preserve their
+  existing behavior. A related paragraph may change only to remove a stale reference
+  created by an allowed modification, and that repair must not introduce a new rule.
 - Strategy identity defines what must be preserved; it is not an extra optimization category.
+- Before ranking failures, infer the strategy's style, core win mechanism, critical
+  timing or power spike, core commitments, and flexible components directly from
+  the complete strategy.md. Do not infer identity from the strategy filename or a
+  hard-coded strategy-family profile.
 - Select the highest-priority evidence-supported failure mode using the shared SC2
   Strategic Priority below. Once selected, change every coherent dependency needed
   to produce a material combat-outcome difference; do not shrink the intervention
@@ -55,81 +64,58 @@ Strategic search guidance (not an exhaustive enum; one generation tests one prim
 - Production capacity and resource priority: producer counts, when to scale or stop, and shared mineral/gas/producer/tech-lab ordering.
 - Technology and upgrades: timing and whether an upgrade is required before a push; use verified SC2 facts for cost, duration, and prerequisites.
 - Unit composition and support-unit balance: ratios and stage targets while keeping the defining army concept.
-- Attack readiness, commitment threshold, and timing: observable living-force, upgrade, regroup, and intel gates rather than a clock as the only commit rule.
-- Reinforcement, retreat, rebuild, re-engagement, and cleanup: keep first-attack and recovery gates consistent.
-- Scouting, scanning, information requirements, and redecision triggers: recon must serve a named strategic decision, not "more scouting is always better".
+- Attack readiness and strategic objective: living-force, upgrade, or other currently
+  observable readiness conditions, plus the semantic attack objective. Do not design
+  an information-acquisition workflow or a wake-event implementation.
 """
 
 
 SC2_STRATEGIC_PRIORITY = """## SC2 Strategic Priority
 
-The primary optimization objective is to win the decisive army engagement, or
-to survive it with enough retained combat power to continue the win plan. Match
-win rate remains the final external objective, but attack time, resource banking,
-production synchronization, gate timing, scouting volume, and strategy compliance
-are only intermediate mechanisms. Never select one of those surrogate improvements
-unless the evidence explains how it should improve decisive combat outcomes.
+The external objective is match victory through a favorable decisive engagement or
+survival with enough combat power to continue the strategy's win plan. Timing,
+production, economy, upgrades, scouting, and compliance are mechanisms, not goals.
 
-This is an evidence-driven reasoning preference, not a fixed ranking enum or a
-deterministic category selector. Do not choose a weakly supported higher-level
-category over a strongly supported lower-level explanation.
+Use one ordered analysis:
+1. Infer the strategy's core win mechanism and critical relative power window from
+   the complete strategy.md.
+2. Compare wins and losses to locate the first failure: before the mechanism forms,
+   while it is executed, or after it has succeeded. Optimize that first failed stage;
+   do not replace it with a later symptom.
+3. Within that stage, test army-package viability, survival to the intended window,
+   commitment timing, production/resource feasibility, technology, and composition,
+   using the strongest repeated evidence rather than category labels.
+4. Select one strategy-fixable causal hypothesis and include every dependency needed
+   to create a material combat-outcome difference.
 
-Prefer interventions that can directly change the decisive match outcome. When
-several strategy-fixable problems are supported, reason backward from the decisive
-engagement:
+This is not a fixed ranking enum or an exhaustive enum; evidence determines which
+explanation survives within the first failed stage. It is not a deterministic category selector.
 
-1. First ask whether the assembled army package can take favorable or survivable
-   fights against the observed opponent composition. Compare matchup, composition,
-   support-unit balance, upgrades, engagement conditions, first-engagement force
-   retention, and execution. A repeated catastrophic first engagement outranks
-   economy, production, and timing cleanup unless those levers create a materially
-   different fighting package or power-spike window.
-2. Then ask whether the strategy commits during the correct relative power-spike
-   window. Distinguish timing from an absolute unit-count threshold.
-3. Then ask whether production capacity and resource allocation create the viable
-   army package on time. Additional production must resolve a named timing or
-   army-state bottleneck; "more production is stronger" is insufficient.
-4. Then ask whether economy and expansion sustain production and enable recovery.
-   Their value must be tied to sustained output, a different timing, or rebuilding.
-5. Treat technology and upgrades primarily as multipliers of an otherwise viable
-   army package unless evidence directly identifies upgrade timing as decisive.
-6. Treat scouting and information as valuable only when the observation changes a
-   composition, production, timing, readiness, commitment, or recovery decision.
+For timing strategies, a nominally stronger but later army is not an improvement
+unless evidence shows that own gains exceed opponent growth. For scaling strategies,
+preserve survival and progression to the intended power spike. If losing games
+already reached the planned gate, do not blame gate attainment without explaining
+why the reached package or relative window was still inadequate.
 
-Do not select construction of static defensive structures as the primary evolution
-mechanism. Static defenses cannot accompany the mobile army and the executor places
-them around owned bases rather than arbitrary forward staging zones. Existing static
-defenses may appear in evidence, but improvements must come from the mobile fighting
-package, an executable combat control, readiness, production, timing, or recovery.
+Information is useful only when a decision-time observable fact changes an
+executable composition, production, timing, commitment, or recovery choice.
+Replay-only enemy_truth is diagnosis-only. Scouting or scanning that leaves the
+army, target, and commitment unchanged must remain optional and non-blocking.
+Scouting, scanning, and wake behavior may explain what the Commander knew or when it
+redecided, but EvolAgent must not optimize those mechanisms or add new scan/scout/
+wake instructions to strategy.md.
 
-## Reached-Plan Check
+An observed opponent feature is diagnostic evidence by default, not a strategy
+condition. Promote it to a live control condition only when cross-match evidence
+shows that the condition discriminates between situations requiring different
+actions, the alternative action is concrete and executable, and a simpler
+unconditional change cannot test the same hypothesis. A counter, technology, or
+structure appearing in both successful and failed matches is not discriminative by
+itself. Refine the condition or keep it diagnosis-only. Prefer a sufficient plan
+with fewer new branches, information requests, and cross-cycle dependencies.
 
-Before selecting a production, economy, or reach-gate timing hypothesis, check
-whether repeated losing matches already reached or exceeded the current planned
-army and attack gate. If the same decisive failure occurred after the threshold
-was reached, failure to reach it is not a sufficient explanation. Explicitly
-compare composition, matchup-dependent readiness, engagement conditions, upgrades,
-Commander execution, and runtime execution. Do not optimize production or economy
-merely to produce more of an army package that still loses decisively.
-
-If the planned package repeatedly succeeds once assembled, treat its viability as
-provisionally supported and then compare timing, production synchronization, and
-economic efficiency.
-
-## Recovery Priority
-
-Prioritize economy, expansion, production recovery, and rebuild changes when the
-first major army package is reasonably viable or competitive but the strategy
-repeatedly loses because it cannot restore production or army strength after
-attrition or retreat. Do not use more economy as the primary fix for a package
-that already loses catastrophically in its first decisive engagement unless the
-hypothesis explicitly depends on a different timing created by that economy.
-
-## Information Value
-
-Prefer information-conditioned strategy: observe X, then change composition,
-production, timing, readiness, commitment, or recovery. "Scout more" or "scan
-more" without a named downstream decision is not a sufficient hypothesis.
+Do not use static defensive construction as the primary mechanism, and do not hide
+Commander/runtime execution defects inside a more verbose strategy rule.
 """
 
 
@@ -272,6 +258,8 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
                     key: analysis.get(key)
                     for key in (
                         "record_mix",
+                        "strategy_contract",
+                        "strategy_mechanism_assessment",
                         "repeated_failures",
                         "wins_to_preserve",
                         "cross_outcome_comparison",
@@ -336,6 +324,8 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
                 "mutation_parent",
                 "comparison_champion",
                 "candidate",
+                "strategy_contract",
+                "strategy_mechanism_assessment",
                 "mechanism_family",
                 "hypothesis",
                 "implementation_verdict",
@@ -488,31 +478,39 @@ Executor capability manifest:
 
 Identify:
 
-1. Strengths
+1. Strategy identity and core mechanism
+Read the complete strategy.md before interpreting any match. Infer its gameplay
+style, the mechanism by which it is intended to create a winning engagement, its
+critical timing window or power spike, the commitments that define the strategy,
+and the components that can change without replacing it. Use strategy content, not
+the strategy filename or a hard-coded family profile. This contract must be formed
+before weaknesses are ranked.
+
+2. Strengths
 Repeated behaviors or strategy mechanisms that appear to contribute to successful games
 and should be preserved.
 
-2. Weaknesses
+3. Weaknesses
 Repeated patterns associated with losses, stalls, bad trades, missed timings,
 poor information, or failure to finish. Do not yet name a root-cause hypothesis.
 
-3. Unknowns
+4. Unknowns
 Questions that cannot be answered reliably from the match evidence alone. These must
 be static SC2 mechanism facts, not "which strategy is best" or "why this game was lost".
 
-4. Opponent pressure patterns
+5. Opponent pressure patterns
 Compare when and how opponents pressure owned bases, economy, production, or the
 defending army. Record the observable cues, the own defensive package available at
 contact, whether the strategy survived until its intended power spike, and concrete
 counterexamples. Do not fit a rule to one exact timestamp or one opponent build.
 
-5. Matchup and composition patterns
+6. Matchup and composition patterns
 Compare own and enemy compositions at major engagements across wins and losses.
 Separate upgrade differences from unit counters, support balance, defender advantage,
 engagement conditions, and execution. If a counter, synergy, or upgrade effect is
 needed to distinguish explanations, request a bounded knowledge query.
 
-6. Retrieval plan
+7. Retrieval plan
 Create a bounded, evidence-linked query plan before diagnosis:
 - First aggregate opponent pressure across the whole batch: first pressure/contact
   time, observable pressure cues, enemy composition at contact, own completed
@@ -528,6 +526,9 @@ Use concrete evidence such as:
 "Game 3 @ 420s: ..."
 
 Rules:
+- First compare whether the core win mechanism and critical timing were realized
+  in wins and losses. Do not let a later unit counter or final-state composition
+  overwrite an earlier failure to realize the strategy's intended advantage.
 - Compare wins and losses whenever possible.
 - Every opponent_pressure_pattern and matchup_pattern must state how many matches
   support it and include at least one counterexample when one exists.
@@ -554,6 +555,15 @@ Return one JSON object only:
 {{
   "action": "discover_batch",
   "analysis": {{
+    "strategy_contract":{{
+      "style":"gameplay style inferred from strategy.md",
+      "core_win_mechanism":"how this strategy is intended to create a winning engagement",
+      "critical_timing_or_power_spike":"relative timing window or power state that makes the mechanism work",
+      "core_commitments":["behavior whose removal would replace the strategy"],
+      "flexible_components":["component that may change without replacing the strategy"],
+      "optimization_boundary":"what evolution must preserve unless repeated evidence disproves it",
+      "direction":"preserve|adjust|replace"
+    }},
     "strengths":[
       {{"pattern":"repeated successful behavior","evidence":["Game 1 @ 420s: ..."]}}
     ],
@@ -660,11 +670,26 @@ Retrieval rules:
 - Treat recorded timeline rows as the authority for command, observation, zone, and engagement-attribution claims. If a discovery sentence conflicts with the queried rows, revise or reject the discovery sentence.
 - Historical experiments provide positive and negative intervention evidence. A similar rejected candidate is evidence against repeating the same concrete package, not automatic proof that every stronger or corrected version of the hypothesis is false.
 - Static game knowledge can support costs, prerequisites, effects, counters, and synergies. It cannot diagnose a match by itself and cannot override contrary trajectory evidence.
+- A database result is a factual premise, not a policy proposal. It must not promote
+  a counter, technology, unit, or structure into a scouting condition, attack gate,
+  target branch, or delay rule unless match evidence independently passes the
+  information-control promotion test below.
 - Any numerical production-time, throughput, or continuous resource-demand claim must quote a deterministic calculation returned by the knowledge query. If the required calculation is absent, keep the claim qualitative or request more evidence; do not calculate it mentally.
 - A production-demand calculation does not establish resource income. Never compare demand against a claimed mineral or gas income unless that income was returned by a deterministic query or measured from match records.
 - Every retrieved item used in the final diagnosis must be named in retrieval_assessment. Record conflicting evidence instead of silently dropping it.
 
-First, re-evaluate the discovery findings.
+First, re-evaluate the strategy contract inferred in discovery. Confirm or revise
+the style, core win mechanism, critical timing or power spike, core commitments,
+and flexible components using the complete strategy.md. Do this before ranking
+weaknesses. Never substitute a unit name for the strategy's causal mechanism.
+
+Next, compare wins and losses to determine whether the core mechanism was actually
+realized. State whether the repeated failure occurs before the mechanism is formed,
+during its intended execution, after it has succeeded, or in mixed stages. In
+particular, distinguish "the planned army eventually fought" from "the strategy
+reached the relative power window that makes that army effective."
+
+Then re-evaluate the remaining discovery findings.
 
 For every important weakness:
 - confirm it,
@@ -783,9 +808,9 @@ them into one unit-counter explanation.
 
 When repeated decisive fights fail after the current attack gate is met or
 exceeded, explicitly consider unit composition / support balance, matchup-dependent
-readiness, technology / upgrades, information quality before committing, Commander
-execution, and runtime execution. Considering them is required; changing
-composition is not required.
+readiness, technology / upgrades, Commander execution, and runtime execution.
+Considering them is required; changing composition is not required. Information
+quality may explain uncertainty but is not itself an EvolAgent modification domain.
 
 Do not select attack timing, production throughput, resource banking, or gate
 attainment as the priority objective when the assembled army still loses the
@@ -840,6 +865,23 @@ Never repeat a materially equivalent candidate; a same-hypothesis retry must sta
 the substantive increase or correction in intervention strength.
 
 If next_action is propose_strategy_patch:
+- preserve the strategy contract unless repeated evidence explicitly supports an
+  identity-level change;
+- use strategy_mechanism_assessment to ensure the optimization addresses the stage
+  where the core mechanism first fails;
+- complete information_grounding whenever an allowed plan branches on currently
+  visible or observed enemy state. Replay-only enemy_truth may support diagnosis but
+  may never be used as a strategy condition. The plan must use information already
+  present in the current observation and may not add scouting, scanning, or wake
+  behavior to obtain it;
+- for every new information-dependent branch, complete
+  information_grounding.control_necessity. Name the exact live condition and action
+  difference, compare it with the simplest unconditional alternative, cite at least
+  two matches showing discriminative value, and assess successful counterexamples.
+  Mere correlation with losses, static counter knowledge, or observability is not
+  sufficient. If the cue also occurs in successful matches and no narrower
+  decision-relevant condition separates them, keep it diagnosis-only and choose a
+  non-information-dependent plan;
 - select exactly one priority problem as an object, not a list;
 - choose one primary failure mode and one causal account for this generation;
 - pre-register one mechanism_prediction with an observable expected change, a
@@ -848,18 +890,29 @@ If next_action is propose_strategy_patch:
 - describe a materially different coherent intervention package in plan;
 - preserve relevant strengths;
 - do not rewrite unrelated strategy areas;
+- choose the primary change only from economy/expansion, production targets,
+  technology/upgrades, army composition, or attack readiness/objective. Do not
+  propose new scouting, scanning, wake-event, decision-cycle, reinforcement,
+  retreat, recovery, or cleanup behavior. Those paragraphs may receive only a
+  consistency repair caused by an allowed primary change;
 - do not provide final paragraph text, target_paragraph_id, baseline_rule, or candidate_rule.
 
 Optimization-direction rules:
 - A causal hypothesis may be chosen only when repeated match evidence supports a plausible connection between the current rule and the observed problem. Do not optimize from StarCraft common sense alone.
 - The unit of evolution is one primary failure mode addressed by one coherent intervention package, not one small lever, paragraph, unit, or upgrade. The package must be large enough to produce a clear behavioral difference from the Champion.
 - Implement the package with every dependent change required for it to be executable, internally consistent, resource-feasible, prerequisite-complete, survivable until active, and testable.
-- The package may coordinate economy/expansion, production/resource priority, technology/upgrades, unit composition/support balance, attack readiness/timing, reinforcement/recovery/cleanup, and scouting/information/redecision when they are necessary dependencies of the same hypothesis. This list is neither an enum nor a requirement to change every area.
+- The package may coordinate economy/expansion, production/resource priority,
+  technology/upgrades, unit composition/support balance, and attack
+  readiness/objective when they are necessary parts of the same hypothesis.
 - For every proposed change ask: "If this change were removed, would the selected hypothesis become incomplete, internally inconsistent, non-executable, or materially different?" If yes, include it. If no, leave that part of the Champion unchanged.
 - Do not combine unrelated improvements merely because all of them appear beneficial. A change that survives the removal test as a separate optimization objective belongs to a later generation.
 - A candidate should mutate the Champion, not redesign it from scratch. Preserve successful mechanisms unless current evidence directly contradicts them.
 - The optimization may adjust quantities, priorities, timings, prerequisites, support units, and readiness conditions, but must not replace the strategy's defining army concept or win plan unless the current strategy itself explicitly allows that flexibility. If the identity is no longer viable, choose stop rather than swapping strategy family.
-- plan.direction states the primary failure mode and causal idea. plan.material_behavior_change states the clearly observable difference from the Champion. plan.coordinated_changes lists the core intervention and every necessary prerequisite or consistency change without writing final paragraph text. Do not limit package size by paragraph count; reject only unrelated changes.
+- plan.direction states the primary failure mode and causal idea.
+  plan.material_behavior_change states the clearly observable difference from the
+  Champion. plan.coordinated_changes contains only changes in the five allowed
+  domains; the Optimizer handles mechanical stale-reference repairs without turning
+  them into additional mechanisms.
 
 The hypothesis must explain why changing strategy.md could plausibly change
 external match outcomes.
@@ -875,6 +928,43 @@ Return one JSON object only:
 {{
   "action": "decide_batch",
   "analysis": {{
+    "strategy_contract":{{
+      "style":"gameplay style inferred from the complete strategy",
+      "core_win_mechanism":"how the strategy creates its intended winning engagement",
+      "critical_timing_or_power_spike":"relative timing window or power state",
+      "core_commitments":["must-preserve behavior"],
+      "flexible_components":["adjustable behavior"],
+      "optimization_boundary":"identity boundary for this evolution",
+      "direction":"preserve|adjust|replace"
+    }},
+    "strategy_mechanism_assessment":{{
+      "core_mechanism_realization":"comparison of realization across wins and losses",
+      "critical_timing_comparison":"how own readiness and opponent growth differ at the intended window",
+      "failure_stage":"before_core_mechanism|during_core_mechanism|after_core_mechanism|mixed|unknown",
+      "optimization_implication":"what kind of change follows from the first failed stage"
+    }},
+    "information_grounding":{{
+      "uses_runtime_enemy_information":false,
+      "facts":[
+        {{
+          "claim":"fact used by the proposed strategy branch",
+          "source":"enemy_observed|own_observation|static_knowledge|enemy_truth",
+          "use":"diagnosis_only|strategy_condition",
+          "available_before_decision":true,
+          "runtime_supported":true,
+          "evidence":["Game 2 @ 390s: ..."]
+        }}
+      ],
+      "execution_rule":"current-observation rule, or no enemy information is used as a strategy condition",
+      "control_necessity":{{
+        "condition":"exact decision-time observable condition; empty for a non-information plan",
+        "action_change":"concrete action when true versus false",
+        "simpler_alternative":"simplest unconditional strategy change considered",
+        "why_information_is_required":"why that simpler change cannot test the same hypothesis",
+        "discriminative_evidence":["Game 2 @ 390s: cue and outcome","Game 5 @ 410s: contrasting cue/action/outcome"],
+        "counterexample_assessment":"successful matches containing the cue and whether they invalidate or require refinement of the condition"
+      }}
+    }},
     "strengths_to_preserve":[
       {{"pattern":"...","evidence":["Game 1 @ 420s: ..."]}}
     ],

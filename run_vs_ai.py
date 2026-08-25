@@ -5,8 +5,8 @@ explicit CLI arguments. ``--force-strategy <name>`` selects
 ``skills/<race>/<name>/strategy.md`` (e.g. ``tank``, ``marine``,
 ``battlecruiser``). During evolution, ``SC2_STRATEGY_ROOT`` can point at a
 run-local overlay so candidates are loaded without writing into ``skills/``.
-Use ``--force-strategy none`` to skip a forced folder (Commander still needs
-a resolvable strategy at game start).
+Use ``--force-strategy none`` for the No Skill baseline (empty strategy text,
+full race tool catalog; no ``strategy.md`` folder required).
 """
 from __future__ import annotations
 
@@ -200,6 +200,7 @@ _STRATEGY_CODE = {
     "marine": "m",
     "tank": "t",
     "battlecruiser": "b",
+    "none": "ns",
     # Legacy multi-agent folder names (still accepted via aliases).
     "early_marine": "m",
     "mid_tank": "t",
@@ -264,9 +265,10 @@ def _model_code(model: str) -> str:
 
 def _strategy_code(strategy: Optional[str]) -> str:
     key = str(strategy or "").strip()
+    # After resolve, empty/None means explicit No Skill (``--force-strategy none``).
     if not key:
-        return ""
-    known = _STRATEGY_CODE.get(key)
+        return _STRATEGY_CODE["none"]
+    known = _STRATEGY_CODE.get(key.lower())
     if known:
         return known
     # two_base_tanks_llm_combat_opt3 -> 2bt_o3 style fallback
@@ -381,7 +383,9 @@ def play_vs_ai(
     base = os.path.abspath(output_base_dir)
     # 如果指定了 batch_name，则归档到单独的批次文件夹下面
     if batch_name:
-        batch_slug = _safe_match_part(batch_name, max_len=40)
+        # Keep in sync with evolution.runner._batch_name (limit 56) so long
+        # names like ev_*_g000_cheatvision_champ are not truncated to *_cham.
+        batch_slug = _safe_match_part(batch_name, max_len=56)
         record_dir = os.path.join(base, batch_slug, match_id)
     else:
         record_dir = os.path.join(base, match_id)
@@ -409,7 +413,7 @@ def play_vs_ai(
                     f"bot:               {my_bot_name} ({bot_race})",
                     f"enemy:             AI {enemy_race} / {enemy_difficulty} / {enemy_build}",
                     f"map:               {map_name}",
-                    f"force_strategy:    {force_strategy or '(auto)'}",
+                    f"force_strategy:    {force_strategy or 'none'}",
                     f"commander_model:   {model_key}",
                     f"batch_name:        {batch_name or '-'}",
                     f"run_index:         {run_index if run_index is not None else '-'}",
@@ -437,8 +441,8 @@ def play_vs_ai(
         args.extend(["--instruct", bot_instruct])
     if model_key:
         args.extend(["--commander-model", model_key])
-    if force_strategy:
-        args.extend(["--force-strategy", force_strategy])
+    # Always forward: resolved None is explicit No Skill, not "omit and default".
+    args.extend(["--force-strategy", force_strategy or "none"])
 
     original_stdout = sys.stdout
     original_stderr = sys.stderr
@@ -555,7 +559,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=(
             f"强制锁定策略（skills/<race>/<name>）；"
             f"未指定时默认 {DEFAULT_FORCE_STRATEGY!r}；"
-            f"传 none 取消强制。"
+            f"传 none 为 No Skill 基线（无 strategy.md，全量工具）。"
         ),
     )
     p.add_argument(

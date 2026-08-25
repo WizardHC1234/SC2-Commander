@@ -151,7 +151,10 @@ Builds:
         )
         parser.add_argument(
             "--force-strategy",
-            help="Force a strategy folder under skills/<race>/ (e.g. tank).",
+            help=(
+                "Force a strategy folder under skills/<race>/ (e.g. tank), "
+                "or 'none' for No Skill (empty strategy, full tool catalog)."
+            ),
             default="",
         )
 

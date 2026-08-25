@@ -25,7 +25,6 @@
     "THOR": ["THOR", "THORAP"],
     "BATTLECRUISER": ["BATTLECRUISER"]
   },
-  "unit_supply": {"SIEGETANK": 3, "THOR": 6, "BATTLECRUISER": 6},
   "attack_gate": {"BATTLECRUISER": 6, "THOR": 4, "SIEGETANK": 6},
   "attack_modes": ["push", "assault", "search_and_destroy"],
   "attack_group_roles": ["main_force"],

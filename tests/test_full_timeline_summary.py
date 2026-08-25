@@ -855,6 +855,15 @@ def _stub_summaries():
 
 def _empty_discovery() -> dict:
     return {
+        "strategy_contract": {
+            "style": "concentrated intermediate push",
+            "core_win_mechanism": "assemble the planned force before decisive contact",
+            "critical_timing_or_power_spike": "the first complete Marine-Tank push",
+            "core_commitments": ["gather before attacking"],
+            "flexible_components": ["producer allocation"],
+            "optimization_boundary": "preserve the concentrated push",
+            "direction": "adjust",
+        },
         "strengths": [{"pattern": "two-base opener", "evidence": ["Game 1 @ 90s"]}],
         "weaknesses": [{"pattern": "Tank production is too late", "evidence": ["Game 2 @ 430s"]}],
         "unknowns": [
@@ -870,6 +879,33 @@ def _empty_discovery() -> dict:
 
 def _propose_decision(**overrides) -> dict:
     payload = {
+        "strategy_contract": {
+            "style": "concentrated intermediate push",
+            "core_win_mechanism": "assemble the planned force before decisive contact",
+            "critical_timing_or_power_spike": "the first complete Marine-Tank push",
+            "core_commitments": ["gather before attacking"],
+            "flexible_components": ["producer allocation"],
+            "optimization_boundary": "preserve the concentrated push",
+            "direction": "adjust",
+        },
+        "strategy_mechanism_assessment": {
+            "core_mechanism_realization": "wins assemble the force; losses contact before it is complete",
+            "critical_timing_comparison": "losses miss the intended relative power window",
+            "failure_stage": "before_core_mechanism",
+            "optimization_implication": "repair package completion without replacing the push",
+        },
+        "core_mechanism_guard": {
+            "identity_effect": "preserve",
+            "first_commitment_effect": "same",
+            "relative_power_effect": "improve",
+            "evidence": ["Game 2 @ 430s: the incomplete force meets pressure"],
+            "justification": "complete the same push without replacing its timing identity",
+        },
+        "information_grounding": {
+            "uses_runtime_enemy_information": False,
+            "facts": [],
+            "execution_rule": "No enemy information is used as a strategy condition.",
+        },
         "strengths_to_preserve": [{"pattern": "two-base opener", "evidence": ["Game 1 @ 90s"]}],
         "priority_problem": {
             "problem": "first fight is too weak",
@@ -998,6 +1034,9 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
         knowledge_runs=[],
     )
     assert "Cross-Match Decision Agent" in prompt
+    assert "re-evaluate the strategy contract inferred in discovery" in prompt
+    assert '"strategy_mechanism_assessment"' in prompt
+    assert '"failure_stage"' in prompt
     assert "Knowledge may invalidate an earlier interpretation" in prompt
     assert "Do not query the knowledge database again" in prompt
     assert "tank production cap" in prompt
@@ -1009,18 +1048,18 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
     assert "considered_explanations" in prompt
     assert "Do not treat a hypothesis as the primary cause if repeated counterexamples" in prompt
     assert "## SC2 Strategic Priority" in prompt
-    assert "not a fixed ranking enum or a" in prompt
+    assert "not a fixed ranking enum" in prompt
     assert "deterministic category selector" in prompt
-    assert "reason backward from the decisive" in prompt
-    assert "relative power-spike" in prompt
-    assert '"more production is stronger" is insufficient' in prompt
-    assert "## Reached-Plan Check" in prompt
-    assert "already reached or exceeded the current planned" in prompt
-    assert "not a sufficient explanation" in prompt
-    assert "## Recovery Priority" in prompt
-    assert "reasonably viable or competitive" in prompt
-    assert "## Information Value" in prompt
-    assert '"Scout more" or "scan' in prompt
+    assert "Use one ordered analysis" in prompt
+    assert "critical relative power window" in prompt
+    assert "own gains exceed opponent growth" in prompt
+    assert "For timing strategies" in prompt
+    assert "If losing games" in prompt
+    assert "reached the planned gate" in prompt
+    assert "first failed stage" in prompt
+    assert "decision-time observable fact" in prompt
+    assert "Replay-only enemy_truth is diagnosis-only" in prompt
+    assert "optional and non-blocking" in prompt
     assert "## Prior Experiment Interpretation" in prompt
     assert "Candidate selection and causal-hypothesis evaluation are separate" in prompt
     assert "minimum material mechanism change occurred" in prompt

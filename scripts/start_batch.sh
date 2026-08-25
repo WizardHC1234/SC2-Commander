@@ -138,9 +138,22 @@ validate_config() {
     exit 1
   fi
   if [[ "${FORCE_STRATEGY}" != "none" ]]; then
-    local strategy_path="${REPO_ROOT}/skills/${BOT_RACE}/${FORCE_STRATEGY}"
-    if [[ ! -d "${strategy_path}" ]]; then
-      echo "Strategy folder not found: ${strategy_path}" >&2
+    # Evolution sets SC2_STRATEGY_ROOT to evolution_runs/.../strategies.
+    local candidates=()
+    if [[ -n "${SC2_STRATEGY_ROOT:-}" ]]; then
+      candidates+=("${SC2_STRATEGY_ROOT%/}/${FORCE_STRATEGY}")
+    fi
+    candidates+=("${REPO_ROOT}/skills/${BOT_RACE}/${FORCE_STRATEGY}")
+    local resolved=""
+    local candidate
+    for candidate in "${candidates[@]}"; do
+      if [[ -f "${candidate}/strategy.md" ]]; then
+        resolved="${candidate}"
+        break
+      fi
+    done
+    if [[ -z "${resolved}" ]]; then
+      echo "Strategy folder not found for '${FORCE_STRATEGY}'. Searched: ${candidates[*]}" >&2
       exit 1
     fi
   fi

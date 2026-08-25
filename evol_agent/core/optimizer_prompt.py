@@ -9,62 +9,32 @@ from ..optimization.strategy_document import StrategyDocument
 
 
 _PATCH_CONSISTENCY_RULES = """
-Write exclusive if/else branches when conditions are alternatives. Never require
-mutually exclusive states (fresh intel vs stale intel; scan available vs scan
-unavailable) to be true at the same time.
+Binding strategy-writing contract:
 
-Give one paragraph ownership of the attack gate. Dependent paragraphs may follow
-that gate; they must not copy a second full copy of the condition.
-
-If recovery rebuilds toward an attack threshold, recover until that same gate is
-satisfied. Do not hard-code a lower rebuild count that the gate can immediately
-raise.
-
-Mandatory candidate-wide production-target audit: before returning patches,
-enumerate every unit whose production the complete candidate says to resume,
-restart, re-enable, return to, or continue. Give each unit its own explicit
-numerical stage production target. If its production remains enabled during the
-attack, reinforcement, recovery, or late-game phase, that unit must also appear
-with an explicit numerical count or cap in Ultimate Goal. A stage target alone is
-not sufficient for a continuously reinforced unit. The only exception is a unit
-explicitly declared temporary: the strategy must state the stage count and exactly
-when its production stops, and must not later say to continue or resume it.
-
-A condition that says when production resumes is not a quantity target. For
-example, "resume train_marauder after 8 Tanks" remains incomplete until Marauders
-receive their own stage target; if Marauder production continues during
-reinforcement, Ultimate Goal must also list the final Marauder count. Never infer a
-missing count from remaining supply, producer capacity, resources, or general
-composition prose.
-
-This is a blocking completeness rule for the entire candidate, including inherited
-text. It overrides the instruction to leave unrelated paragraphs unchanged: if the
-parent already contains an unbounded resumed-production instruction, patch the
-production-owning paragraph and the stage/final-target paragraph needed to bound it,
-even when the current causal intervention concerns another strategy area. Treat
-this as repairing an execution contract, not as introducing a second optimization
-objective. Return the audit in production_target_audit; no continuously reinforced
-unit may have an empty stage_target or ultimate_goal_target. Recompute final_supply
-from the complete Ultimate Goal, including workers and every combat/support unit at
-its full supply cost, and keep it at or below 200. Do not omit a unit from the
-supply calculation merely because its count is written in another paragraph.
-
-Use only observable information: living unit counts, last-seen enemy contents
-and recency, Orbital energy / scan readiness, and current army progress. Request
-a scan or scout when needed, then re-decide on a later wake. Never require
-judging whether a Scanner Sweep is "safe".
-
-If Scans and the attack gate both mention vision, they must agree: when energy
-is available, request a scan and hold the push; when energy is not available,
-apply the same fallback the gate names.
-
-Scan readiness or the ability to request a scan is not enemy information and
-must never satisfy an intel gate by itself. The strategy must request the scan,
-hold, and re-decide after a supported wake; only the later observed result may
-change the combat decision.
-
-Each replacement must differ from the parent paragraph text. Omit a paragraph
-rather than returning an unchanged replacement.
+1. strategy_contract is the sole definition of strategy identity and preserved
+behavior. priority_problem identifies the one problem, and plan.coordinated_changes
+is the complete modification package. Do not infer a second objective from other
+diagnostic fields.
+2. Changes may implement only economy/expansion targets, production-building and
+unit-count targets, technology/upgrades, army composition, or attack readiness and
+strategic objective. Do not modify Scouting or Scans. Do not add wake-event,
+decision-cycle, reinforcement, retreat, recovery, or cleanup behavior.
+3. Main Attack Gate exclusively owns first-attack permission. Pre-Attack Army
+Posture only gathers and stages. Existing reinforcement/recovery text may be patched
+only to replace a stale target with a reference to Main Attack Gate or the selected
+strategic objective; do not add a new rule or copy numerical launch thresholds.
+4. Every Commander cycle evaluates the current observation independently. Do not
+write Cycle 1/Cycle 2 protocols or require memory that a prior scan, wake, or branch
+completed. scan_ready means a scan can be requested; it is not an observation result.
+5. Use information_grounding only when plan.coordinated_changes actually depends on
+enemy information. enemy_truth is diagnosis-only.
+Only decision-time observable and runtime-supported facts may change a strategy
+branch. If information does not change the army, target, or commitment, keep it
+optional and non-blocking.
+6. Keep conditions mutually exclusive and keep every changed threshold consistent.
+Every resumed or continuing unit needs a numerical stage target and Ultimate Goal
+cap. The deterministic validator checks these targets and the 200-supply limit.
+7. Each replacement must differ from the parent paragraph. Omit unchanged text.
 """
 
 
@@ -84,7 +54,7 @@ def build_candidate_prompt(
 ) -> str:
     """Ask the Optimizer to implement one Cross-match hypothesis as paragraph patches."""
     del knowledge_mode, tool_observations
-    from .prompts import RUNTIME_CONTRACT, SC2_STRATEGIC_PRIORITY
+    from .prompts import RUNTIME_CONTRACT
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
     parent_text = str(skill_texts.get("strategy.md") or "")
     document = StrategyDocument.parse(parent_text)
@@ -108,23 +78,18 @@ do not repeat their invalid assumptions:
 
 Keep the same Cross-match hypothesis and plan direction.
 
-The analysis and optimization stages use the same strategic priority. Do not fix
-a validation error by replacing the selected combat intervention with a
-lower-priority timing, production, economy, upgrade, or information surrogate.
+Keep strategy_contract binding and keep implementing the same
+plan.coordinated_changes. Repairing an error must not introduce a second objective.
 
 Fix only the reported patch validation errors.
 
-Keep the inheritance ledger synchronized with the revised patches. Explicitly list which parent mechanisms are kept, revised, or removed. A removal needs an evidence-based reason; never omit a previously useful mechanism merely because it is not the new primary lever.
-
 You may add, remove, or revise paragraph patches when required to make the same
 hypothesis executable and internally consistent. Include missing prerequisite,
-resource/production, execution, and stale-target dependencies, but do not introduce
-a second independent optimization objective. Preserve the strategy's defining army
-concept and win plan.
+resource/production, and stale-target dependencies inside the allowed domains, but
+do not introduce a second independent optimization objective. Preserve the
+strategy's defining army concept and win plan.
 
 {_PATCH_CONSISTENCY_RULES}
-
-{SC2_STRATEGIC_PRIORITY}
 
 Do not introduce a new strategic objective.
 Do not modify unrelated paragraphs.
@@ -159,146 +124,47 @@ Return one JSON object only:
       "why_required":"why this paragraph must change for the same hypothesis"
     }}
   ],
-  "inheritance":{{
-    "keep":[{{"item":"parent mechanism retained","reason":"why it remains useful"}}],
-    "revise":[{{"item":"parent mechanism changed","reason":"why this revision is required"}}],
-    "remove":[{{"item":"parent mechanism removed","reason":"evidence-based reason"}}]
-  }},
-  "production_target_audit":[
-    {{"unit":"unit whose production resumes or continues","instruction":"source instruction","stage_target":"its explicit numerical production target","ultimate_goal_target":"its explicit numerical count in Ultimate Goal","temporary_stop_rule":"explicit stop condition, or empty when continuously reinforced"}}
-  ],
-  "final_supply":{{"total":0,"calculation":"complete workers plus combat and support unit supply calculation; must be <=200"}},
   "expected_effect":"expected match effect",
   "main_risk":"possible regression"
 }}
 """
 
-    return f"""You are EvolAgent's Strategy Optimizer.
-
-The Cross-Match Decision Agent has already selected one primary failure mode,
-one hypothesis, and one coherent intervention package.
-
-Do not redo the match analysis.
-Do not choose a different problem.
-Do not replace the hypothesis.
-Do not introduce a second optimization objective.
+    return f"""You are EvolAgent's Strategy Optimizer. Implement the supplied
+Cross-match Decision; do not redo analysis, choose another problem, or select among
+candidate plans.
 Do not select among candidate plans.
 
-The selected primary failure mode is the unit of evolution. Treat plan.direction,
-plan.material_behavior_change, and plan.coordinated_changes as one intervention
-package, not as independent suggestions or a single small lever.
+Binding priority:
+1. Preserve strategy_contract. The strategy_contract was inferred before failure ranking and defines
+the style, core win mechanism, critical timing/power spike, and core commitments.
+2. Address priority_problem by implementing every item in plan.coordinated_changes.
+3. Use information_grounding only when that plan depends on decision-time enemy
+information; never turn enemy_truth into a live rule.
+4. Add only dependencies required for execution, feasibility, and cross-paragraph
+consistency. Preserve unrelated strategy-contract commitments.
 
-Patch every paragraph required to realize all coordinated changes in the package.
-This may include several strategy areas when they jointly address the same failure
-mode. The package must be executable, internally consistent, resource-feasible,
-prerequisite-complete, survivable until its intended power spike, and semantically
-coherent. Do not introduce a second independent optimization objective merely
-because it might also improve the strategy.
-
-The supplied mechanism_prediction pre-registers what must materially change for
-this candidate to count as a real test. Implement a package strong enough to meet
-minimum_material_change in strategy intent. Do not satisfy it with a cosmetic,
-token, isolated, or merely reworded adjustment. The candidate should produce the
-declared plan.material_behavior_change. Do not exaggerate strength by adding
-changes that are unrelated to the same causal mechanism.
-
-Preserve the strategy's defining army concept and win plan unless the supplied
-Cross-match Decision explicitly identifies a supported identity-level problem.
-
-Treat the current strategy as the inheritance source, including changes inherited from earlier inconclusive but non-worse candidates. Produce an explicit inheritance ledger with keep, revise, and remove entries. Do not silently drop a parent mechanism. Every removal must be justified by match evidence, a verified feasibility conflict, or a direct contradiction with the selected intervention package.
-
-The primary strategic objective is a favorable or survivable decisive army
-engagement. Timing, resource use, production synchronization, scouting, and gate
-attainment are intermediate mechanisms, not standalone optimization goals. The
-candidate must preserve a clear explanation of how its material change improves
-the combat_success_measure in the selected mechanism prediction.
-
-Use exactly the same priority order as the analysis stage. Implement the selected
-package by reasoning backward from decisive combat: viable matchup and fighting
-package first; survival until the intended power spike second; relative commitment
-window third; production and resource feasibility fourth; economy and recovery
-fifth. Treat upgrades as multipliers unless evidence makes them decisive, and use
-information only when it changes one of those higher-priority combat decisions.
-Never replace a required higher-priority package component with an easier
-lower-priority patch.
-
-Do not implement construction of static defensive structures as the primary
-evolution mechanism. They cannot accompany the mobile fighting force, and the
-executor places them around owned bases rather than arbitrary forward staging
-zones. If the supplied plan depends on forward or mobile static defense, it is not
-an executable strategy patch.
-
-Keep the candidate concise. Prefer one observable rule over repeated warnings,
-copied gates, or many narrow exceptions. Never add strategy text to compensate for
-runtime-owned transformations, transport loading, abilities, targeting, formation,
-or unit-level micro. If the selected hypothesis depends on one of those behaviors,
-the candidate is execution-invalid rather than a strategy patch.
-
-Your job is only to implement the supplied hypothesis as a coherent paragraph
-patch to the current strategy.md.
+Reason backward from decisive army combat. The available levers are economy and
+expansion targets, production targets, technology and upgrades, army composition,
+and attack readiness/objective. Scouting, scanning, wake behavior, reinforcement,
+retreat, recovery, cleanup, static defense, runtime-owned micro, transformations,
+transport, targeting, and formation are not primary strategy patches.
 
 {retry_feedback}
-
 {RUNTIME_CONTRACT}
-{SC2_STRATEGIC_PRIORITY}
 {_PATCH_CONSISTENCY_RULES}
 
-Read the complete strategy before editing.
-
-Determine every existing Detail paragraph that must change in this order:
-1. map every item in plan.coordinated_changes to the existing strategy paragraphs;
-2. identify survival and prerequisite dependencies needed before the change is active;
-3. identify resource and production dependencies;
-4. identify composition, support, readiness, and recovery dependencies;
-5. identify execution dependencies;
-6. identify stale targets or contradictions in dependent paragraphs;
-7. patch every necessary dependency;
-8. leave unrelated paragraphs unchanged while preserving supported strengths.
-
+Read the complete strategy. Map each coordinated change to existing paragraphs,
+add necessary prerequisites inside the five allowed domains, and leave unrelated
+text unchanged. A reinforcement or recovery paragraph may change only when an
+allowed edit created a stale reference, and then only to reference Main Attack Gate
+or the selected objective. There is no fixed patch-count limit.
 There is no fixed maximum number of paragraph patches.
 
-However, every modified paragraph must be necessary for the same hypothesis.
-Leave every unrelated paragraph unchanged.
-
-For every proposed patch ask: "If this patch were removed, would the selected
-hypothesis become incomplete, internally inconsistent, non-executable, or
-materially different?" Include it only when the answer is yes. A dependency that
-the current strategy already satisfies needs no patch.
-
-Do not minimize patch count if doing so would leave contradictory thresholds,
-priorities, production rules, attack conditions, recovery conditions, or final
-targets.
-
-Before returning patches, scan every Detail paragraph for rules that reuse
-or depend on the concept being changed.
-
-If the hypothesis changes a threshold, production priority, composition target,
-attack condition, recovery condition, expansion timing, scouting requirement,
-or technology dependency, update every paragraph that would otherwise contradict
-the new rule.
-
-Do not update paragraphs that merely mention related units but remain logically
-consistent.
-
-For each patch:
-- target an existing paragraph id;
-- copy its exact parent hash;
-- return the complete replacement instruction;
-- explain why this paragraph must change for the hypothesis.
-
-Every patch must implement a listed coordinated change or a necessary dependency
-of one. Collectively, the patches must cover the whole intervention package; do
-not silently drop difficult package items and return only the easiest upgrade,
-timing, production, or scouting change.
-
-Do not add, delete, rename, or reorder paragraphs.
-Do not modify # Summary.
-Do not mention match ids, exact recorded timestamps, EvolAgent internals,
-or Replay-only enemy truth in strategy.md.
-Do not write micro, map-specific zone IDs, or group IDs.
-Express attack-readiness counts as completed, living units in the persistent main force.
-Keep explicit end-state supply at or below 200.
-Write reusable StarCraft II strategy instructions.
+For each patch, target an existing Detail id, copy its exact parent hash, return
+one complete replacement instruction, and explain its direct dependency. Do not
+modify Summary or paragraph structure. Do not mention match ids, timestamps,
+EvolAgent internals, Replay-only truth, map-specific IDs, or group IDs. Express
+readiness with completed living units and keep final supply at or below 200.
 
 Strategy: {strategy_name}
 Race: {race}
@@ -329,15 +195,6 @@ Return one JSON object only:
       "why_required":"why this paragraph must change for the hypothesis"
     }}
   ],
-  "inheritance":{{
-    "keep":[{{"item":"parent mechanism retained","reason":"evidence or dependency"}}],
-    "revise":[{{"item":"parent mechanism changed","reason":"relation to the selected hypothesis"}}],
-    "remove":[{{"item":"parent mechanism removed","reason":"evidence-based reason; empty when none"}}]
-  }},
-  "production_target_audit":[
-    {{"unit":"unit whose production resumes or continues","instruction":"source instruction","stage_target":"its explicit numerical production target","ultimate_goal_target":"its explicit numerical count in Ultimate Goal","temporary_stop_rule":"explicit stop condition, or empty when continuously reinforced"}}
-  ],
-  "final_supply":{{"total":0,"calculation":"complete workers plus combat and support unit supply calculation; must be <=200"}},
   "expected_effect":"expected match effect",
   "main_risk":"possible regression to evaluate in games"
 }}

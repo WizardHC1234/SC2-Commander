@@ -33,8 +33,12 @@ builds = {
     "air": AIBuild.Air,
 }
 
-# Ingame AI difficulty settings
+# Ingame AI difficulty settings.
+# Scripts/evolution use cheat* names; keep short vision/money/insane aliases too.
 difficulty = {
+    "cheatinsane": Difficulty.CheatInsane,
+    "cheatmoney": Difficulty.CheatMoney,
+    "cheatvision": Difficulty.CheatVision,
     "insane": Difficulty.CheatInsane,
     "money": Difficulty.CheatMoney,
     "vision": Difficulty.CheatVision,

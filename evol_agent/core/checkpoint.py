@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -248,6 +249,48 @@ class EvolCheckpoint:
             if qid and is_knowledge_run_verified(run):
                 ids.add(qid)
         return ids
+
+    def restart_analysis(self, *, reason: str) -> Path:
+        """Archive an unusable analysis and retain only its match summaries.
+
+        A completed analysis may be internally valid JSON but still depend on a
+        strategy mechanism the executor cannot express.  Retrying the optimizer
+        from that same decision only produces paraphrases of the same invalid
+        plan.  Preserve all rejected artifacts for audit, then rewind to the
+        reusable match-summary stage so discovery, knowledge, and the final
+        decision are regenerated with the rejection feedback.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        archive_dir = self.run_dir / "analysis_retries" / timestamp
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "cross_match_discovery.json",
+            "batch_analysis.json",
+            "analysis_checkpoint.json",
+            "analysis.json",
+            "knowledge_trace.json",
+            "tool_observations.json",
+            "knowledge",
+        ):
+            source = self.run_dir / name
+            if source.exists():
+                shutil.move(str(source), str(archive_dir / name))
+        self.knowledge_dir.mkdir(parents=True, exist_ok=True)
+        retries = list(self.meta.get("analysis_retries") or [])
+        retries.append(
+            {
+                "at": datetime.now().isoformat(),
+                "reason": str(reason or "strategy scope rejection"),
+                "archive_dir": str(archive_dir),
+            }
+        )
+        self.meta["analysis_retries"] = retries[-8:]
+        self.meta["completed_knowledge_ids"] = []
+        # set_stage intentionally never regresses; a retry is the exceptional
+        # case where the stage must be rewound after archival.
+        self.meta["stage"] = "match_summaries"
+        self.flush_meta()
+        return archive_dir
 
     def save_analysis_complete(
         self,

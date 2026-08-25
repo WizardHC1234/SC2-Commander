@@ -218,6 +218,24 @@ class CommanderBot(KnowledgeBot):
         )
         self._copy_strategy_to_record_dir(md_path)
 
+    def _apply_no_skill_strategy(self) -> None:
+        """No Skill baseline: empty strategy.md text; full race tool catalog later."""
+        self.selected_strategy = "none"
+        self.strategy_description = ""
+        self._strategy_raw = ""
+        self.strategy_hash = "none"
+        self._emit("force_strategy=none (no strategy.md; full tool catalog)")
+        self._record_llm_interaction(
+            {
+                "game_time": 0.0,
+                "trigger_reason": "strategy_none",
+                "forced_strategy": "none",
+                "strategy_id": "none",
+                "strategy_hash": self.strategy_hash,
+                "strategy_description": "",
+            }
+        )
+
     def _copy_strategy_to_record_dir(self, md_path: str) -> None:
         if not self.record_dir or not os.path.isfile(md_path):
             return
@@ -225,19 +243,36 @@ class CommanderBot(KnowledgeBot):
         shutil.copy2(md_path, os.path.join(self.record_dir, "strategy.md"))
 
     def _select_strategy_tools(self) -> None:
-        """Once per match: semantic selection plus dependency expansion."""
+        """Once per match: semantic selection plus dependency expansion.
+
+        No Skill (``selected_strategy == \"none\"``) skips the selection LLM and
+        exposes the full race action catalog so the action interface matches
+        With-Skill games aside from the missing strategy text.
+        """
         full = dict(self._full_action_space or self._action_space_cache or {})
         if not full:
             logger.warning("tool selection skipped: empty action space")
             return
+        no_skill = (self.selected_strategy or "").strip().lower() == "none"
         strategy_text = self._strategy_raw or self.strategy_description
         outcome = select_tools_for_strategy(
             strategy_text=strategy_text,
             full_action_space=full,
             model_key=self._resolved_model_key(),
-            use_llm=True,
+            use_llm=not no_skill,
             dependency_resolver=self._expand_action_dependencies_fn,
         )
+        if no_skill:
+            # select_tools_for_strategy already falls back to full when use_llm
+            # is False; stamp an explicit reason for match_info / JSON.
+            outcome = dict(outcome)
+            outcome["fallback_used"] = True
+            outcome["fallback_reason"] = "no_skill_full_catalog"
+            outcome["action_space"] = dict(full)
+            outcome["selected_tools"] = sorted(full)
+            outcome["selected_tool_count"] = len(full)
+            outcome["semantic_tools"] = []
+            outcome["dependency_tools"] = []
         self._tool_selection = outcome
         selected = outcome.get("action_space") or {}
         if selected:
@@ -351,8 +386,12 @@ class CommanderBot(KnowledgeBot):
 
     async def on_start(self):
         self._load_race_action_module()
-        strategy = self.force_strategy or "tank"
-        self._apply_forced_strategy(strategy)
+        # ``force_strategy is None`` means explicit No Skill (CLI ``none``),
+        # not "pick a default folder". With-Skill callers pass marine/tank/…
+        if self.force_strategy:
+            self._apply_forced_strategy(self.force_strategy)
+        else:
+            self._apply_no_skill_strategy()
         await super().on_start()
         self.zone_manager = self.knowledge.get_required_manager(IZoneManager)
         self.llm_observation_recorder.interval_seconds = self.OBS_RECORD_INTERVAL

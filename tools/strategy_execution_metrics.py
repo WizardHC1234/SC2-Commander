@@ -373,17 +373,6 @@ def load_specs(
             raise ValueError(f"unsupported schema_version in spec: {path}")
         if not isinstance(spec.get("attack_gate"), dict) or not spec["attack_gate"]:
             raise ValueError(f"attack_gate missing in spec: {path}")
-        unit_supply = spec.get("unit_supply") or {}
-        missing_supply = [
-            str(unit)
-            for unit, target in spec["attack_gate"].items()
-            if number(target) > 0 and number(unit_supply.get(unit)) <= 0
-        ]
-        if missing_supply:
-            raise ValueError(
-                f"unit_supply missing for attack_gate units in {path}: "
-                f"{', '.join(missing_supply)}"
-            )
         if strategy in specs:
             raise ValueError(f"duplicate strategy spec: {strategy}")
         spec["_spec_path"] = str(path)
@@ -559,35 +548,29 @@ def group_unit_count(
     return sum(number(counts.get(alias)) for alias in aliases(spec, entity))
 
 
+def equal_requirement_progress(
+    gate: dict[str, Any],
+    observed_count: Any,
+) -> float:
+    """Return equal-weighted completion of the positive gate requirements."""
+    values = [
+        min(number(observed_count(unit)) / target, 1.0)
+        for unit, target_value in gate.items()
+        if (target := number(target_value)) > 0
+    ]
+    return statistics.fmean(values) if values else 0.0
+
+
 def group_gate_progress(
     group: dict[str, Any],
     spec: dict[str, Any],
 ) -> float:
+    """Return same-snapshot, equal-weighted main-force readiness."""
     gate = spec.get("attack_gate") or {}
-    unit_supply = spec.get("unit_supply") or {}
-    if gate and not unit_supply:
-        return statistics.fmean(
-            min(
-                group_unit_count(group, spec, unit) / number(target),
-                1.0,
-            )
-            for unit, target in gate.items()
-            if number(target) > 0
-        )
-    required_supply = sum(
-        number(target) * (number(unit_supply.get(unit)) or 1.0)
-        for unit, target in gate.items()
-        if number(target) > 0
+    return equal_requirement_progress(
+        gate,
+        lambda unit: group_unit_count(group, spec, unit),
     )
-    if required_supply <= 0:
-        return 0.0
-    completed_supply = sum(
-        min(group_unit_count(group, spec, unit), number(target))
-        * (number(unit_supply.get(unit)) or 1.0)
-        for unit, target in gate.items()
-        if number(target) > 0
-    )
-    return completed_supply / required_supply
 
 
 def group_gate_complete(
@@ -1392,32 +1375,10 @@ def gate_progress_at(
     spec: dict[str, Any],
 ) -> float:
     gate = spec.get("attack_gate") or {}
-    if not gate:
-        return 0.0
-    unit_supply = spec.get("unit_supply") or {}
-    if not unit_supply:
-        return statistics.fmean(
-            min(
-                completed_count(snapshot, spec, unit) / number(target),
-                1.0,
-            )
-            for unit, target in gate.items()
-            if number(target) > 0
-        )
-    required_supply = sum(
-        number(target) * (number(unit_supply.get(unit)) or 1.0)
-        for unit, target in gate.items()
-        if number(target) > 0
+    return equal_requirement_progress(
+        gate,
+        lambda unit: completed_count(snapshot, spec, unit),
     )
-    if required_supply <= 0:
-        return 0.0
-    completed_supply = sum(
-        min(completed_count(snapshot, spec, unit), number(target))
-        * (number(unit_supply.get(unit)) or 1.0)
-        for unit, target in gate.items()
-        if number(target) > 0
-    )
-    return completed_supply / required_supply
 
 
 def gate_complete_at(
@@ -1653,8 +1614,9 @@ def evaluate_match(
     if technology_completion is None:
         raise ValueError("strategy spec has no technology requirements")
 
-    # Army: best simultaneous progress of all completed, living combat units.
-    # This deliberately includes units temporarily reserved by PlanZoneDefense.
+    # Army: best simultaneous, equal-weighted completion of the required unit
+    # types. This deliberately includes units temporarily reserved by
+    # PlanZoneDefense.
     army_completion = max(
         (
             gate_progress_at(snapshot, spec)
@@ -2457,13 +2419,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     ),
                     "requires_commander_decision_accepted": True,
                     "understrength_score": (
-                        "required-supply-weighted readiness of the gathered "
-                        "main force; distant group_1 reinforcements do not "
-                        "complete the trigger gate"
+                        "equal-weighted readiness of the gathered main force; "
+                        "distant group_1 reinforcements do not complete the "
+                        "trigger gate"
                     ),
                     "army_completion_source": (
-                        "maximum required-supply-weighted readiness over all "
-                        "completed living units"
+                        "maximum same-snapshot, equal-weighted readiness over "
+                        "all completed living units"
                     ),
                     "first_executable_opportunity": (
                         "first logical Commander decision at or after the "

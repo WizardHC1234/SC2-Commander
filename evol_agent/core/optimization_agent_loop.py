@@ -53,6 +53,26 @@ def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[
         strengths = raw.get("wins_to_preserve") if isinstance(raw.get("wins_to_preserve"), list) else []
     knowledge_used = raw.get("knowledge_used") if isinstance(raw.get("knowledge_used"), list) else []
     return {
+        "strategy_contract": (
+            dict(raw.get("strategy_contract"))
+            if isinstance(raw.get("strategy_contract"), dict)
+            else {}
+        ),
+        "strategy_mechanism_assessment": (
+            dict(raw.get("strategy_mechanism_assessment"))
+            if isinstance(raw.get("strategy_mechanism_assessment"), dict)
+            else {}
+        ),
+        "core_mechanism_guard": (
+            dict(raw.get("core_mechanism_guard"))
+            if isinstance(raw.get("core_mechanism_guard"), dict)
+            else {}
+        ),
+        "information_grounding": (
+            dict(raw.get("information_grounding"))
+            if isinstance(raw.get("information_grounding"), dict)
+            else {}
+        ),
         "strengths_to_preserve": strengths,
         "priority_problem": priority,
         "hypothesis": hypothesis,
@@ -326,9 +346,60 @@ def _drop_unchanged_patches(
 
 
 def _fallback_is_safe(*, failure_stage: str, errors: list[str]) -> bool:
-    """After retries, evaluate the last patched candidate instead of aborting."""
-    del errors
-    return bool(failure_stage)
+    """Allow fallback only for explicitly non-blocking semantic notes.
+
+    Structure, basic execution, knowledge, and blocking semantic failures are
+    compile errors. Sending such a candidate into matches makes the experiment
+    measure validator noise instead of the selected strategy hypothesis.
+    """
+    if failure_stage != "semantic" or not errors:
+        return False
+    return all(str(error).strip().lower().startswith("non-blocking") for error in errors)
+
+
+_IMMEDIATE_ANALYSIS_REPLAN_TYPES = frozenset(
+    {"strategy_identity"}
+)
+
+_REPEATED_ANALYSIS_REPLAN_TYPES = frozenset(
+    {"decision_grounding", "runtime_boundary"}
+)
+
+
+def _semantic_error_types(errors: list[str]) -> set[str]:
+    types: set[str] = set()
+    for error in errors:
+        for match in re.finditer(
+            r"(?:^|;\s*)([a-z][a-z0-9_]*)\s+—",
+            str(error).strip().lower(),
+        ):
+            types.add(match.group(1))
+    return types
+
+
+def _analysis_replan_reason(
+    errors: list[str],
+    *,
+    type_attempts: dict[str, int],
+) -> str:
+    error_types = _semantic_error_types(errors)
+    immediate = sorted(error_types & _IMMEDIATE_ANALYSIS_REPLAN_TYPES)
+    if immediate:
+        return (
+            "semantic validation found an analysis-level error: "
+            + ", ".join(immediate)
+        )
+    repeated = sorted(
+        error_type
+        for error_type in error_types & _REPEATED_ANALYSIS_REPLAN_TYPES
+        if type_attempts.get(error_type, 0) >= 2
+    )
+    if repeated:
+        return (
+            "the selected plan produced repeated analysis-level implementation "
+            "failures: " + ", ".join(repeated)
+        )
+    return ""
 
 
 def _candidate_rationale(
@@ -360,6 +431,26 @@ def _candidate_rationale(
             strengths.append(str(item).strip())
     patches = list(candidate.get("patches") or [])
     return {
+        "strategy_contract": (
+            dict(decision.get("strategy_contract"))
+            if isinstance(decision.get("strategy_contract"), dict)
+            else {}
+        ),
+        "strategy_mechanism_assessment": (
+            dict(decision.get("strategy_mechanism_assessment"))
+            if isinstance(decision.get("strategy_mechanism_assessment"), dict)
+            else {}
+        ),
+        "core_mechanism_guard": (
+            dict(decision.get("core_mechanism_guard"))
+            if isinstance(decision.get("core_mechanism_guard"), dict)
+            else {}
+        ),
+        "information_grounding": (
+            dict(decision.get("information_grounding"))
+            if isinstance(decision.get("information_grounding"), dict)
+            else {}
+        ),
         "hypothesis": hypothesis,
         "mechanism_family": str(decision.get("mechanism_family") or "").strip(),
         "failure_mode_analysis": (
@@ -456,6 +547,7 @@ def run_optimization_agent_loop(
     last_improvement: EvolImprovement | None = None
     latest_applied_improvement: EvolImprovement | None = None
     latest_applied_failure_stage = ""
+    semantic_type_attempts: dict[str, int] = {}
     parent_text = str(skill_texts.get("strategy.md") or "")
     try:
         parent_document = StrategyDocument.parse(parent_text)
@@ -712,6 +804,10 @@ def run_optimization_agent_loop(
             latest_applied_failure_stage = "semantic"
             validation_errors.append(error)
             prompt_errors = [error]
+            for error_type in _semantic_error_types(semantic_errors):
+                semantic_type_attempts[error_type] = (
+                    semantic_type_attempts.get(error_type, 0) + 1
+                )
             events.append(
                 {
                     "attempt": attempt,
@@ -722,6 +818,37 @@ def run_optimization_agent_loop(
                     "paragraph_changes": paragraph_changes,
                 }
             )
+            replan_reason = _analysis_replan_reason(
+                semantic_errors,
+                type_attempts=semantic_type_attempts,
+            )
+            if replan_reason:
+                # Keep the detailed candidate errors in the optimization event,
+                # but return only the abstract reason to Cross-Match Analysis.
+                # Concrete suggestions such as a particular scan, structure, or
+                # target otherwise anchor the next analysis to the failed plan.
+                replan_error = f"analysis_replan_required: {replan_reason}"
+                events.append(
+                    {
+                        "attempt": attempt,
+                        "action": "analysis_replan_required",
+                        "valid": False,
+                        "error": replan_error,
+                        "llm_calls": llm_calls,
+                    }
+                )
+                print(
+                    f"{prefix}OptimizationAgent: {replan_reason}; "
+                    "returning to cross-match analysis",
+                    flush=True,
+                )
+                return (
+                    ValidationResult(ok=False, error=replan_error),
+                    None,
+                    observations,
+                    validation_errors,
+                    events,
+                )
             if attempt <= MAX_VALIDATION_RETRIES:
                 print(
                     f"{prefix}OptimizationAgent: patch semantics failed; "
@@ -792,6 +919,20 @@ def run_optimization_agent_loop(
             validation_errors,
             events,
         )
+    events.append(
+        {
+            "action": "reject_latest_candidate_after_validation_retry_exhausted",
+            "valid": False,
+            "error": error,
+            "failure_stage": latest_applied_failure_stage,
+            "llm_calls": llm_calls,
+        }
+    )
+    print(
+        f"{prefix}OptimizationAgent: validation retries exhausted; "
+        "candidate rejected and no match evaluation will start",
+        flush=True,
+    )
     return (
         ValidationResult(ok=False, error=error),
         None,

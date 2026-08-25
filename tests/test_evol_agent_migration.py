@@ -17,12 +17,17 @@ from evol_agent.core import config
 from evol_agent.core.config import resolve_skill_dir
 from evol_agent.core.analysis_agent_loop import (
     _normalize_batch_analysis,
+    _normalize_core_mechanism_guard,
     _normalize_cross_match_decision,
     _normalize_cross_match_discovery,
+    _normalize_information_grounding,
     _static_defense_direction_error,
+    _strategy_scope_error,
 )
 from evol_agent.core.checkpoint import EvolCheckpoint
+from evol_agent.core.agent import _scope_retry_feedback
 from evol_agent.core.capabilities import build_executor_capability_manifest
+from evol_agent.core.context import render_knowledge_results
 from evol_agent.core.loop_helpers import normalize_strategy_contract
 from evol_agent.core.optimization_agent_loop import run_optimization_agent_loop
 from evol_agent.core.prompts import (
@@ -62,6 +67,169 @@ A compact Terran plan built around a gathered Marine and Tank force.
 * Opening: Build workers, supply, production, gas, and technology toward fixed absolute targets.
 * Main Attack Gate: Gather the persistent main force before attacking and send reinforcements toward the same objective.
 """
+
+
+def test_core_mechanism_guard_rejects_unjustified_delay() -> None:
+    guard, error = _normalize_core_mechanism_guard(
+        {
+            "identity_effect": "preserve",
+            "first_commitment_effect": "later",
+            "relative_power_effect": "unknown",
+            "evidence": ["Game 2 @ 430s: the opponent also grows during the delay"],
+        }
+    )
+
+    assert guard is None
+    assert "relative power window improves" in error
+
+
+def test_information_grounding_keeps_enemy_truth_diagnosis_only() -> None:
+    grounding, error = _normalize_information_grounding(
+        {
+            "uses_runtime_enemy_information": True,
+            "facts": [
+                {
+                    "claim": "the opponent had hidden Siege Tanks",
+                    "source": "enemy_truth",
+                    "use": "strategy_condition",
+                    "available_before_decision": False,
+                    "runtime_supported": False,
+                }
+            ],
+            "execution_rule": "delay the attack when hidden Tanks existed",
+        },
+        plan_uses_information=True,
+    )
+
+    assert grounding is None
+    assert "decision-time observable" in error
+
+
+def test_information_grounding_accepts_current_observation_condition() -> None:
+    grounding, error = _normalize_information_grounding(
+        {
+            "uses_runtime_enemy_information": True,
+            "facts": [
+                {
+                    "claim": "enemy air is currently visible",
+                    "source": "enemy_observed",
+                    "use": "strategy_condition",
+                    "available_before_decision": True,
+                    "runtime_supported": True,
+                }
+            ],
+            "execution_rule": "change production only when enemy air is currently visible",
+        },
+        plan_uses_information=True,
+    )
+
+    assert error == ""
+    assert grounding is not None
+    assert grounding["facts"][0]["source"] == "enemy_observed"
+
+
+def test_live_information_plan_requires_control_necessity_evidence() -> None:
+    grounding, error = _normalize_information_grounding(
+        {
+            "uses_runtime_enemy_information": True,
+            "facts": [
+                {
+                    "claim": "an opponent feature is currently visible",
+                    "source": "enemy_observed",
+                    "use": "strategy_condition",
+                    "available_before_decision": True,
+                    "runtime_supported": True,
+                    "evidence": ["Game 2 @ 300s: feature visible before contact"],
+                }
+            ],
+            "execution_rule": "change the next action when the feature is visible",
+        },
+        plan_uses_information=True,
+        require_control_necessity=True,
+    )
+
+    assert grounding is None
+    assert "promotion from diagnostic evidence" in error
+
+
+def test_live_information_plan_accepts_discriminative_control_evidence() -> None:
+    grounding, error = _normalize_information_grounding(
+        {
+            "uses_runtime_enemy_information": True,
+            "facts": [
+                {
+                    "claim": "an opponent feature is currently visible",
+                    "source": "enemy_observed",
+                    "use": "strategy_condition",
+                    "available_before_decision": True,
+                    "runtime_supported": True,
+                    "evidence": ["Game 2 @ 300s: feature visible before contact"],
+                }
+            ],
+            "execution_rule": "choose action B when visible, otherwise action A",
+            "control_necessity": {
+                "condition": "the feature is visible in the current observation",
+                "action_change": "choose action B instead of action A",
+                "simpler_alternative": "apply action B unconditionally",
+                "why_information_is_required": "action B regresses the contrasting observed case",
+                "discriminative_evidence": [
+                    "Game 2 @ 300s: condition present and action A fails",
+                    "Game 5 @ 300s: condition absent and action A succeeds",
+                ],
+                "counterexample_assessment": "no successful match contains the exact condition",
+            },
+        },
+        plan_uses_information=True,
+        require_control_necessity=True,
+    )
+
+    assert error == ""
+    assert grounding is not None
+    assert grounding["control_necessity"]["action_change"]
+
+
+def test_core_mechanism_guard_requires_delayed_first_commitment_successes() -> None:
+    guard, error = _normalize_core_mechanism_guard(
+        {
+            "identity_effect": "preserve",
+            "first_commitment_effect": "conditional",
+            "relative_power_effect": "improve",
+            "evidence": [
+                "Game 2 @ 430s: early commitment fails",
+                "Game 5 @ 510s: early commitment fails",
+            ],
+            "delayed_first_commitment_success_evidence": [],
+        }
+    )
+
+    assert guard is None
+    assert "successful first-commitment comparisons" in error
+
+
+def test_analysis_replan_feedback_is_not_sent_back_to_optimizer_only() -> None:
+    feedback = _scope_retry_feedback(
+        [
+            "analysis_replan_required: repeated runtime_boundary in Main Attack Gate",
+            "missing_dependency: add a final unit cap",
+        ]
+    )
+
+    assert feedback == [
+        "analysis_replan_required: repeated runtime_boundary in Main Attack Gate"
+    ]
+
+
+def test_analysis_replan_feedback_drops_candidate_specific_suggestions() -> None:
+    feedback = _scope_retry_feedback(
+        [
+            "Candidate-generation attempt failed: analysis_replan_required: "
+            "repeated decision_grounding; add a scan, change the target, and wait"
+        ]
+    )
+
+    assert feedback == [
+        "analysis_replan_required: repeated decision_grounding"
+    ]
 
 
 def _current_record() -> dict:
@@ -334,6 +502,9 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
     assert '"strengths"' in batch_prompt
     assert '"weaknesses"' in batch_prompt
     assert '"unknowns"' in batch_prompt
+    assert '"strategy_contract"' in batch_prompt
+    assert '"core_win_mechanism"' in batch_prompt
+    assert "before weaknesses are ranked" in batch_prompt
     assert "Do not return next_action, candidate_plans, candidate_rule, or target_paragraph_id." in batch_prompt
     schema = batch_prompt.split("Return one JSON object only:")[1]
     assert "candidate_plans" not in schema
@@ -343,14 +514,16 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
     assert "It is valid to return no knowledge questions" in batch_prompt or "empty list is valid" in batch_prompt
     assert "Stimpack" not in batch_prompt
     assert '"action": "draft_candidate"' in candidate_prompt
-    assert "gathered push" in candidate_prompt
+    assert "gathered push" not in candidate_prompt
     assert "improve regroup timing" in candidate_prompt
     assert "Select exactly one self-contained candidate plan" not in candidate_prompt
     assert "selected_plan_ids" not in candidate_prompt
     assert "There is no fixed maximum number of paragraph patches" in candidate_prompt
-    assert "selected primary failure mode is the unit of evolution" in candidate_prompt
-    assert "coherent intervention package" in candidate_prompt
-    assert "Do not modify # Summary" in candidate_prompt
+    assert "plan.coordinated_changes" in candidate_prompt
+    assert "strategy_contract was inferred before failure ranking" in candidate_prompt
+    assert "strategy_mechanism_assessment" not in candidate_prompt
+    assert "Do not\nmodify Summary" in candidate_prompt
+    assert "Main Attack Gate exclusively owns first-attack permission" in candidate_prompt
     assert "why_required" in candidate_prompt
     assert "Independent factual match summaries" not in candidate_prompt
 
@@ -390,10 +563,81 @@ def test_strategy_contract_normalizes_legacy_checkpoints() -> None:
 
     assert contract == {
         "identity": "Legacy concentrated push",
+        "style": "",
+        "core_win_mechanism": "Legacy concentrated push",
+        "critical_timing_or_power_spike": "",
         "core_commitments": ["gather before attacking"],
+        "flexible_components": [],
         "optimization_boundary": "keep the core win condition",
         "direction": "adjust",
     }
+
+
+def test_discovery_normalizes_strategy_identity_before_failure_analysis() -> None:
+    payload, error = _normalize_cross_match_discovery(
+        {
+            "strategy_contract": {
+                "style": "early pressure",
+                "core_win_mechanism": "attack before advanced defense is established",
+                "critical_timing_or_power_spike": "first completed infantry timing",
+                "core_commitments": ["preserve early commitment"],
+                "flexible_components": ["exact producer count"],
+                "optimization_boundary": "do not trade the timing window for late strength",
+                "direction": "preserve",
+            },
+            "strengths": [],
+            "weaknesses": [],
+            "unknowns": [],
+            "query_plan": {},
+        },
+        knowledge_mode="enabled",
+        strategy_name="example",
+        require_strategy_identity=True,
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["strategy_contract"]["style"] == "early pressure"
+    assert (
+        payload["strategy_contract"]["core_win_mechanism"]
+        == "attack before advanced defense is established"
+    )
+
+
+def test_live_decision_requires_core_mechanism_assessment() -> None:
+    payload, error = _normalize_cross_match_decision(
+        {
+            "next_action": "propose_strategy_patch",
+            "priority_problem": {
+                "problem": "the intended pressure window is missed",
+                "evidence": ["Game 2 @ 300s: first attack starts after defense matures"],
+                "control_class": "strategy_fixable",
+            },
+            "hypothesis": "restoring production tempo restores the relative power window",
+            "plan": {
+                "direction": "restore the intended timing window",
+                "material_behavior_change": "commit before the counter package matures",
+                "coordinated_changes": [
+                    {
+                        "change": "remove the production diversion",
+                        "why_required": "it delays the core mechanism",
+                    }
+                ],
+                "preserve": ["early pressure"],
+            },
+        },
+        strategy_name="example",
+        require_strategy_identity=True,
+        fallback_strategy_contract={
+            "style": "early pressure",
+            "core_win_mechanism": "win through an early relative power advantage",
+            "critical_timing_or_power_spike": "first infantry timing",
+            "core_commitments": ["attack before advanced defense"],
+        },
+    )
+
+    assert payload is None
+    assert "strategy_mechanism_assessment" in error
 
 
 def test_discovery_does_not_require_a_plan() -> None:
@@ -609,6 +853,126 @@ def test_static_defense_cannot_be_selected_as_primary_direction() -> None:
     ) == ""
 
 
+def test_analysis_rejects_runtime_stateful_strategy_mechanisms() -> None:
+    transformation_error = _strategy_scope_error(
+        hypothesis="avoid assaults when SiegeTankSieged appears after a scan",
+        plan={
+            "direction": "scan for SiegeTankSieged before committing",
+            "material_behavior_change": "hold until the transformation state appears",
+            "coordinated_changes": [],
+        },
+        mechanism_prediction={},
+    )
+    assert "runtime transformation-state identifier" in transformation_error
+
+    scan_history_error = _strategy_scope_error(
+        hypothesis="attack only after scan_ready has fired",
+        plan={
+            "direction": "remember that Scanner Sweep completed",
+            "material_behavior_change": "gate assault on scan completion history",
+            "coordinated_changes": [],
+        },
+        mechanism_prediction={},
+    )
+    assert "persistent strategy state" in scan_history_error
+
+    observation_field_error = _strategy_scope_error(
+        hypothesis="use the latest observation without stateful fields",
+        plan={
+            "direction": "check last_seen_enemy_contents before every assault",
+            "material_behavior_change": "hold from the raw observation field",
+            "coordinated_changes": [],
+        },
+        mechanism_prediction={},
+    )
+    assert "runtime observation-field name" in observation_field_error
+
+
+def test_analysis_rejects_commander_owned_optimization_domains() -> None:
+    scan_error = _strategy_scope_error(
+        hypothesis="the current attack package needs a better readiness rule",
+        plan={
+            "direction": "add a scan before the first attack",
+            "material_behavior_change": "request vision before commitment",
+            "coordinated_changes": [],
+        },
+        mechanism_prediction={},
+    )
+    recovery_error = _strategy_scope_error(
+        hypothesis="the current attack package needs a better readiness rule",
+        plan={
+            "direction": "change recovery and reinforcement behavior",
+            "material_behavior_change": "rebuild and rally through a new route",
+            "coordinated_changes": [],
+        },
+        mechanism_prediction={},
+    )
+
+    assert "Commander-owned" in scan_error
+    assert "preservation-only" in recovery_error
+
+
+def test_strategy_knowledge_hides_runtime_transformation_identifiers() -> None:
+    rendered = render_knowledge_results(
+        [
+            {
+                "question_id": "Q1",
+                "ok": True,
+                "answer": "SiegeTank transforms into SiegeTankSieged.",
+                "dataset_evidence": [
+                    {
+                        "result": {
+                            "schema": "strategy_knowledge.v3",
+                            "entity_facts": [
+                                {"name": "Viking", "effect_source": "VikingFighter"}
+                            ],
+                        }
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert "SiegeTankSieged" not in rendered
+    assert "VikingFighter" not in rendered
+    assert "runtime transformation state" in rendered
+
+
+def test_scope_retry_archives_analysis_and_rewinds_to_match_summaries(
+    tmp_path: Path,
+) -> None:
+    checkpoint = EvolCheckpoint(
+        run_dir=tmp_path,
+        meta={
+            "stage": "analysis_complete",
+            "completed_knowledge_ids": ["Q1"],
+        },
+    )
+    (tmp_path / "match_summaries.json").write_text("{}", encoding="utf-8")
+    for name in (
+        "cross_match_discovery.json",
+        "batch_analysis.json",
+        "analysis_checkpoint.json",
+        "analysis.json",
+        "knowledge_trace.json",
+        "tool_observations.json",
+    ):
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    (knowledge / "Q1.json").write_text("{}", encoding="utf-8")
+
+    archive_dir = checkpoint.restart_analysis(reason="runtime state identifier")
+
+    assert checkpoint.stage == "match_summaries"
+    assert checkpoint.meta["completed_knowledge_ids"] == []
+    assert (tmp_path / "match_summaries.json").is_file()
+    assert not (tmp_path / "analysis_checkpoint.json").exists()
+    assert (archive_dir / "analysis_checkpoint.json").is_file()
+    assert (archive_dir / "knowledge" / "Q1.json").is_file()
+    assert checkpoint.knowledge_dir.is_dir()
+
+
 def test_decision_keeps_considered_explanations_without_patch_fields() -> None:
     payload, error = _normalize_cross_match_decision(
         {
@@ -659,10 +1023,32 @@ def test_decision_keeps_considered_explanations_without_patch_fields() -> None:
                         "why_required": "the fixed readiness gate admits unfavorable fights",
                     },
                     {
-                        "change": "align reinforcement with the adapted fighting package",
-                        "why_required": "the matchup response must persist after first contact",
+                        "change": "adjust the target army composition for the observed matchup",
+                        "why_required": "the fixed composition admits unfavorable fights",
                     },
                 ],
+            },
+            "information_grounding": {
+                "uses_runtime_enemy_information": True,
+                "facts": [
+                    {
+                        "claim": "the opposing heavy-mech package is currently observed",
+                        "source": "enemy_observed",
+                        "use": "strategy_condition",
+                        "available_before_decision": True,
+                        "runtime_supported": True,
+                        "evidence": ["Game 6 @ 795s: heavy mech is visible before contact"],
+                    },
+                    {
+                        "claim": "hidden composition after the match supports diagnosis only",
+                        "source": "enemy_truth",
+                        "use": "diagnosis_only",
+                        "available_before_decision": False,
+                        "runtime_supported": False,
+                        "evidence": ["Game 2 @ 430s: Replay truth"],
+                    },
+                ],
+                "execution_rule": "branch only on currently observed enemy composition",
             },
             "considered_explanations": [
                 {

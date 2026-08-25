@@ -26,6 +26,27 @@ from ..optimization.logs import save_evol_logs
 from ..optimization.snapshot import output_dir_for_strategy, save_snapshot
 
 
+_ANALYSIS_REPLAN_ERROR_MARKERS = (
+    "analysis_replan_required",
+)
+
+
+def _scope_retry_feedback(retry_feedback: list[str]) -> list[str]:
+    """Return short plan-level feedback without failed-candidate wording."""
+    scoped: list[str] = []
+    marker = _ANALYSIS_REPLAN_ERROR_MARKERS[0]
+    for item in retry_feedback:
+        text = str(item).strip()
+        folded = text.casefold()
+        start = folded.find(marker)
+        if start < 0:
+            continue
+        message = text[start:].split(";", 1)[0].strip()
+        if message and message not in scoped:
+            scoped.append(message)
+    return scoped
+
+
 def _record_context(records: list[Any]) -> list[dict[str, Any]]:
     return [
         {
@@ -282,6 +303,35 @@ class EvolAgent:
         def _save_logs(**kwargs: Any) -> dict[str, Path]:
             return save_evol_logs(run_dir=checkpoint.run_dir, **kwargs)
 
+        scope_feedback = _scope_retry_feedback(request.retry_feedback)
+        scope_fingerprint = hashlib.sha256(
+            "\n".join(scope_feedback).encode("utf-8")
+        ).hexdigest()
+        prior_scope_replans = set(
+            str(item) for item in (checkpoint.meta.get("scope_replan_fingerprints") or [])
+        )
+        if (
+            scope_feedback
+            and scope_fingerprint not in prior_scope_replans
+            and stage_reached(checkpoint.stage, "analysis_complete")
+        ):
+            checkpoint.meta["scope_replan_fingerprints"] = [
+                *list(checkpoint.meta.get("scope_replan_fingerprints") or []),
+                scope_fingerprint,
+            ][-8:]
+            archive_dir = checkpoint.restart_analysis(
+                reason="; ".join(scope_feedback[-2:])
+            )
+            run_context["analysis_retry"] = {
+                "reason": list(scope_feedback),
+                "archived_to": str(archive_dir),
+            }
+            print(
+                "  EvolAgent: prior candidate failed an executor-scope check; "
+                "restarting cross-match analysis with the feedback",
+                flush=True,
+            )
+
         if stage_reached(checkpoint.stage, "analysis_complete") and not request.dry_run:
             print(
                 f"  EvolAgent: resume skip analysis (stage={checkpoint.stage}); "
@@ -313,11 +363,11 @@ class EvolAgent:
             }
         else:
             analysis_prior_experiences = list(request.prior_experiences)
-            if request.retry_feedback:
+            if scope_feedback:
                 analysis_prior_experiences.append(
                     {
                         "kind": "generation_retry_feedback",
-                        "errors": list(request.retry_feedback),
+                        "errors": list(scope_feedback),
                     }
                 )
             if analysis_seed is not None and stage_reached(
@@ -358,7 +408,7 @@ class EvolAgent:
                 match_summary_cache_path=request.match_summary_cache_path,
                 prior_experiences=analysis_prior_experiences,
                 capability_manifest=capability_manifest,
-                retry_feedback=request.retry_feedback,
+                retry_feedback=scope_feedback,
             )
             digests = analysis_result.game_digests
             battle_analysis = analysis_result.battle_analysis

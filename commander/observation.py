@@ -992,16 +992,13 @@ def _group_lines(army_control: Dict[str, Any]) -> List[str]:
 
 
 def format_map_topology(topology: Dict[str, Any]) -> str:
-    """Render the static map topology block for the system prompt."""
+    """Render topology facts without exposing a misleading recommended route."""
     topology = _dict(topology)
     topo_zones = [_dict(zone) for zone in _list(topology.get("zones"))]
-    primary_route = _list(topology.get("primary_route"))
 
     lines: List[str] = ["[8] Map Topology"]
-    if primary_route:
-        lines.append(f"primary_route={_items(primary_route)}")
     if topo_zones:
-        lines.append("zone_id|role|ramp|island|route|neighbors|path_to_enemy_main")
+        lines.append("zone_id|role|ramp|island|neighbors|path_to_enemy_main")
         for zone in topo_zones:
             adjacent = "; ".join(
                 f"{item.get('zone_id')}({item.get('path_distance')})"
@@ -1015,7 +1012,6 @@ def format_map_topology(topology: Dict[str, Any]) -> str:
                         _value(zone.get("zone_role")),
                         "yes" if zone.get("has_ramp") else "no",
                         "yes" if zone.get("is_island") else "no",
-                        "yes" if zone.get("on_primary_route") else "no",
                         adjacent,
                         _value(zone.get("path_distance_to_enemy_main")),
                     )

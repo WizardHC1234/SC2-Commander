@@ -67,9 +67,26 @@ function Test-BatchConfig {
     }
 
     if ($FORCE_STRATEGY -ne "none") {
-        $strategyPath = Join-Path $WorkDir "skills\$BOT_RACE\$FORCE_STRATEGY"
-        if (-not (Test-Path -LiteralPath $strategyPath -PathType Container)) {
-            Write-Error "Strategy folder not found: $strategyPath"
+        # Evolution sets SC2_STRATEGY_ROOT to evolution_runs/.../strategies so
+        # candidates are not written under skills/<race>/. Prefer that overlay.
+        $candidates = @()
+        $overlay = [string]$env:SC2_STRATEGY_ROOT
+        if (-not [string]::IsNullOrWhiteSpace($overlay)) {
+            $candidates += (Join-Path $overlay $FORCE_STRATEGY)
+        }
+        $candidates += (Join-Path $WorkDir "skills\$BOT_RACE\$FORCE_STRATEGY")
+
+        $resolved = $null
+        foreach ($candidate in $candidates) {
+            $md = Join-Path $candidate "strategy.md"
+            if (Test-Path -LiteralPath $md -PathType Leaf) {
+                $resolved = $candidate
+                break
+            }
+        }
+        if (-not $resolved) {
+            Write-Error ("Strategy folder not found for '{0}'. Searched: {1}" -f `
+                $FORCE_STRATEGY, ($candidates -join "; "))
             exit 1
         }
     }

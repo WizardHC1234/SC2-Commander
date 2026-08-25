@@ -19,6 +19,15 @@ _GENERIC_WHY = {
     "better scouting is useful",
 }
 
+_COMMANDER_OWNED_DETAIL_IDS = frozenset({"scouting", "scans"})
+_CONSISTENCY_ONLY_DETAIL_IDS = frozenset(
+    {"engagement_and_reinforcement", "recovery_and_cleanup"}
+)
+_CONSISTENCY_REASON = re.compile(
+    r"\b(?:stale|old|consisten|reference|align|dependency|引用|一致|同步)\w*\b",
+    re.IGNORECASE,
+)
+
 _RUNTIME_FORBIDDEN_PHRASES = (
     "per-unit kiting",
     "kiting",
@@ -37,7 +46,148 @@ _RUNTIME_FORBIDDEN_PHRASES = (
     "scan safety",
     "at maximum range",
     "enemy movement out of position",
+    "enemy_truth",
+    "replay-only",
+    "last_seen_enemy_contents",
+    "seconds_since_last_seen",
 )
+
+_CROSS_CYCLE_STATE_PATTERNS = (
+    (
+        re.compile(r"\b(?:cycle|step)\s*[12]\b", re.IGNORECASE),
+        "encodes a multi-cycle state machine in strategy prose",
+    ),
+    (
+        re.compile(
+            r"\bafter\s+(?:the\s+)?scan_ready\s+(?:fires|fired|triggers|triggered)\b",
+            re.IGNORECASE,
+        ),
+        "depends on remembering that scan_ready fired in an earlier decision cycle",
+    ),
+    (
+        re.compile(r"\b(?:later|next)\s+scan\s+cycle\b", re.IGNORECASE),
+        "depends on an implicit scan-cycle state",
+    ),
+    (
+        re.compile(
+            r"\b(?:after|once)\s+(?:the\s+)?(?:scan|scanner sweep)\s+"
+            r"(?:completes|completed|has completed)\b",
+            re.IGNORECASE,
+        ),
+        "depends on persistent scan-completion state",
+    ),
+)
+
+_ATTACK_WORDS = re.compile(r"\b(?:attack|assault|push|commit|launch)\b", re.IGNORECASE)
+_HARD_GATE_WORDS = re.compile(
+    r"\b(?:do\s+not|must\s+not|only\s+(?:after|if|when)|hold(?:\s+the)?|until|unless)\b",
+    re.IGNORECASE,
+)
+_COUNT_WORDS = re.compile(r"\b\d+\s+(?:completed\s+and\s+living\s+|living\s+)?[A-Za-z]", re.IGNORECASE)
+
+
+def _decision_policy_errors(
+    patches: list[dict[str, Any]],
+    candidate_text: str,
+) -> list[str]:
+    """Reject paragraph patches that try to implement a hidden state machine."""
+    errors: list[str] = []
+    replacements = {
+        str(item.get("target") or "").strip(): str(item.get("replacement") or "").strip()
+        for item in patches
+        if isinstance(item, dict)
+    }
+    complete_details: dict[str, str] = {}
+    try:
+        complete_details = {
+            item.id: item.value for item in StrategyDocument.parse(candidate_text).details
+        }
+    except ValueError as exc:
+        errors.append(f"internal_inconsistency — strategy.md — {exc}")
+
+    for target, text in complete_details.items():
+        for pattern, reason in _CROSS_CYCLE_STATE_PATTERNS:
+            if pattern.search(text):
+                errors.append(f"runtime_boundary — {target} — {reason}")
+
+    scans = complete_details.get("scans", "")
+    if scans and _ATTACK_WORDS.search(scans) and _HARD_GATE_WORDS.search(scans):
+        errors.append(
+            "internal_inconsistency — scans — Scans may request information but "
+            "must not grant, deny, or delay first-attack permission"
+        )
+
+    posture = replacements.get("pre_attack_army_posture", "")
+    if posture and _ATTACK_WORDS.search(posture) and _COUNT_WORDS.search(posture):
+        errors.append(
+            "internal_inconsistency — pre_attack_army_posture — staging may "
+            "reference Main Attack Gate but must not copy a numerical attack gate"
+        )
+
+    recovery = replacements.get("recovery_and_cleanup", "")
+    if recovery and _ATTACK_WORDS.search(recovery) and _COUNT_WORDS.search(recovery):
+        errors.append(
+            "internal_inconsistency — recovery_and_cleanup — recovery must "
+            "reapply Main Attack Gate instead of copying numerical launch thresholds"
+        )
+
+    gate = complete_details.get("main_attack_gate", "")
+    if gate and re.search(
+        r"\b(?:no|none|fewer\s+than|below)\b.{0,70}\benemy\b.{0,70}"
+        r"\b(?:visible|observed|seen)\b",
+        gate,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "runtime_boundary — main_attack_gate — absence of a currently visible "
+            "enemy unit is not a reliable hard permission to attack"
+        )
+
+    return list(dict.fromkeys(errors))
+
+
+def _attack_gate_counts(text: str) -> dict[str, int]:
+    try:
+        document = StrategyDocument.parse(text)
+    except ValueError:
+        return {}
+    gate = next((item.value for item in document.details if item.id == "main_attack_gate"), "")
+    counts: dict[str, int] = {}
+    pattern = re.compile(
+        r"\b(\d+)\s+(?:completed\s+and\s+living\s+|completed\s+|living\s+)?"
+        r"([A-Z][A-Za-z-]*(?:\s+[A-Z][A-Za-z-]*)?)",
+    )
+    for count_text, unit_text in pattern.findall(gate):
+        unit = re.sub(r"s$", "", unit_text.replace(" ", "").casefold())
+        counts[unit] = int(count_text)
+    return counts
+
+
+def _core_timing_errors(
+    decision: dict[str, Any],
+    parent_text: str,
+    candidate_text: str,
+) -> list[str]:
+    guard = decision.get("core_mechanism_guard")
+    if not isinstance(guard, dict):
+        return []
+    intended = str(guard.get("first_commitment_effect") or "").strip().lower()
+    if intended not in {"earlier", "same"}:
+        return []
+    parent_counts = _attack_gate_counts(parent_text)
+    candidate_counts = _attack_gate_counts(candidate_text)
+    increases = [
+        f"{unit}: {count}->{candidate_counts[unit]}"
+        for unit, count in parent_counts.items()
+        if unit in candidate_counts and candidate_counts[unit] > count
+    ]
+    if not increases:
+        return []
+    return [
+        "strategy_identity — Main Attack Gate — candidate raises first-commitment "
+        "counts despite core_mechanism_guard declaring an earlier or unchanged "
+        f"commitment ({', '.join(increases)})"
+    ]
 
 
 def build_strategy_patch_validation_prompt(
@@ -59,7 +209,7 @@ def build_strategy_patch_validation_prompt(
         for item in patches
         if isinstance(item, dict)
     ]
-    from .prompts import RUNTIME_CONTRACT, SC2_STRATEGIC_PRIORITY
+    from .prompts import RUNTIME_CONTRACT
 
     return f"""You are validating a strategy patch.
 
@@ -69,15 +219,31 @@ You are NOT analyzing the matches.
 You are NOT judging whether another causal hypothesis would have been better.
 
 The Cross-Match Decision has already selected one primary failure mode and one
-coherent intervention package in plan.
+coherent intervention package. strategy_contract owns strategy identity,
+priority_problem owns the problem definition, and plan.coordinated_changes owns
+the requested modifications.
 
 Check only whether the candidate strategy patch is a clean implementation of
 that hypothesis.
 
 Validate:
 
+Allowed modification scope
+The candidate may change only economy/expansion targets, production-building and
+unit-count targets, technology/upgrades, army composition, or attack readiness and
+strategic objective. Scouting, scanning, wake events, decision-cycle protocols,
+reinforcement routing, retreat, recovery, and cleanup are not optimization domains.
+Scouting and Scans must remain unchanged. Reinforcement or Recovery may change only
+to replace a stale reference created by an allowed change with a reference to Main
+Attack Gate or the selected objective; reject any new behavior in those paragraphs.
+
 0. Decision grounding precondition
 Do not re-rank strategic hypotheses, but reject the candidate when the selected plan depends on a factual or numerical premise that contradicts the supplied deterministic knowledge. This includes misreading production slots, time, cost, throughput, total resource demand, supply totals, prerequisites, producer availability, base or geyser availability, and upgrade effects. Reject rather than quietly patching around a false premise; the analysis must be rerun with the verified facts. A wake condition only requests a new high-level decision and never grants permission to attack or overrides the strategy's attack gate.
+
+Use information_grounding only when an allowed decision directly uses currently
+available enemy information. Replay-only enemy_truth may explain a result but cannot
+become a live condition. The candidate must not add a scan/scout acquisition flow or
+wake implementation to obtain that information.
 
 1. Intervention-package scope and coverage
 One failure mode is not one paragraph or one strategy category. Multiple coordinated
@@ -99,77 +265,30 @@ the dependency.
 
 When the candidate depends on production throughput, timing, cost, or sustained resource demand, validate it against the supplied deterministic knowledge calculations. Recompute totals by summing every concurrently required production line and explicit end-state unit count; do not validate each line in isolation. Reject numerical feasibility claims that contradict those calculations, and reject a package whose required production demand is unsupported by its own economy/resource rules. Check that gas extraction, producer construction, prerequisites, and expansions become available before—not after—the timing they are supposed to support. Do not invent missing income rates.
 
-3. Test strength
-The candidate must be structurally capable of producing the pre-registered
-mechanism_prediction.expected_change at or beyond minimum_material_change. Reject
-a cosmetic, token, isolated, or clearly underpowered implementation that cannot materially
-test the supplied hypothesis. Judge intervention strength from the declared
-mechanism and parent-to-candidate strategy difference, never from patch count.
-This validates designed test strength only; do not claim that runtime execution or
-the realized match mechanism has already been observed.
+3. Selected-package coverage
+Verify that the candidate implements every plan.coordinated_changes item or that
+the parent already satisfies it. Do not re-evaluate whether the selected hypothesis
+is strategically strong enough; match evaluation tests that question. A concern
+about expected effect size is non-blocking unless a requested change is absent.
 
 The complete candidate strategy must not contain contradictory thresholds,
 production targets, priorities, technology requirements, attack conditions,
 recovery conditions, or information requirements.
 
-Perform a mandatory candidate-wide production_target_audit. Enumerate every unit
-whose production the complete candidate says to resume, restart, re-enable, return
-to, or continue. Require that unit's own explicit numerical stage production
-target. If production remains enabled during attack, reinforcement, recovery, or
-late game, require that unit to also appear with an explicit numerical count or cap
-in Ultimate Goal. A stage target alone is insufficient. Exclude a unit from
-Ultimate Goal only when the strategy explicitly declares it temporary, gives its
-stage count and production stop condition, and never later resumes or continues it.
+Check changed targets across Production, Technology, Main Attack Gate, Recovery,
+and Ultimate Goal for direct contradictions. Numerical production bounds and final
+supply are checked deterministically and must not be guessed from prose.
 
-A condition that merely states when production resumes is not a quantity target.
-For example, "resume train_marauder after 8 Tanks" is invalid without a Marauder
-stage target; if Marauders remain in reinforcement production, Ultimate Goal must
-also list their final count. Do not infer a count from remaining supply, producer
-capacity, resources, or composition prose.
+4. Analysis-optimization alignment
+Check only that the candidate implements the supplied plan without adding a
+different objective. Do not re-rank the hypothesis, reinterpret match evidence,
+compare alternative strategies, or decide whether the selected army will win.
+Those judgments belong to Cross-Match Analysis and later match evaluation.
 
-Audit the complete candidate, not only modified paragraphs. An inherited omission
-is still blocking even when the current hypothesis concerns another strategy area
-and the optimizer marked the incomplete text as preserved. If any resumed or
-continued unit lacks its own explicit quantity, set valid=false and return a
-blocking missing_dependency error naming the unit and paragraph. Do not waive this
-as an unrelated parent issue.
-
-Recompute final_supply from the complete Ultimate Goal using workers and every
-combat/support unit at full supply cost. Any continuously produced unit missing
-from Ultimate Goal is also missing from this calculation and is blocking. Reject a
-total above 200 and reject a claimed total that omits an explicitly produced unit.
-
-Build a small cross-paragraph consistency table before deciding. For every unit or
-technology whose production is delayed, record the exact unlock conjunction from
-Production, Technology, Main Attack Gate, Recovery, and Ultimate Goal. Reject when
-one paragraph unlocks it earlier or under weaker conditions than another paragraph.
-When the parent has a time-bounded commitment fallback and inheritance marks it as
-preserved, compare the complete prerequisites of the parent's and candidate's final
-time condition. Any newly added prerequisite means the fallback was weakened or
-removed and must be rejected unless inheritance explicitly revises or removes it
-with evidence.
-
-4. Analysis-optimization priority alignment
-The candidate must preserve the same strategic priority used by Cross-Match
-Analysis. Reject a candidate that replaces a required combat-package, survival,
-matchup, or relative power-window change with an easier lower-priority surrogate
-such as more scouting, a later gate, more production, more economy, or an isolated
-upgrade. Information is sufficient only when it causes the named higher-priority
-composition, readiness, commitment, defense, or recovery decision. The optimized
-strategy must realize the complete plan rather than merely its easiest item.
-
-If the package targets a delayed technology, upgrade, composition, or power spike,
-reject it when the candidate does not implement the supplied survival prerequisite
-needed to reach that state under the observed pressure pattern. Check matchup and
-support changes as part of the whole package rather than treating one upgrade as a
-complete implementation.
-
-5. Preserved strengths and identity
-Unrelated supported strengths must remain intact. The candidate must preserve the
-parent strategy's defining army concept and win plan unless the Cross-match
-Decision explicitly justifies changing it.
-
-Use the inheritance ledger as an audit claim, then verify it against the complete parent and candidate texts. Reject any material parent mechanism that disappears without appearing under remove with an evidence-based reason. Reject a keep entry that is not actually retained and a revise entry that does not describe the corresponding material change.
+5. Preserved strengths, strategy mechanism, and identity
+Treat Cross-match Decision.strategy_contract as the binding interpretation of the
+parent strategy. Verify its style, core_win_mechanism,
+critical_timing_or_power_spike, and core commitments against the complete candidate.
 
 Infer the defining army concept and win plan from the complete parent strategy,
 not from a hard-coded strategy-family template. A candidate that turns support,
@@ -181,18 +300,20 @@ The strategy must not require unavailable micro, runtime behavior, or controls.
 
 7. Concision and ownership
 Prefer one clear observable rule over repeated warnings and narrow exceptions.
-One paragraph owns the complete attack gate. Dependent paragraphs may reference
-that gate but must not copy its full condition. Reject material strategy bloat
-that does not add a required dependency of the selected hypothesis.
+Main Attack Gate exclusively owns first-attack permission. Scans may request
+information but cannot grant, deny, or delay attack permission. Pre-Attack Army
+Posture owns gathering and staging and may only reference Main Attack Gate.
+Recovery owns withdrawal and rebuilding and must reapply Main Attack Gate rather
+than copying its thresholds. No paragraph may encode Cycle 1/Cycle 2, remember that
+a scan_ready wake fired, or otherwise use natural-language prose as cross-cycle
+state. Reject material strategy bloat that does not add a required dependency of
+the selected hypothesis.
 
 Exclusive if/else branches are consistent. Do not treat "fresh intel OR request
 a scan, else use a fallback threshold" as an AND of mutually exclusive states.
-Scan availability is not acquired enemy information. Reject an intel gate that
-allows commitment merely because a scan can be requested; the strategy must scan,
-hold, wake on a supported condition, and then re-decide from the later observation.
-
-Do not require strategy.md to name a wake predicate for every clause. Requesting
-a scan or scout on this cycle and deciding after a later observation is allowed.
+Scan availability is not acquired enemy information. Scans may request current
+information, and a later Commander decision may use its current observation, but
+strategy.md must not encode the transition or remember scan completion.
 
 Restating the same gate in a posture paragraph is non-blocking duplication.
 A weak but internally consistent implementation of the hypothesis is not a
@@ -203,7 +324,6 @@ Do not propose alternative strategy changes.
 Do not generate replacement patches.
 
 {RUNTIME_CONTRACT}
-{SC2_STRATEGIC_PRIORITY}
 
 Capability summary:
 {json.dumps(capability_manifest or {}, ensure_ascii=False, indent=2)}
@@ -217,9 +337,6 @@ Verified knowledge and deterministic feasibility calculations:
 Patches:
 {json_compact_block(compact_patches)}
 
-Inheritance ledger:
-{json_compact_block(inheritance or {})}
-
 Parent strategy.md:
 {parent_text}
 
@@ -229,21 +346,6 @@ Candidate strategy.md:
 Return JSON only:
 {{
   "valid": true,
-  "production_target_audit": [
-    {{
-      "unit": "unit whose production resumes or continues",
-      "instruction": "the production instruction being audited",
-      "stage_target": "the unit's explicit numerical production target, or empty",
-      "ultimate_goal_target": "the unit's explicit numerical count in Ultimate Goal, or empty",
-      "temporary_stop_rule": "explicit stop condition, or empty when continuously reinforced",
-      "verdict": "bounded|missing_stage_target|missing_ultimate_goal_target|invalid_temporary_exception"
-    }}
-  ],
-  "final_supply": {{
-    "total": 0,
-    "calculation": "workers plus every Ultimate Goal combat/support unit at full supply cost",
-    "verdict": "valid|over_200|incomplete"
-  }},
   "errors": [
     {{
       "type": "decision_grounding|unrelated_patch|missing_dependency|underpowered_implementation|internal_inconsistency|preserved_strengths|strategy_identity|runtime_boundary",
@@ -288,6 +390,11 @@ def validate_strategy_patch_structure(
             continue
         if target == "summary":
             errors.append("summary modification is not allowed")
+        if target in _COMMANDER_OWNED_DETAIL_IDS:
+            errors.append(
+                f"{target}: scouting and scanning behavior is Commander-owned "
+                "and not evolvable"
+            )
         if target not in detail_ids and target != "summary":
             errors.append(f"unknown strategy paragraph: {target}")
         if target in seen:
@@ -311,6 +418,20 @@ def validate_strategy_patch_structure(
         elif why.lower() in _GENERIC_WHY:
             errors.append(
                 f"{target}: why_required must explain a direct hypothesis dependency"
+            )
+        elif target in _CONSISTENCY_ONLY_DETAIL_IDS and not _CONSISTENCY_REASON.search(
+            why
+        ):
+            errors.append(
+                f"{target}: this paragraph may change only for a stale-reference "
+                "consistency repair caused by an allowed strategy change"
+            )
+        if target in _CONSISTENCY_ONLY_DETAIL_IDS and _COUNT_WORDS.search(
+            replacement
+        ):
+            errors.append(
+                f"{target}: consistency repair must reference Main Attack Gate or "
+                "the selected objective instead of copying numerical targets"
             )
     return errors
 
@@ -402,14 +523,99 @@ def _audit_value_is_missing(value: Any) -> bool:
     return not text or any(marker in text for marker in _MISSING_TARGET_MARKERS)
 
 
-def _production_contract_errors(payload: dict[str, Any]) -> list[str]:
-    """Enforce the validator's structured production and supply audit.
+def _normalized_entity(value: Any) -> str:
+    text = re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+    return text[:-1] if text.endswith("s") and len(text) > 2 else text
 
-    The LLM may correctly describe a missing bound while still labelling the row
-    ``bounded`` or the issue ``non-blocking``.  These fields are an execution
-    contract, so their basic consistency is checked here instead of trusting the
-    model's severity label.
+
+def _trainable_units(capability_manifest: dict[str, Any]) -> dict[str, str]:
+    macro = capability_manifest.get("macro_contract")
+    actions = macro.get("available_actions") if isinstance(macro, dict) else []
+    result: dict[str, str] = {}
+    for action in actions or []:
+        name = str(action or "")
+        if not name.startswith("train_"):
+            continue
+        stem = _normalized_entity(name[len("train_") :])
+        if stem:
+            result[stem] = name[len("train_") :]
+    return result
+
+
+def _text_has_numeric_target(text: str, unit_stem: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
+    singular = _normalized_entity(unit_stem)
+    return bool(
+        singular
+        and re.search(rf"\d+[a-z]{{0,36}}{re.escape(singular)}s?", compact)
+    )
+
+
+def _deterministic_production_target_errors(
+    *,
+    candidate_text: str,
+    capability_manifest: dict[str, Any],
+) -> list[str]:
+    """Check only actual trainable units named in continuing-production rules."""
+    try:
+        document = StrategyDocument.parse(candidate_text)
+    except ValueError:
+        return []
+    trainable = _trainable_units(capability_manifest)
+    if not trainable:
+        return []
+    continuation_terms = re.compile(
+        r"\b(?:continue|continuously|resume|restart|re-enable|reenable|return to|"
+        r"replace losses|keep producing|keep training)\b",
+        re.IGNORECASE,
+    )
+    required: dict[str, str] = {}
+    for detail in document.details:
+        if not continuation_terms.search(detail.value):
+            continue
+        compact = _normalized_entity(detail.value)
+        for stem, display in trainable.items():
+            if stem and stem in compact:
+                required[stem] = display
+
+    ultimate = next(
+        (item.value for item in document.details if item.id == "ultimate_goal"),
+        "",
+    )
+    full_text = document.render()
+    errors: list[str] = []
+    for stem, display in sorted(required.items()):
+        if not _text_has_numeric_target(full_text, stem):
+            errors.append(
+                f"missing_dependency — production target for {display} — "
+                "explicit numerical stage target is required"
+            )
+        if not _text_has_numeric_target(ultimate, stem):
+            errors.append(
+                f"missing_dependency — Ultimate Goal for {display} — "
+                "continuing production requires an explicit final count or cap"
+            )
+    return errors
+
+
+def _production_contract_errors(
+    payload: dict[str, Any],
+    *,
+    candidate_text: str = "",
+    capability_manifest: dict[str, Any] | None = None,
+) -> list[str]:
+    """Use deterministic candidate text for blocking production-bound checks.
+
+    The semantic model's audit remains useful diagnostic output, but it is not
+    authoritative: it previously treated structures as trainable units and missed
+    numerical targets that were present elsewhere in the complete strategy.
     """
+    capability_manifest = capability_manifest or {}
+    if candidate_text and capability_manifest:
+        return _deterministic_production_target_errors(
+            candidate_text=candidate_text,
+            capability_manifest=capability_manifest,
+        )
     errors: list[str] = []
     audit = payload.get("production_target_audit")
     if not isinstance(audit, list) or not audit:
@@ -515,13 +721,45 @@ def _production_contract_errors(payload: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(errors))
 
 
-def _blocking_semantic_errors(payload: dict[str, Any]) -> list[str]:
+def _blocking_semantic_errors(
+    payload: dict[str, Any],
+    *,
+    candidate_text: str = "",
+    capability_manifest: dict[str, Any] | None = None,
+) -> list[str]:
     reported = payload.get("errors") or []
     blocking: list[str] = []
     has_non_blocking = False
     if not isinstance(reported, list):
         reported = [reported]
     for item in reported:
+        if isinstance(item, dict) and str(item.get("type") or "").strip().lower() == (
+            "underpowered_implementation"
+        ):
+            # Effect size is tested by candidate matches. It is not a compile error.
+            has_non_blocking = True
+            continue
+        if candidate_text and capability_manifest:
+            audit_text = (
+                " ".join(
+                    str(item.get(key) or "")
+                    for key in ("type", "location", "description", "error")
+                )
+                if isinstance(item, dict)
+                else str(item)
+            ).casefold()
+            if any(
+                marker in audit_text
+                for marker in (
+                    "production target for",
+                    "ultimate goal for",
+                    "production_target_audit",
+                    "final_supply",
+                )
+            ):
+                # The complete candidate and live train_* catalog are the
+                # authority for these checks; ignore semantic-auditor guesses.
+                continue
         severity, message = _semantic_issue(item)
         if not message:
             continue
@@ -530,7 +768,13 @@ def _blocking_semantic_errors(payload: dict[str, Any]) -> list[str]:
             continue
         blocking.append(message)
     valid = payload.get("valid")
-    blocking.extend(_production_contract_errors(payload))
+    blocking.extend(
+        _production_contract_errors(
+            payload,
+            candidate_text=candidate_text,
+            capability_manifest=capability_manifest,
+        )
+    )
     if blocking:
         return list(dict.fromkeys(blocking))
     if valid is True or (valid is False and has_non_blocking):
@@ -555,6 +799,7 @@ def validate_strategy_patch_semantics(
 ) -> list[str]:
     capability_manifest = capability_manifest or {}
     errors = _runtime_boundary_errors(patches, candidate_text, capability_manifest)
+    errors.extend(_decision_policy_errors(patches, candidate_text))
     result = call_json_llm(
         build_strategy_patch_validation_prompt(
             decision=decision,
@@ -575,7 +820,13 @@ def validate_strategy_patch_semantics(
     if not isinstance(payload, dict):
         errors.append("semantic validator returned no JSON object")
         return errors
-    errors.extend(_blocking_semantic_errors(payload))
+    errors.extend(
+        _blocking_semantic_errors(
+            payload,
+            candidate_text=candidate_text,
+            capability_manifest=capability_manifest,
+        )
+    )
     return errors
 
 

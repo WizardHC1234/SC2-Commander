@@ -1914,6 +1914,22 @@ class EvolutionRunner:
             record_paths=list(dict.fromkeys(record_paths)),
         )
         retry_feedback: list[str] = []
+        if resume_value:
+            for failure in reversed(state.get("candidate_generation_failures") or []):
+                if not isinstance(failure, dict):
+                    continue
+                if str(failure.get("parent") or "") != search_parent:
+                    continue
+                failure_checkpoint = str(failure.get("checkpoint_dir") or "").strip()
+                if failure_checkpoint and failure_checkpoint != resume_value:
+                    continue
+                message = str(failure.get("message") or "").strip()
+                if message:
+                    retry_feedback.append(
+                        "Previous candidate-generation failure from the resumed "
+                        f"checkpoint: {message}"
+                    )
+                break
         candidate_result: EvolRunResult | None = None
         total_attempts = self.config.candidate_generation_retries + 1
         for attempt in range(1, total_attempts + 1):

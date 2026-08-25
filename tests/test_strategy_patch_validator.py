@@ -108,13 +108,14 @@ def test_validator_prompt_checks_coherent_package_and_identity() -> None:
     assert "required prerequisite, resource/production dependency" in prompt
     assert "global target changes" in prompt
     assert "already satisfies" in prompt
-    assert "3. Test strength" in prompt
-    assert "minimum_material_change" in prompt
-    assert "never from patch count" in prompt
-    assert "4. Analysis-optimization priority alignment" in prompt
-    assert "## SC2 Strategic Priority" in prompt
-    assert "lower-priority surrogate" in prompt
-    assert "defining army concept and win plan" in prompt
+    assert "3. Selected-package coverage" in prompt
+    assert "Do not re-evaluate whether the selected hypothesis" in prompt
+    assert "4. Analysis-optimization alignment" in prompt
+    assert "Do not re-rank the" in prompt
+    assert "match evaluation tests that question" in prompt
+    assert "is non-blocking unless" in prompt
+    assert "strategy_contract as the binding interpretation" in prompt
+    assert "Main Attack Gate exclusively owns" in prompt
     assert "NOT judging whether another causal hypothesis would have been better" in prompt
 
 
@@ -227,7 +228,11 @@ def test_five_or_more_necessary_patches_are_allowed() -> None:
             document,
             item.id,
             f"Keep the Marine-Tank plan while updating {item.title} for the new readiness rule.",
-            "This paragraph repeats or defines the readiness rule being tested.",
+            (
+                "This consistency repair replaces an old readiness reference."
+                if item.id == "recovery_and_cleanup"
+                else "This paragraph repeats or defines the readiness rule being tested."
+            ),
         )
         for item in document.details
         if item.id in targets
@@ -258,6 +263,12 @@ def test_unrelated_scouting_patch_is_rejected(monkeypatch) -> None:
         ),
     ]
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
+    structure_errors = validate_strategy_patch_structure(
+        decision=_decision(),
+        patches=patches,
+        parent_document=document,
+    )
+    assert any("Commander-owned" in item for item in structure_errors)
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
         lambda prompt, **kwargs: {
@@ -289,7 +300,7 @@ def test_consistent_readiness_dependency_patches_pass(monkeypatch) -> None:
         _patch(
             document,
             "recovery_and_cleanup",
-            "If progress stalls, withdraw and rebuild to 36 Marines and 8 Siege Tanks.",
+            "If progress stalls, withdraw, rebuild, and reapply Main Attack Gate before attacking again.",
             "This paragraph repeats the old readiness threshold and must stay consistent.",
         ),
         _patch(
@@ -537,7 +548,7 @@ def test_non_blocking_semantic_notes_do_not_fail(monkeypatch) -> None:
         _patch(
             document,
             "recovery_and_cleanup",
-            "If progress stalls, withdraw and rebuild to 44 Marines and 10 Siege Tanks.",
+            "If progress stalls, withdraw, rebuild, and reapply Main Attack Gate before attacking again.",
             "This paragraph repeats the same old threshold and must stay consistent.",
         ),
     ]
@@ -668,7 +679,7 @@ def test_validator_does_not_reject_a_legal_but_weak_patch(monkeypatch) -> None:
         _patch(
             document,
             "recovery_and_cleanup",
-            "If progress stalls, withdraw and rebuild to 44 Marines and 10 Siege Tanks.",
+            "If progress stalls, withdraw, rebuild, and reapply Main Attack Gate before attacking again.",
             "This paragraph repeats the same old threshold and must stay consistent.",
         ),
     ]
@@ -704,7 +715,7 @@ def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
     def fake_llm(prompt: str, **kwargs):
         calls.append(prompt)
         if "You are validating a strategy patch" in prompt:
-            if "rebuild to 36 Marines and 8 Siege Tanks" in prompt:
+            if "withdraw, rebuild, and reapply Main Attack Gate before attacking again" in prompt:
                 return _semantic_payload()
             return {
                 "valid": False,
@@ -725,7 +736,7 @@ def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
                     _patch(
                         document,
                         "recovery_and_cleanup",
-                        "If progress stalls, withdraw and rebuild to 36 Marines and 8 Siege Tanks.",
+                        "If progress stalls, withdraw, rebuild, and reapply Main Attack Gate before attacking again.",
                         "This paragraph repeats the old readiness threshold and must stay consistent.",
                     ),
                 ],
@@ -759,7 +770,7 @@ def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
     assert result.ok
     assert improvement is not None
     assert any(item.get("action") == "strategy_patch_semantics" for item in events)
-    assert "36 Marines and 8 Siege Tanks" in next(
+    assert "reapply Main Attack Gate" in next(
         item.value
         for item in StrategyDocument.parse(improvement.files["strategy.md"]).details
         if item.id == "recovery_and_cleanup"
@@ -767,3 +778,120 @@ def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
     assert any(
         "Fix only the reported patch validation errors" in prompt for prompt in calls
     )
+
+
+def test_cross_cycle_scan_protocol_is_rejected_deterministically(monkeypatch) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    patches = [
+        _patch(
+            document,
+            "main_attack_gate",
+            "Cycle 1 requests a scan; Cycle 2 attacks after scan_ready fires.",
+            "The candidate tries to sequence scouting and commitment.",
+        )
+    ]
+    patched, _changes = document.apply_patch(_patches_to_operations(patches))
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        lambda prompt, **kwargs: _semantic_payload(),
+    )
+
+    errors = validate_strategy_patch_semantics(
+        decision=_decision(),
+        parent_text=TANK_STRATEGY,
+        candidate_text=patched,
+        patches=patches,
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+
+    assert any("multi-cycle state machine" in error for error in errors)
+    assert any("scan_ready fired" in error for error in errors)
+
+
+def test_scans_cannot_own_attack_permission(monkeypatch) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    patches = [
+        _patch(
+            document,
+            "scans",
+            "Request Scanner Sweep and hold the attack until vision is available.",
+            "The candidate makes vision mandatory.",
+        )
+    ]
+    patched, _changes = document.apply_patch(_patches_to_operations(patches))
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        lambda prompt, **kwargs: _semantic_payload(),
+    )
+
+    errors = validate_strategy_patch_semantics(
+        decision=_decision(),
+        parent_text=TANK_STRATEGY,
+        candidate_text=patched,
+        patches=patches,
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+
+    assert any("Scans may request information" in error for error in errors)
+
+
+def test_recovery_must_reference_main_gate_instead_of_copying_counts(monkeypatch) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    patches = [
+        _patch(
+            document,
+            "recovery_and_cleanup",
+            "Rebuild to 50 Marines and 12 Siege Tanks, then attack again.",
+            "The candidate duplicates a launch condition in recovery.",
+        )
+    ]
+    patched, _changes = document.apply_patch(_patches_to_operations(patches))
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        lambda prompt, **kwargs: _semantic_payload(),
+    )
+
+    errors = validate_strategy_patch_semantics(
+        decision=_decision(),
+        parent_text=TANK_STRATEGY,
+        candidate_text=patched,
+        patches=patches,
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+
+    assert any("reapply Main Attack Gate" in error for error in errors)
+
+
+def test_diagnostic_core_guard_does_not_override_authoritative_plan(monkeypatch) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+    patches = [
+        _patch(
+            document,
+            "main_attack_gate",
+            "Begin the planned attack with 55 completed and living Marines and 12 completed and living Siege Tanks.",
+            "The candidate raises the threshold.",
+        )
+    ]
+    patched, _changes = document.apply_patch(_patches_to_operations(patches))
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        lambda prompt, **kwargs: _semantic_payload(),
+    )
+    decision = _decision(
+        core_mechanism_guard={
+            "identity_effect": "preserve",
+            "first_commitment_effect": "same",
+            "relative_power_effect": "preserve",
+            "evidence": ["Game 2 @ 430s"],
+        }
+    )
+
+    errors = validate_strategy_patch_semantics(
+        decision=decision,
+        parent_text=TANK_STRATEGY,
+        candidate_text=patched,
+        patches=patches,
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+
+    assert errors == []

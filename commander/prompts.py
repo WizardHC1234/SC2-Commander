@@ -12,7 +12,7 @@ sections first (longer API prompt-cache prefix), then strategy-specific ones:
 [5] Army tools           — zones, move_group modes, retreat_ratio, scan/scout
 [6] Macro tools          — contract + catalog
 [7] Strategy             — the current strategy.md (authoritative)
-[8] Map Topology         — static zone graph data block (when present)
+[8] Map Topology         — static zone roles, distances, and adjacency (when present)
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ Main force and reinforcement:
 - Treat the persistent main_force as the operational force. A separated reinforcement group must converge on it before an offensive or join its current objective afterward; never give reinforcement an independent attack, harass, or search route.
 - Judge readiness, progress, gathering, reinforcement, and recovery from the current spatial and threat evidence, not from an old command.
 - The attack gate is satisfied only by the gathered main_force. Separated reinforcement cannot be used to reach the gate.
-- Do not recall a forward group solely because newly produced reinforcements form another group. Keep it advancing only while current evidence shows that it can make progress, and use current strategy conditions to decide whether other groups should reinforce, gather, or recover.
+- Do not recall, stage, or stop a forward main_force solely because newly produced reinforcements form another group or either group is fragmented. Once the main_force has an active push, assault, harass, or contain command, preserve its advancing mode and strategic objective while current evidence shows it can make progress; send reinforcements to join that objective. Fragmentation changes the reinforcement command, not the forward main_force command.
 """
 
 # =============================================================================
@@ -81,31 +81,32 @@ _ARMY_ZONES = """\
 [5] Army tools
 
 Zones:
-- Copy group_id and zone_id from the observation. Use [8] neighbors and primary_route (the default ground attack route) for staging, retreat, and multi-hop movement; never infer adjacency from zone numbers. neighbors are direct ground links and their parenthesized value is path distance.
+- Copy group_id and zone_id from the observation. destination_zone_id is the final objective of the current army action, not the next pathfinding hop; the runtime moves the force along a valid ground route. Use [8] zone roles, distances, and neighbors only to assess reachability or choose an explicit pre-attack staging, contain, or retreat position; they are not a recommended sequence of movement commands. Do not decompose a ready offensive into successive commands for empty intermediate zones, and never infer adjacency from zone numbers.
 - In the Zone State Table, follow columns and row_count. own_contents excludes army_groups; visible_enemy_contents is current and last_seen_enemy_contents is fogged memory. A fogged or partially visible zone without visible enemies is not confirmed empty.
 
 move_group:
 - Emit exactly one move_group per current army_groups entry; none if empty. Command every group even before the attack gate: hold main_force at a safe own staging zone and regroup reinforcement to it. After the offensive starts, reinforcement joins the same objective, never an independent attack, harass, or search.
-- is_fragmented=yes means a group is spatially split and must not be treated as gathered.
+- Before the first offensive, is_fragmented=yes means a group is spatially split and must not be treated as gathered. After the main_force is already advancing, fragmentation or a lagging reinforcement is not by itself permission to replace the main_force command with hold or regroup.
 - Movement modes:
   - regroup: relocate to a safe own staging zone without stopping; do not park there, use hold to defend.
-  - hold: move to and defend a point; fire in range but do not chase or attack structures, and Siege Tanks stay sieged near enemies. Use for staging, guarding, or defense.
-  - push: forward attack-move that fights encountered threats but does not chase behind the advance.
-  - assault: committed attack-move toward enemy or useful neutral territory, not repositioning or a cautious probe.
+  - hold: move to and defend a point; fire in range but do not chase or attack structures, and Siege Tanks stay sieged near enemies. Use for pre-attack staging, guarding, or defense, not to pause an active offensive in a neutral or enemy forward zone merely to wait for reinforcements.
+  - push: forward attack-move toward an active enemy front or a strategy-required staged breakthrough; do not use it merely to traverse an empty intermediate zone.
+  - assault: committed attack-move directly toward the strategy's enemy base, enemy structure, or current enemy objective; do not substitute a neutral path waypoint for that objective.
   - contain: hold outside the target entrance and engage units leaving it without entering; choose target and approach from [8].
   - harass: normal Terran attack-move, not worker-hunting or enemy-army avoidance; use only for an explicit dedicated harasser.
   - defensive_retreat: withdraw toward an own zone while firing. panic_retreat: escape without stopping to fight.
   - search_and_destroy: runtime combines idle combat groups, attacks visible structures first, then sweeps expansions; it overrides other movement modes.
-- Optional retreat_ratio=0.3-1.5 (default 0.6) for assault/push/harass/contain: lower accepts more losses, higher disengages earlier. Runtime withdraws a losing group to safety and resumes after recovery; it never overrides explicit hold, regroup, or retreat. After an automatic retreat, do not repeat the same losing assault unchanged.
+- Optional retreat_ratio=0.3-1.5 (default 0.6) for assault/push/harass/contain: lower accepts more losses, higher disengages earlier. Runtime temporarily overrides a losing group and can resume its blocked offensive command after recovery. When [Combat Execution] reports source=auto_retreat with a blocked advancing mode, do not overwrite that recoverable command with explicit hold or retreat unless the strategy's observable recovery condition requires ending the offensive. After a completed recovery, do not repeat a demonstrably losing assault unchanged.
 
 Attack readiness and objectives:
 - Before starting a planned offensive, audit every explicit attack-gate condition against the current observation and state each condition in reasoning as current/required and met/unmet. Conditions joined by "and" must all be met.
 - Only completed, living, and gathered main_force units count toward combat-unit conditions. Training, queued, pending, separated, missing, or inferred units do not count; near-readiness, estimated advantage, and previous commands cannot override an unmet condition.
 - Any push, assault, harass, or contain toward enemy-controlled territory starts or advances an offensive and requires the gate. If the gate is unmet, hold main_force at a safe staging zone and regroup reinforcement while continuing all valid macro goals.
-- Once an offensive begins, continue or recover from current progress and the strategy's recovery conditions; do not reapply the opening gate after every loss unless the strategy explicitly requires rebuilding it.
+- Once an offensive begins, the current advancing main_force command is the continuity evidence: retain its final strategic objective and an advancing mode unless the objective is cleared or an observable strategy recovery condition requires stopping. If an automatic retreat is active, keep the blocked offensive command recoverable and let runtime apply the temporary override. Do not reapply the opening gate after every loss unless the strategy explicitly requires rebuilding it.
 - Clear local advantage at the active enemy objective is evidence that the forward group can still make progress; maintain its pressure while reinforcements travel forward.
-- Slow, siege-oriented, or gathering forces should stage safely or contain the entrance on primary_route before a long assault. Maintain a progressing objective and reinforce it; if stalled, recover or choose a weaker objective rather than repeat the same assault.
-- [Combat Execution] reports progress, destination, age, and Commander vs auto-retreat source. confirmed_clear means only currently visible without enemies, not map cleanup. Use search_and_destroy only with [Runtime Search-And-Destroy Hint], following its required_action for every group; missing vision alone is insufficient.
+- When the strategy says to attack an enemy base or structure, target that enemy zone directly and let runtime pathfinding choose the route; do not issue zone-by-zone assault commands. An intermediate destination is valid only for an explicit pre-attack staging, contain, retreat, or strategy-required staged breakthrough.
+- Slow, siege-oriented, or gathering forces may stage safely or contain an entrance before their first long assault when the strategy or current threat evidence requires it. Once they begin the assault, maintain the strategic objective and reinforce it; if genuinely stalled, recover or choose another enemy objective rather than fall back to empty intermediate waypoints.
+- [Combat Execution] reports progress, destination, age, and Commander vs auto-retreat source. confirmed_clear at the current objective means select the next valid enemy objective rather than hold there; it does not mean map cleanup. Use search_and_destroy only with [Runtime Search-And-Destroy Hint], following its required_action for every group; missing vision alone is insufficient.
 
 scanner_sweep / scout (at most one call each per cycle; omit scanner_sweep = no scan, omit scout = cancel):
 - Choose recon from strategy and current observation. Scanner Sweep costs 50 Orbital energy; use it only when ready and missing vision materially changes the army decision, especially if ground scouting is unsafe.
@@ -126,6 +127,7 @@ _WAKE_EVENT = """\
 - A unit-count wake requires a matching train_* tool in this cycle; if the next checkpoint is an attack-gate count, include that train_* tool.
 - A structure-count wake requires the matching build_*, expand, or build_gas tool; upgrade_completed requires the matching research_*. Never use unit-count predicates for structures.
 - While infrastructure is still missing and you are not waking on a reachable structure_count / upgrade checkpoint, prefer supply_left_at_most, objective_status_became / destination_reached, or an explicit game_time_at_least a short time ahead — not an unreachable combat-unit gate.
+- When issuing push, assault, harass, or contain, include destination_reached or objective_status_became as a wake condition so arrival or contact can update the army decision; do not rely only on production, supply, or a distant unit-count milestone while an army action is progressing.
 - objective_status_became fires only when the army objective changes to the target after this wake is armed; objective and destination conditions never represent building or research completion.
 - Omitting set_wake_event or emitting only invalid predicates causes a weak runtime fallback of game_time_at_least=now+60; treat that as a safety net, not the intended pattern. The runtime also arms an independent now+60 deadline fuse so the Commander cannot sleep forever.
 - Conditions must be reachable from this cycle's tools; otherwise the runtime rejects the wake and requests a complete corrected tool_calls set.

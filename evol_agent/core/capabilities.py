@@ -64,7 +64,7 @@ def build_executor_capability_manifest(race: str) -> dict[str, Any]:
     if "army_intent" in control_names:
         army_controls.append("persistent_whole_army_intent")
     return {
-        "schema": "commander_executor_capabilities.v1",
+        "schema": "commander_executor_capabilities.v2",
         "race": normalized_race,
         "macro_contract": {
             "target_semantics": "absolute concurrent targets replaced each decision",
@@ -77,6 +77,23 @@ def build_executor_capability_manifest(race: str) -> dict[str, Any]:
             name: action_space.get(name, "") for name in sorted(control_names)
         },
         "information_controls": list(INFORMATION_CONTROLS),
+        "observation_contract": {
+            "strategy_usable": [
+                "current own economy, technology, production, and living unit counts",
+                "currently visible enemy units and structures",
+                "last-seen enemy contents only with explicit recency",
+                "current scan readiness and current objective progress",
+            ],
+            "analysis_only": [
+                "post-match enemy_truth extracted from Replay",
+                "facts first revealed after the decision being evaluated",
+            ],
+            "not_persistent_strategy_state": [
+                "whether a previous scan completed",
+                "which branch was selected in an earlier Commander cycle",
+                "arbitrary memory of a prior observation",
+            ],
+        },
         "runtime_owned": [
             "worker distribution",
             "pathfinding",
@@ -90,6 +107,8 @@ def build_executor_capability_manifest(race: str) -> dict[str, Any]:
             "group IDs fixed before observation",
             "manual unit-level target selection",
             "unobserved opponent truth",
+            "post-match enemy_truth as a live strategy condition",
+            "cross-cycle scan or branch history as strategy state",
             "transport loading or unloading",
             "manual unit transformations or transformation-readiness gates",
             "manual combat-ability use",

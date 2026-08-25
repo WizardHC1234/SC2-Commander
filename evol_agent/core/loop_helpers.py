@@ -15,12 +15,31 @@ def normalize_strategy_contract(value: Any, *, strategy_name: str) -> dict[str, 
             return []
         return [text for item in raw if (text := str(item).strip())]
 
+    style = str(contract.get("style") or "").strip()
+    core_win_mechanism = str(
+        contract.get("core_win_mechanism")
+        or contract.get("identity")
+        or contract.get("intended_plan")
+        or ""
+    ).strip()
     identity = str(
-        contract.get("identity") or contract.get("intended_plan") or ""
+        contract.get("identity")
+        or contract.get("intended_plan")
+        or core_win_mechanism
+        or ""
     ).strip() or f"Current {strategy_name} strategy"
+    if not core_win_mechanism:
+        core_win_mechanism = identity
+    critical_timing = str(
+        contract.get("critical_timing_or_power_spike")
+        or contract.get("critical_timing")
+        or contract.get("power_spike")
+        or ""
+    ).strip()
     commitments = clean_list(contract.get("core_commitments"))
     if not commitments:
         commitments = clean_list(contract.get("must_preserve"))
+    flexible_components = clean_list(contract.get("flexible_components"))
     boundary = str(contract.get("optimization_boundary") or "").strip()
     if not boundary:
         legacy_boundary = clean_list(contract.get("must_not_break"))
@@ -33,7 +52,11 @@ def normalize_strategy_contract(value: Any, *, strategy_name: str) -> dict[str, 
         direction = "adjust"
     return {
         "identity": identity,
+        "style": style,
+        "core_win_mechanism": core_win_mechanism,
+        "critical_timing_or_power_spike": critical_timing,
         "core_commitments": commitments,
+        "flexible_components": flexible_components,
         "optimization_boundary": boundary,
         "direction": direction,
     }
@@ -135,4 +158,3 @@ def exit_on_keyboard_interrupt(message: str = "EvolAgent stopped by Ctrl+C") -> 
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(130)
-

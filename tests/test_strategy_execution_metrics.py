@@ -240,6 +240,51 @@ def test_reinforcement_group_does_not_complete_main_force_attack_gate(
     assert row["engagement_trigger_consistency"] == 0.5
 
 
+def test_army_requirements_are_equal_weighted_at_one_snapshot(
+    tmp_path: Path,
+) -> None:
+    command = {
+        "group_id": "group_0",
+        "destination_zone_id": "zone_1",
+        "movement_mode": "push",
+    }
+    spec = _spec(gate=10)
+    spec["unit_aliases"]["SIEGETANK"] = ["SIEGETANK"]
+    # Retained only as backwards-compatible strategy metadata: it must not
+    # affect either army completion or early-attack readiness.
+    spec["unit_supply"] = {"MARINE": 1, "SIEGETANK": 3}
+    spec["attack_gate"] = {"MARINE": 10, "SIEGETANK": 1}
+    observation = _observation(marine_count=10, attacking=True)
+    observation["production"]["completed"]["SIEGETANK"] = 0
+    observation["own_forces"]["completed_counts"]["SIEGETANK"] = 0
+    observation["own_forces"]["combat_composition"]["SIEGETANK"] = 0
+    observation["army_control"]["groups"][0]["unit_type_counts"][
+        "SIEGETANK"
+    ] = 0
+
+    match = _write_match(
+        tmp_path,
+        [
+            {
+                "agent": "commander",
+                "game_time": 0,
+                "strategy_id": "test_strategy",
+                "observation": observation,
+                "army_policy": {"commands": [command]},
+                "accepted": True,
+            }
+        ],
+    )
+
+    row, _requirements = evaluate_match(match, spec)
+
+    # Marine is complete and Tank is absent: each requirement contributes 1/2,
+    # rather than weighting Tank by its higher supply cost.
+    assert row["army_completion"] == 0.5
+    assert row["attack_force_progress"] == 0.5
+    assert row["engagement_trigger_consistency"] == 0.5
+
+
 def test_wrong_strategy_first_objective_fails_trigger(tmp_path: Path) -> None:
     command = {
         "group_id": "group_0",

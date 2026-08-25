@@ -25,7 +25,6 @@
     "MARINE": ["MARINE"],
     "SIEGETANK": ["SIEGETANK", "SIEGETANKSIEGED"]
   },
-  "unit_supply": {"MARINE": 1, "SIEGETANK": 3},
   "attack_gate": {"MARINE": 45, "SIEGETANK": 10},
   "attack_modes": ["push", "assault", "search_and_destroy"],
   "attack_group_roles": ["main_force"],

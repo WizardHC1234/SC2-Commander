@@ -16,7 +16,8 @@ Outcome performance and strategy execution are reported separately.
   already stored by the evolution runner.
 - `economy_completion`, `technology_completion`, and `army_completion`: the
   three strategy-development components from the deterministic consistency
-  evaluator.
+  evaluator. Each stated requirement contributes equally after its own target
+  normalization; army unit types are evaluated jointly at the same snapshot.
 - `engagement_trigger_consistency` and
   `engagement_continuation_consistency`: whether the agent starts and continues
   combat according to the strategy when those decisions are evaluable.
