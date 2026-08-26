@@ -40,10 +40,11 @@ class _TankGateAttack(PlanZoneAttack):
         self.attack_on_advantage = False
 
     def composition_ready(self) -> bool:
-        return all(
-            _living(self.cache, unit_type) >= need
-            for unit_type, need in self.composition.items()
-        )
+        # Do not use builtin all(): sharpy.plans.require.all shadows it via import *.
+        for unit_type, need in self.composition.items():
+            if _living(self.cache, unit_type) < need:
+                return False
+        return True
 
     def _should_attack(self, power: ExtendedPower) -> bool:
         return self.composition_ready()
@@ -62,15 +63,19 @@ class SkillTankBot(KnowledgeBot):
         await super().on_start()
         self.zone_manager = self.knowledge.get_required_manager(IZoneManager)
 
-    def _gate_reached(self, _knowledge) -> bool:
+    def _gate_reached(self, _ai) -> bool:
         return (
-            _living(self.cache, UnitTypeId.MARINE) >= 45
-            and _living(self.cache, UnitTypeId.SIEGETANK) >= 10
+            _living(self.unit_cache, UnitTypeId.MARINE) >= 45
+            and _living(self.unit_cache, UnitTypeId.SIEGETANK) >= 10
         )
 
     async def create_plan(self) -> BuildOrder:
         # Two-base tank timing: rax -> gas -> expand -> factory/tank ASAP,
         # then scale barracks reactors while the second factory comes up.
+        #
+        # BuildOrder wraps each list in SequentialList, so MorphOrbitals and
+        # unit production must be separate top-level branches or they block
+        # expand / factory / tanks forever.
         scvs = [
             Step(
                 None,
@@ -83,7 +88,6 @@ class SkillTankBot(KnowledgeBot):
             Step(Supply(13), GridBuilding(UnitTypeId.SUPPLYDEPOT, 1, priority=True)),
             Step(UnitReady(UnitTypeId.SUPPLYDEPOT, 0.95), GridBuilding(UnitTypeId.BARRACKS, 1, priority=True)),
             StepBuildGas(1, Supply(15)),
-            Step(None, MorphOrbitals(), skip_until=UnitReady(UnitTypeId.BARRACKS, 0.1)),
             # Natural as soon as the Barracks is started / first marine is in flight.
             Step(UnitExists(UnitTypeId.BARRACKS, 1), Expand(2)),
             Step(Supply(16), GridBuilding(UnitTypeId.SUPPLYDEPOT, 2)),
@@ -103,9 +107,10 @@ class SkillTankBot(KnowledgeBot):
             BuildGas(4),
             Step(None, Expand(3), skip_until=RequireCustom(self._gate_reached)),
         ]
-        army = [
-            # Marines immediately; tanks as soon as the tech lab is ready.
+        marines = [
             Step(UnitReady(UnitTypeId.BARRACKS, 1), ActUnit(UnitTypeId.MARINE, UnitTypeId.BARRACKS, 96)),
+        ]
+        tanks = [
             Step(
                 UnitReady(UnitTypeId.FACTORYTECHLAB, 1),
                 ActUnit(UnitTypeId.SIEGETANK, UnitTypeId.FACTORY, 20, priority=True),
@@ -132,7 +137,9 @@ class SkillTankBot(KnowledgeBot):
             AutoDepot(),
             scvs,
             buildings,
-            army,
+            Step(None, MorphOrbitals(), skip_until=UnitReady(UnitTypeId.BARRACKS, 0.1)),
+            marines,
+            tanks,
             SequentialList(tactics),
         )
 

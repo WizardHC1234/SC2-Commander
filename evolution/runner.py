@@ -133,6 +133,7 @@ class EvolutionConfig:
     bot_instruct: str = ""
     real_time: bool = False
     baseline_batch_dir: str = ""
+    records_dir: str = "game_records"
 
     def validate(self) -> None:
         if not self.strategy.strip():
@@ -366,6 +367,10 @@ class EvolutionRunner:
         config.validate()
         self.config = config
         self.project_root = project_root.resolve()
+        records_path = Path(config.records_dir).expanduser()
+        self.records_root = (
+            records_path if records_path.is_absolute() else self.project_root / records_path
+        ).resolve()
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_dir = (run_dir or self.project_root / "evolution_runs" / config.strategy / stamp).resolve()
         self.run_id = _safe_name(self.run_dir.name, 15)
@@ -460,6 +465,7 @@ class EvolutionRunner:
                     config_changed = True
             for key in (
                 "baseline_batch_dir",
+                "records_dir",
                 "analysis_batch_games",
                 "max_analysis_games_per_generation",
                 "max_generations_per_difficulty",
@@ -651,7 +657,7 @@ class EvolutionRunner:
                     ("cand_confirm", str(pending.get("strategy") or "")),
                 ):
                     name = self._batch_name(generation, role, difficulty)
-                    add_path(self.project_root / "game_records" / name, strategy, difficulty)
+                    add_path(self.records_root / name, strategy, difficulty)
 
         previous_games = int(state.get("games_used") or 0)
         self._sync_games_used(state)
@@ -1485,7 +1491,7 @@ class EvolutionRunner:
         if expected_games <= 0:
             raise ValueError("target_games must be positive")
         batch_name = self._batch_name(generation, role, difficulty)
-        batch_dir = self.project_root / "game_records" / batch_name
+        batch_dir = self.records_root / batch_name
         completed = completed_record_count(batch_dir, strategy=strategy)
         if completed == expected_games:
             return read_batch_result(
@@ -1519,6 +1525,7 @@ class EvolutionRunner:
                 "-CONCURRENCY", str(self.config.concurrency),
                 "-START_INDEX", str(completed),
                 "-BATCH_NAME", batch_name,
+                "-OUTPUT_BASE_DIR", str(self.records_root),
             ]
             if self.config.bot_instruct:
                 command.extend(["-BOT_INSTRUCT", self.config.bot_instruct])
@@ -1538,6 +1545,7 @@ class EvolutionRunner:
                 "--concurrency", str(self.config.concurrency),
                 "--start-index", str(completed),
                 "--batch-name", batch_name,
+                "--output-base-dir", str(self.records_root),
             ]
             if self.config.bot_instruct:
                 command.extend(["--bot-instruct", self.config.bot_instruct])

@@ -1604,6 +1604,42 @@ def test_run_batch_requests_only_remaining_games(tmp_path: Path, monkeypatch) ->
     assert result.losses == 3
 
 
+def test_run_batch_uses_configured_records_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            records_dir="game_records_evol/tank",
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    batch_name = runner._batch_name(0, "cand", "harder")
+    batch_dir = tmp_path / "game_records_evol" / "tank" / batch_name
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = [str(item) for item in command]
+        _write_completed_matches(batch_dir, strategy="tank_opt1", count=10)
+
+    monkeypatch.setattr("evolution.runner.subprocess.run", fake_run)
+    result = runner.run_batch(
+        "tank_opt1",
+        "harder",
+        generation=0,
+        role="cand",
+        target_games=10,
+    )
+
+    command = captured["command"]
+    output_flag = "-OUTPUT_BASE_DIR" if "-OUTPUT_BASE_DIR" in command else "--output-base-dir"
+    assert Path(command[command.index(output_flag) + 1]) == batch_dir.parent
+    assert result.path == batch_dir
+
+
 def _write_completed_matches(
     batch_dir: Path, *, strategy: str, count: int, result: str = "Victory"
 ) -> None:

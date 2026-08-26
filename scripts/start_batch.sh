@@ -39,6 +39,7 @@ TOTAL_MATCHES=20
 CONCURRENCY=2
 START_INDEX=0
 BATCH_NAME=""
+OUTPUT_BASE_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -59,6 +60,7 @@ Options:
   --concurrency N
   --start-index N
   --batch-name NAME
+  --output-base-dir PATH
   -h, --help
 EOF
 }
@@ -79,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     --concurrency) CONCURRENCY="$2"; shift 2 ;;
     --start-index) START_INDEX="$2"; shift 2 ;;
     --batch-name) BATCH_NAME="$2"; shift 2 ;;
+    --output-base-dir) OUTPUT_BASE_DIR="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
@@ -267,7 +270,13 @@ PYTHON_EXE="$(find_python)" || {
   echo "No usable Python found (need import openai). Hint: conda activate SC2" >&2
   exit 1
 }
-RECORD_ROOT="${REPO_ROOT}/game_records"
+if [[ -z "${OUTPUT_BASE_DIR}" ]]; then
+  RECORD_ROOT="${REPO_ROOT}/game_records"
+elif [[ "${OUTPUT_BASE_DIR}" = /* ]]; then
+  RECORD_ROOT="${OUTPUT_BASE_DIR}"
+else
+  RECORD_ROOT="${REPO_ROOT}/${OUTPUT_BASE_DIR}"
+fi
 
 echo ""
 echo "=================================================="
@@ -365,4 +374,3 @@ fi
 # 结果已归档到 game_records 时，清理空临时目录
 rm -rf "${LOG_DIR}" 2>/dev/null || true
 echo "Batch finished successfully."
-

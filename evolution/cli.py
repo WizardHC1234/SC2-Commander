@@ -39,6 +39,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--knowledge-mode", choices=("enabled", "disabled"), default="enabled")
     parser.add_argument("--run-dir", default="", help="Existing run directory to resume")
     parser.add_argument(
+        "--records-dir",
+        default="game_records",
+        help="Root directory for match records; relative paths are resolved from the project root",
+    )
+    parser.add_argument(
         "--baseline-batch-dir",
         default="",
         help="Seed a new run from one already-completed champion batch",
@@ -72,6 +77,7 @@ def main() -> None:
         knowledge_mode=args.knowledge_mode,
         real_time=args.real_time,
         baseline_batch_dir=args.baseline_batch_dir,
+        records_dir=args.records_dir,
     )
     runner = EvolutionRunner(config, run_dir=Path(args.run_dir) if args.run_dir else None)
     state = runner.run()

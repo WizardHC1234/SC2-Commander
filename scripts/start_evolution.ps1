@@ -12,7 +12,8 @@
     [Nullable[int]]$MAX_GENERATIONS_PER_DIFFICULTY = $null,
     [Nullable[double]]$MASTERY_SCORE_THRESHOLD = $null,
     [string]$RUN_DIR = "",
-    [string]$BASELINE_BATCH_DIR = ""
+    [string]$BASELINE_BATCH_DIR = "",
+    [string]$RECORDS_DIR = ""
 )
 
 # SC2-Commander automatic strategy evolution (Windows)
@@ -36,6 +37,7 @@ $CFG_MAX_GENERATIONS_PER_DIFFICULTY = 10
 $CFG_MASTERY_SCORE_THRESHOLD = 0.90
 $CFG_RUN_DIR = "evolution_runs\marine\20260825_175700"                       # resume: evolution_runs\...
 $CFG_BASELINE_BATCH_DIR = ""  # reuse the retained 10-game tank baseline
+$CFG_RECORDS_DIR = "game_records"
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
@@ -54,6 +56,7 @@ if ($null -ne $MAX_GENERATIONS_PER_DIFFICULTY) { $CFG_MAX_GENERATIONS_PER_DIFFIC
 if ($null -ne $MASTERY_SCORE_THRESHOLD) { $CFG_MASTERY_SCORE_THRESHOLD = [double]$MASTERY_SCORE_THRESHOLD }
 if (-not [string]::IsNullOrWhiteSpace($RUN_DIR)) { $CFG_RUN_DIR = $RUN_DIR }
 if (-not [string]::IsNullOrWhiteSpace($BASELINE_BATCH_DIR)) { $CFG_BASELINE_BATCH_DIR = $BASELINE_BATCH_DIR }
+if (-not [string]::IsNullOrWhiteSpace($RECORDS_DIR)) { $CFG_RECORDS_DIR = $RECORDS_DIR }
 
 if ([string]::IsNullOrWhiteSpace($CFG_STRATEGY) -or [string]::IsNullOrWhiteSpace($CFG_COMMANDER_MODEL)) {
     Write-Error "STRATEGY and COMMANDER_MODEL must be set (in config block or via -STRATEGY / -COMMANDER_MODEL)."
@@ -80,6 +83,7 @@ Write-Host "Confirmation : $CFG_CONFIRMATION_MATCHES extra games per strategy wh
 Write-Host "Selection    : candidate score > champion score"
 Write-Host "Mastery      : Champion win rate >= $CFG_MASTERY_SCORE_THRESHOLD"
 Write-Host "Budget       : per-difficulty=$CFG_MAX_GENERATIONS_PER_DIFFICULTY, total=$CFG_MAX_GENERATIONS"
+Write-Host "Records dir  : $CFG_RECORDS_DIR"
 if (-not [string]::IsNullOrWhiteSpace($CFG_RUN_DIR)) {
     Write-Host "Resume dir   : $CFG_RUN_DIR"
 }
@@ -100,6 +104,7 @@ $arguments = @(
     "--max-total-generations", $CFG_MAX_GENERATIONS,
     "--max-generations-per-difficulty", $CFG_MAX_GENERATIONS_PER_DIFFICULTY,
     "--mastery-score-threshold", $CFG_MASTERY_SCORE_THRESHOLD
+    "--records-dir", $CFG_RECORDS_DIR
 )
 if (-not [string]::IsNullOrWhiteSpace($CFG_EVOLUTION_MODEL)) {
     $arguments += @("--evolution-model", $CFG_EVOLUTION_MODEL)

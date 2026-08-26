@@ -44,15 +44,22 @@ class _BattlecruiserGateAttack(PlanZoneAttack):
         self.attack_on_advantage = False
 
     def _yamato_ready(self) -> bool:
-        return UpgradeId.YAMATOCANNON in self.ai.state.upgrades
+        # SC2 reports the finished research as BATTLECRUISERENABLESPECIALIZATIONS;
+        # the action catalogue / Tech act still uses YAMATOCANNON.
+        upgrades = self.ai.state.upgrades
+        return (
+            UpgradeId.YAMATOCANNON in upgrades
+            or UpgradeId.BATTLECRUISERENABLESPECIALIZATIONS in upgrades
+        )
 
     def composition_ready(self) -> bool:
         if not self._yamato_ready():
             return False
-        return all(
-            _living(self.cache, unit_type) >= need
-            for unit_type, need in self.composition.items()
-        )
+        # Do not use builtin all(): sharpy.plans.require.all shadows it via import *.
+        for unit_type, need in self.composition.items():
+            if _living(self.cache, unit_type) < need:
+                return False
+        return True
 
     def _should_attack(self, power: ExtendedPower) -> bool:
         return self.composition_ready()
@@ -69,14 +76,17 @@ class SkillBattlecruiserBot(KnowledgeBot):
             }
         )
 
-    def _bc_started(self, _knowledge) -> bool:
-        return self.cache.own(UnitTypeId.BATTLECRUISER).amount >= 1
+    def _bc_started(self, _ai) -> bool:
+        return self.unit_cache.own(UnitTypeId.BATTLECRUISER).amount >= 1
 
-    def _tanks_ready_for_thors(self, _knowledge) -> bool:
+    def _tanks_ready_for_thors(self, _ai) -> bool:
         # Finish the tank half of the gate before spending factories on Thors.
-        return _living(self.cache, UnitTypeId.SIEGETANK) >= 6
+        return _living(self.unit_cache, UnitTypeId.SIEGETANK) >= 6
 
     async def create_plan(self) -> BuildOrder:
+        # BuildOrder wraps each list in SequentialList. Keep MorphOrbitals and
+        # each production line as separate top-level branches so expand / factory
+        # / starport are not blocked by orbital morph or marine counts.
         scvs = [
             Step(
                 None,
@@ -89,7 +99,6 @@ class SkillBattlecruiserBot(KnowledgeBot):
             Step(Supply(13), GridBuilding(UnitTypeId.SUPPLYDEPOT, 1, priority=True)),
             Step(UnitReady(UnitTypeId.SUPPLYDEPOT, 0.95), GridBuilding(UnitTypeId.BARRACKS, 1, priority=True)),
             StepBuildGas(1, Supply(15)),
-            Step(None, MorphOrbitals(), skip_until=UnitReady(UnitTypeId.BARRACKS, 0.1)),
             Step(UnitExists(UnitTypeId.BARRACKS, 1), Expand(2)),
             Step(Supply(18), GridBuilding(UnitTypeId.SUPPLYDEPOT, 2)),
             StepBuildGas(2, UnitExists(UnitTypeId.COMMANDCENTER, 2)),
@@ -114,24 +123,33 @@ class SkillBattlecruiserBot(KnowledgeBot):
             Step(None, BuildAddon(UnitTypeId.FACTORYTECHLAB, UnitTypeId.FACTORY, 2)),
             Step(UnitReady(UnitTypeId.FUSIONCORE, 0.5), GridBuilding(UnitTypeId.STARPORT, 2)),
             Step(None, BuildAddon(UnitTypeId.STARPORTTECHLAB, UnitTypeId.STARPORT, 2)),
-            Step(UnitReady(UnitTypeId.FUSIONCORE, 1), Tech(UpgradeId.YAMATOCANNON)),
+            Step(
+                UnitReady(UnitTypeId.FUSIONCORE, 1),
+                Tech(UpgradeId.YAMATOCANNON, UnitTypeId.FUSIONCORE),
+            ),
             BuildGas(6),
             Step(None, Expand(4), skip_until=RequireCustom(self._bc_started)),
             BuildGas(8),
         ]
-        army = [
+        marines = [
             Step(UnitReady(UnitTypeId.BARRACKS, 1), ActUnit(UnitTypeId.MARINE, UnitTypeId.BARRACKS, 12)),
-            # Early tanks for the defensive opening; keep tanks prioritized to the gate.
+        ]
+        # Parallel factory lines: keep rebuilding to the gate counts so a lost
+        # tank/thor cannot permanently lock the attack forever.
+        tanks = [
             Step(
                 UnitReady(UnitTypeId.FACTORYTECHLAB, 1),
                 ActUnit(UnitTypeId.SIEGETANK, UnitTypeId.FACTORY, 8, priority=True),
             ),
-            # Thors only after the tank gate count is secured (avoids factory thrash).
+        ]
+        thors = [
             Step(
                 RequireCustom(self._tanks_ready_for_thors),
                 ActUnit(UnitTypeId.THOR, UnitTypeId.FACTORY, 4, priority=True),
                 skip_until=UnitReady(UnitTypeId.ARMORY, 1),
             ),
+        ]
+        battlecruisers = [
             Step(
                 UnitReady(UnitTypeId.FUSIONCORE, 1),
                 ActUnit(UnitTypeId.BATTLECRUISER, UnitTypeId.STARPORT, 12, priority=True),
@@ -159,7 +177,11 @@ class SkillBattlecruiserBot(KnowledgeBot):
             AutoDepot(),
             scvs,
             buildings,
-            army,
+            Step(None, MorphOrbitals(), skip_until=UnitReady(UnitTypeId.BARRACKS, 0.1)),
+            marines,
+            tanks,
+            thors,
+            battlecruisers,
             SequentialList(tactics),
         )
 

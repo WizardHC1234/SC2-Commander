@@ -53,10 +53,11 @@ class SkillMarineBot(KnowledgeBot):
 
     async def create_plan(self) -> BuildOrder:
         # Fast one-base all-in path (no gas): depot -> rax -> cut SCV -> mass rax.
+        # MorphOrbitals must not sit in the opening SequentialList or it blocks
+        # the 6-rax scale until the CC finishes morphing.
         opening = [
             Step(Supply(13), GridBuilding(UnitTypeId.SUPPLYDEPOT, 1, priority=True)),
             Step(UnitReady(UnitTypeId.SUPPLYDEPOT, 0.95), GridBuilding(UnitTypeId.BARRACKS, 1, priority=True)),
-            Step(None, MorphOrbitals(), skip_until=UnitReady(UnitTypeId.BARRACKS, 0.1)),
             Step(Supply(16), GridBuilding(UnitTypeId.SUPPLYDEPOT, 2, priority=True)),
             # Dump leftover minerals into Barracks count as soon as the first is down.
             Step(UnitReady(UnitTypeId.BARRACKS, 1), GridBuilding(UnitTypeId.BARRACKS, 6)),
@@ -87,6 +88,7 @@ class SkillMarineBot(KnowledgeBot):
             AutoDepot(),
             workers,
             opening,
+            Step(None, MorphOrbitals(), skip_until=UnitReady(UnitTypeId.BARRACKS, 0.1)),
             # Marines from the first Barracks immediately; target Ultimate Goal count.
             Step(UnitReady(UnitTypeId.BARRACKS, 1), ActUnit(UnitTypeId.MARINE, UnitTypeId.BARRACKS, 180)),
             SequentialList(tactics),
