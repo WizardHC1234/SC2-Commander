@@ -68,8 +68,6 @@ $EXPERIMENTS = @(
     @{ EnemyRace="terran"; EnemyDifficulty="harder"; EnemyBuild="macro"; Strategy="none"; Matches=20;}
     @{ EnemyRace="terran"; EnemyDifficulty="veryhard"; EnemyBuild="macro"; Strategy="none"; Matches=20;}
     
-
-
     @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
     @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20}
     @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }

@@ -17,7 +17,9 @@ param(
     [int]$CONCURRENCY = 2,
     [int]$START_INDEX = 0,
 
-    [string]$BATCH_NAME = ""
+    [string]$BATCH_NAME = "",
+    # Match records root (default: <repo>/game_records). Skill-bot matrices use game_records_bot.
+    [string]$OUTPUT_BASE_DIR = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -151,6 +153,10 @@ function New-DefaultBatchName {
     $safeBuild = Get-SafeName $ENEMY_BUILD
     $safeStrategy = Get-SafeName $FORCE_STRATEGY
     $safeModel = Get-SafeName $COMMANDER_MODEL
+    $safeBot = Get-SafeName $MY_BOT_NAME
+    if ($safeBot -and $safeBot -ne "commander" -and $safeBot -ne "universal_llm") {
+        return "batch_${timestamp}_${safeMap}_${safeBotRace}v${safeEnemyRace}_${safeDifficulty}_${safeBuild}_${safeBot}_${safeModel}"
+    }
     return "batch_${timestamp}_${safeMap}_${safeBotRace}v${safeEnemyRace}_${safeDifficulty}_${safeBuild}_${safeStrategy}_${safeModel}"
 }
 
@@ -240,7 +246,14 @@ Set-Location -Path $currentPath
 
 Test-BatchConfig -WorkDir $currentPath
 $PYTHON_EXE = Get-PythonExe -WorkDir $currentPath
-$recordRoot = Join-Path $currentPath "game_records"
+if ([string]::IsNullOrWhiteSpace($OUTPUT_BASE_DIR)) {
+    $recordRoot = Join-Path $currentPath "game_records"
+} elseif ([System.IO.Path]::IsPathRooted($OUTPUT_BASE_DIR)) {
+    $recordRoot = $OUTPUT_BASE_DIR
+} else {
+    $recordRoot = Join-Path $currentPath $OUTPUT_BASE_DIR
+}
+New-Item -ItemType Directory -Path $recordRoot -Force | Out-Null
 $sc2Path = $env:SC2PATH
 
 Write-Host ""
@@ -252,6 +265,7 @@ Write-Host "Enemy    : $ENEMY_RACE | difficulty=$ENEMY_DIFFICULTY | build=$ENEMY
 Write-Host "Map      : $MAP_NAME"
 Write-Host "Strategy : $FORCE_STRATEGY"
 Write-Host "Model    : $COMMANDER_MODEL"
+Write-Host "Records  : $recordRoot"
 Write-Host "Run      : $TOTAL_MATCHES matches, concurrency=$CONCURRENCY"
 Write-Host "=================================================="
 Write-Host ""

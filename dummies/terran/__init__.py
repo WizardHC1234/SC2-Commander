@@ -10,3 +10,6 @@ from .one_base_turtle import OneBaseTurtle
 from .safe_tvt_raven import TerranSafeTvT
 from .terran_silver_bio import TerranSilverBio
 from .llm_bot import LLMBot, MyLLMBot
+from .skill_marine import SkillMarineBot
+from .skill_tank import SkillTankBot
+from .skill_battlecruiser import SkillBattlecruiserBot

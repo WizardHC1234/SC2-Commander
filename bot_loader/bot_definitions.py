@@ -325,6 +325,16 @@ class BotDefinitions:
             DummyBuilder("terranturtle", "RustyOneBaseTurtle", Race.Terran, "one_base_turtle.py", OneBaseTurtle),
             DummyBuilder("saferaven", "SafeRaven", Race.Terran, "safe_tvt_raven.py", TerranSafeTvT),
             DummyBuilder("silverbio", "TerranSilverBio", Race.Terran, "terran_silver_bio.py", TerranSilverBio),
+            # Skill-aligned style bots (hand-written strategy.md targets; not SkillBuilder output).
+            DummyBuilder("skill_marine", "SkillMarine", Race.Terran, "skill_marine.py", SkillMarineBot),
+            DummyBuilder("skill_tank", "SkillTank", Race.Terran, "skill_tank.py", SkillTankBot),
+            DummyBuilder(
+                "skill_bc",
+                "SkillBattlecruiser",
+                Race.Terran,
+                "skill_battlecruiser.py",
+                SkillBattlecruiserBot,
+            ),
             DummyBuilder("test_bot", "TestBot", Race.Terran, "test_bot.py", TestBot, params_count=1), # <== 新增这一行
             DummyBuilder(
                 "llm_bot",
