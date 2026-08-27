@@ -51,6 +51,21 @@ def resolve_skill_dir(
 # EvolAgent reads and rewrites only the natural-language strategy.
 SKILL_FILES = ["strategy.md"]
 REQUIRED_TOP_HEADINGS = ["# Summary", "# Details"]
+# Read compatibility for candidates/checkpoints briefly produced by the retired
+# three-section experiment. New candidates use REQUIRED_TOP_HEADINGS above.
+STRUCTURED_TOP_HEADINGS = ["# Goal", "# Macro", "# Combat"]
+STRUCTURED_STRATEGY_FIELDS = {
+    "Goal": ["Strategy Style", "Core Objective", "Key Principle"],
+    "Macro": ["Economy and Expansion", "Production", "Technology", "Ultimate Goal"],
+    "Combat": [
+        "Pre-Attack Army Posture",
+        "Scouting and Information",
+        "Main Attack Gate",
+        "Attack Objective",
+        "Engagement and Reinforcement",
+        "Recovery and Cleanup",
+    ],
+}
 
 # Keys must exist in llm/config.json -> llm_agents_pool. A non-empty CLI
 # --model value overrides both role defaults.

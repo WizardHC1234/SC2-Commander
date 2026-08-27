@@ -541,6 +541,7 @@ class EvolAgent:
                 model=optimization_model,
                 prefix="    ",
                 capability_manifest=capability_manifest,
+                prior_experiences=list(request.prior_experiences),
             )
         )
         run_context["optimization_agent_loop"] = {

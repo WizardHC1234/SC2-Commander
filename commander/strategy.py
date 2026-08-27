@@ -13,8 +13,6 @@ _DETAIL_HEADER_RE = re.compile(
     r"^\s*#\s*(?:详细内容|Detail|Details|Full|Content)\s*$",
     re.MULTILINE | re.IGNORECASE,
 )
-
-
 def parse_strategy_document(text: str) -> Dict[str, str]:
     if not text:
         return {"summary": "", "detail": ""}

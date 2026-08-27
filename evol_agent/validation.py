@@ -4,7 +4,11 @@ import importlib
 import re
 from typing import Optional
 
-from .core.config import REQUIRED_TOP_HEADINGS
+from .core.config import (
+    REQUIRED_TOP_HEADINGS,
+    STRUCTURED_STRATEGY_FIELDS,
+    STRUCTURED_TOP_HEADINGS,
+)
 from .core.types import ValidationResult
 from .optimization.strategy_document import StrategyDocument
 
@@ -103,10 +107,10 @@ _UNEXECUTABLE_STRATEGY_PATTERNS = (
     ),
 )
 
-_DETAIL_BULLET = re.compile(r"^\* [A-Za-z][^:\n]{0,80}: \S")
-_BAD_LIST_PREFIX = re.compile(r"^(\s*[-+] |\s*\d+[.)]\s+|\s*\[[ xX]\]\s+)")
+_DETAIL_BULLET = re.compile(r"^- [A-Za-z][^:\n]{0,80}: \S.*$")
+_LEGACY_DETAIL_BULLET = re.compile(r"^\* [A-Za-z][^:\n]{0,80}: \S.*$")
 _END_STATE_BULLET = re.compile(
-    r"^\*\s*(?:Ultimate Goal|End State|Final Composition)\s*:\s*(.+)$",
+    r"^[*-]\s*(?:Ultimate Goal|End State|Final Composition)\s*:\s*(.+)$",
     re.IGNORECASE,
 )
 _COUNTED_ENTITY = re.compile(
@@ -216,23 +220,52 @@ def validate_strategy_supply_budget(content: str, *, race: str) -> Optional[str]
 def validate_strategy_house_style(content: str) -> Optional[str]:
     text = str(content or "")
     if re.search(r"^#{2,}\s", text, re.MULTILINE):
-        return "strategy.md must keep only # Summary and # Details headings"
+        return "strategy.md must use only the # Summary and # Details headings"
     if "```" in text:
         return "strategy.md must not contain code fences"
     if re.search(r"^\|.+\|$", text, re.MULTILINE):
         return "strategy.md must not contain Markdown tables"
 
-    summary = _section_body(text, "# Summary", "# Details")
-    details = _section_body(text, "# Details", None)
-    for line in _nonempty_content_lines(summary):
-        if line.lstrip().startswith("*") or _BAD_LIST_PREFIX.match(line):
+    headings = [line.strip() for line in text.splitlines() if line.startswith("# ")]
+    if headings == REQUIRED_TOP_HEADINGS:
+        summary = _section_body(text, "# Summary", "# Details")
+        if any(line.lstrip().startswith(("*", "-")) for line in _nonempty_content_lines(summary)):
             return "# Summary must be prose without bullets"
-    detail_lines = _nonempty_content_lines(details)
-    if not detail_lines:
-        return "# Details section is empty"
-    for line in detail_lines:
-        if not _DETAIL_BULLET.match(line):
+        detail_lines = _nonempty_content_lines(_section_body(text, "# Details", None))
+        if not detail_lines:
+            return "# Details section is empty"
+        if any(not _LEGACY_DETAIL_BULLET.fullmatch(line.strip()) for line in detail_lines):
             return "# Details lines must use the form '* Title: instruction'"
+        return None
+
+    if headings != STRUCTURED_TOP_HEADINGS:
+        return "strategy.md must use # Summary and # Details in that order"
+
+    for index, heading in enumerate(STRUCTURED_TOP_HEADINGS):
+        next_heading = (
+            STRUCTURED_TOP_HEADINGS[index + 1]
+            if index + 1 < len(STRUCTURED_TOP_HEADINGS)
+            else None
+        )
+        section_name = heading[2:]
+        section_lines = _nonempty_content_lines(
+            _section_body(text, heading, next_heading)
+        )
+        if not section_lines:
+            return f"{heading} section is empty"
+        titles: list[str] = []
+        for line in section_lines:
+            if not _DETAIL_BULLET.fullmatch(line.strip()):
+                return f"{heading} lines must use '- Field: instruction'"
+            match = re.match(r"^-\s+([^:]+):", line.strip())
+            if match:
+                titles.append(match.group(1).strip())
+        required_titles = STRUCTURED_STRATEGY_FIELDS[section_name]
+        if titles != required_titles:
+            return (
+                f"{heading} must contain exactly these fields in order: "
+                f"{', '.join(required_titles)}"
+            )
     return None
 
 
@@ -245,16 +278,16 @@ def validate_strategy_markdown(
     if not text:
         return "strategy.md is empty"
     headings = [line.strip() for line in text.splitlines() if line.startswith("# ")]
-    if headings != REQUIRED_TOP_HEADINGS:
+    if headings not in (REQUIRED_TOP_HEADINGS, STRUCTURED_TOP_HEADINGS):
         return (
-            "strategy.md must contain exactly these non-empty level-one headings "
-            f"in order: {', '.join(REQUIRED_TOP_HEADINGS)}"
+            "strategy.md must contain exactly # Summary and # Details in order"
         )
-    for index, heading in enumerate(REQUIRED_TOP_HEADINGS):
+    active_headings = headings
+    for index, heading in enumerate(active_headings):
         start = text.index(heading) + len(heading)
         end = (
-            text.index(REQUIRED_TOP_HEADINGS[index + 1])
-            if index + 1 < len(REQUIRED_TOP_HEADINGS)
+            text.index(active_headings[index + 1])
+            if index + 1 < len(active_headings)
             else len(text)
         )
         if not text[start:end].strip():

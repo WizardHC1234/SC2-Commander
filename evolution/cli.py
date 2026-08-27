@@ -36,6 +36,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-analysis-games-per-generation", type=int, default=20)
     parser.add_argument("--max-generations-per-difficulty", type=int, default=10)
     parser.add_argument("--max-total-generations", "--max-generations", type=int, default=50)
+    parser.add_argument(
+        "--require-full-generation-budget",
+        action="store_true",
+        help=(
+            "Do not stop after curriculum mastery or a per-difficulty budget; "
+            "continue until max-total-generations is reached"
+        ),
+    )
     parser.add_argument("--knowledge-mode", choices=("enabled", "disabled"), default="enabled")
     parser.add_argument("--run-dir", default="", help="Existing run directory to resume")
     parser.add_argument(
@@ -74,6 +82,7 @@ def main() -> None:
         max_analysis_games_per_generation=args.max_analysis_games_per_generation,
         max_generations_per_difficulty=args.max_generations_per_difficulty,
         max_total_generations=args.max_total_generations,
+        require_full_generation_budget=args.require_full_generation_budget,
         knowledge_mode=args.knowledge_mode,
         real_time=args.real_time,
         baseline_batch_dir=args.baseline_batch_dir,

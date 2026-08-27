@@ -202,7 +202,7 @@ python tools/batch_time_stats.py --group-by strategy
 
 ### 离线策略优化
 
-`evol_agent/` 可读取当前单 Commander 的对局记录，执行跨局分析，并只生成新的 `strategy.md` 候选。进化流程把候选保存在对应 run 的 `strategies/` 以及对局记录目录里，避免在 `skills/` 下堆积 `_optN` 文件夹。它与 Commander 共用 `llm/config.json`，静态成本与前置条件来自动作目录，因此优化策略仍只包含 `# Summary` 和 `# Details`。
+`evol_agent/` 可读取当前单 Commander 的对局记录，执行跨局分析，并只生成新的 `strategy.md` 候选。进化流程把候选保存在对应 run 的 `strategies/` 以及对局记录目录里，避免在 `skills/` 下堆积 `_optN` 文件夹。它与 Commander 共用 `llm/config.json`，静态成本与前置条件来自动作目录；策略文件使用 `# Summary` 和 `# Details` 两部分。
 
 ```powershell
 .\venv\Scripts\python.exe -m evol_agent.cli --batch-dir game_records\<batch_name> --strategy tank

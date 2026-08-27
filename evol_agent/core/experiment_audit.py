@@ -33,7 +33,9 @@ _PARENT_ANALYSIS_FIELDS = (
     "race",
     "sample_size",
     "record_mix",
+    "strategy_contract",
     "strengths_to_preserve",
+    "outcome_contrast",
     "priority_problem",
     "hypothesis",
     "failure_mode_analysis",
@@ -238,6 +240,12 @@ Required reasoning discipline:
   implementation evidence only for that match. not_observed and unknown never
   prove contradiction. Require multiple observed candidate probes before using
   implementation_verdict=implemented.
+- A rejected or execution-invalid candidate may still contain useful local changes.
+  Separate the failed dependency from any candidate change that was actually
+  realized and repeatedly associated with a better intermediate or combat outcome.
+  Put only evidence-backed local changes in salvageable_changes. Do not salvage a
+  merely written or requested change, and do not recommend inheriting the whole
+  candidate package.
 
 Executor capability manifest:
 {json.dumps(capability_manifest, ensure_ascii=False, indent=2)}
@@ -274,6 +282,10 @@ Return JSON only:
     {{"side":"parent|candidate","game":"Game 1","evidence":"decisive engagement or force-retention result"}}
   ],
   "runtime_findings":["execution limitation, if any"],
+  "salvageable_changes":[
+    {{"change":"local candidate change worth reusing","evidence":["Game 2 @ 320s: observed positive effect"],"condition":"when this remains compatible with the Champion contract"}}
+  ],
+  "failed_dependencies":["specific unavailable or harmful dependency that must not be inherited"],
   "evidence_limits":["important uncertainty"],
   "lesson":"one concise causal lesson for the next generation"
 }}
@@ -342,6 +354,24 @@ def _normalize_audit(
         "mechanism_evidence": rows("mechanism_evidence"),
         "combat_evidence": rows("combat_evidence"),
         "runtime_findings": [str(item) for item in rows("runtime_findings") if str(item)],
+        "salvageable_changes": [
+            {
+                "change": str(item.get("change") or "").strip(),
+                "evidence": [
+                    str(evidence).strip()
+                    for evidence in (item.get("evidence") or [])
+                    if str(evidence).strip()
+                ][:6],
+                "condition": str(item.get("condition") or "").strip(),
+            }
+            for item in rows("salvageable_changes")
+            if isinstance(item, dict)
+            and str(item.get("change") or "").strip()
+            and item.get("evidence")
+        ][:6],
+        "failed_dependencies": [
+            str(item) for item in rows("failed_dependencies") if str(item)
+        ][:6],
         "evidence_limits": evidence_limits,
         "lesson": str(payload.get("lesson") or "").strip(),
     }
@@ -378,6 +408,8 @@ def audit_experiment(
             "mechanism_evidence": [],
             "combat_evidence": [],
             "runtime_findings": [],
+            "salvageable_changes": [],
+            "failed_dependencies": [],
             "evidence_limits": [
                 "parent prior analysis or candidate match records were unavailable"
             ],

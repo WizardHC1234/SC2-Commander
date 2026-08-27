@@ -38,6 +38,7 @@ The runtime handles pathfinding, grouping, movement, abilities, formations, work
 _SC2_GAME_RULES = """\
 [1] StarCraft II fundamentals
 - Win by destroying enemy buildings; economy, technology, production, and army must progress together.
+- The match has a hard 1800-second limit. Winning a fight or clearing known bases is not victory; preserve enough time to scout or scan for and destroy every remaining enemy structure.
 - Minerals and gas are mined by workers. Gas structures require a town hall's geyser. Spend available resources on the strategy instead of idling queues.
 - Supply is capped at 200. Keep supply structures ahead of production and keep the strategy's end-state within the cap.
 - Producers work in parallel. Buildings, add-ons, research, and units require their listed prerequisites; an unfinished prerequisite does not cancel other valid goals.
@@ -59,6 +60,8 @@ Evidence:
 
 Attack gates vs production ceilings:
 - An attack threshold only opens the offensive; it is not the final train_*.to_count. After the gate, retain or raise the strategy's ongoing production targets. Do not invent unrelated composition.
+- Main Attack Gate applies only to the first planned attack. Once that attack has been issued, never reuse the opening threshold as a recovery gate and never invent a stricter replacement threshold from enemy composition. Follow Engagement and Reinforcement and Recovery and Cleanup for later decisions.
+- Scouting and Scans support a named attack or cleanup decision. Execute them in parallel when possible; never let optional information postpone an attack whose explicit Main Attack Gate is already satisfied.
 - When a large bank and free supply coexist with sparse or idle queues, first restore missing strategy-required production capacity, then sustain or raise strategy-permitted core-unit targets within 200 supply.
 
 Completeness:

@@ -14,7 +14,7 @@ from .types import BattleAnalysis, GameDigest, ToolObservation
 from ..sc2_data_agent.bridge import is_knowledge_run_verified
 
 CHECKPOINT_SCHEMA = "evol_agent_checkpoint.v2"
-PIPELINE_VERSION = "full_timeline_summary_v1_evidence_retrieval_v1"
+PIPELINE_VERSION = "full_timeline_summary_v1_intent_contrast_v2"
 
 STAGE_ORDER = (
     "created",

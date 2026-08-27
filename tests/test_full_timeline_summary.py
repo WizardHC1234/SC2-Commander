@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from evol_agent.analysis.match_record import MatchRecordReader
-from evol_agent.core.analysis_agent_loop import _summarize_matches, run_analysis_agent_loop
+from evol_agent.core.analysis_agent_loop import (
+    _normalize_cross_match_decision,
+    _summarize_matches,
+    run_analysis_agent_loop,
+)
 from evol_agent.core.checkpoint import (
     PIPELINE_VERSION,
     EvolCheckpoint,
@@ -235,7 +239,10 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
                     "enemy_observed": "visible ground army",
                     "enemy_truth": "larger mixed army",
                     "own_force_after": "small remnant",
+                    "own_reinforcement_after": "three Marines arrive after withdrawal",
+                    "production_context_before": "six Barracks, two idle queues",
                     "runtime_override": "auto-retreat fired after the army fell to a small remnant",
+                    "retreat_policy": "retreat_ratio=0.6; local power ratio=0.31; no re-engagement",
                     "loss_timing": "losses_before_override",
                     "outcome": "army_broken",
                 }
@@ -266,6 +273,12 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
     )
     assert "auto-retreat" in analysis.raw["major_engagements"][0][
         "runtime_override"
+    ]
+    assert analysis.raw["major_engagements"][0]["retreat_policy"].startswith(
+        "retreat_ratio=0.6"
+    )
+    assert "three Marines" in analysis.raw["major_engagements"][0][
+        "own_reinforcement_after"
     ]
     assert "opening_and_economy" not in analysis.raw
 
@@ -527,8 +540,6 @@ def test_cross_match_prompt_keeps_complete_events() -> None:
     assert '"time_s":431' in prompt
     assert '"enemy_observed":"visible marines"' in prompt
     assert '"enemy_truth":"hidden tanks"' in prompt
-    assert "composition as a time-varying relationship" in prompt
-    assert "actual contact" in prompt
 
 
 def test_one_failed_match_does_not_stop_the_batch(tmp_path: Path, monkeypatch) -> None:
@@ -835,7 +846,7 @@ def test_old_checkpoint_pipeline_version_is_rejected(tmp_path: Path) -> None:
         knowledge_mode="enabled",
         record_files=[],
     )
-    assert PIPELINE_VERSION == "full_timeline_summary_v1_evidence_retrieval_v1"
+    assert PIPELINE_VERSION == "full_timeline_summary_v1_intent_contrast_v2"
 
 
 def _stub_summaries():
@@ -858,13 +869,21 @@ def _stub_summaries():
 def _empty_discovery() -> dict:
     return {
         "strategy_contract": {
-            "style": "concentrated intermediate push",
-            "core_win_mechanism": "assemble the planned force before decisive contact",
-            "critical_timing_or_power_spike": "the first complete Marine-Tank push",
-            "core_commitments": ["gather before attacking"],
-            "flexible_components": ["producer allocation"],
-            "optimization_boundary": "preserve the concentrated push",
-            "direction": "adjust",
+            "identity": "two-base gathered push",
+            "style": "concentrated timing attack",
+            "core_win_mechanism": "assemble the intended package before committing",
+            "critical_power_window": "first completed gathered push",
+            "core_commitments": ["two-base opener", "gather before attacking"],
+            "protected_invariants": ["two-base opener", "gather before attacking"],
+        },
+        "outcome_contrast": {
+            "winning_pattern": "completed gathered push survives first contact",
+            "winning_evidence": ["Game 1 @ 620s"],
+            "loss_shortfall": "the core force is incomplete at contact",
+            "loss_evidence": ["Game 2 @ 430s"],
+            "loss_relationship_to_wins": "winning_mechanism_reproduced_but_failed",
+            "causal_difference": "wins retain more of the intended core force",
+            "preservation_rule": "retain the two-base gathered-push structure",
         },
         "strengths": [{"pattern": "two-base opener", "evidence": ["Game 1 @ 90s"]}],
         "weaknesses": [{"pattern": "Tank production is too late", "evidence": ["Game 2 @ 430s"]}],
@@ -881,34 +900,16 @@ def _empty_discovery() -> dict:
 
 def _propose_decision(**overrides) -> dict:
     payload = {
-        "strategy_contract": {
-            "style": "concentrated intermediate push",
-            "core_win_mechanism": "assemble the planned force before decisive contact",
-            "critical_timing_or_power_spike": "the first complete Marine-Tank push",
-            "core_commitments": ["gather before attacking"],
-            "flexible_components": ["producer allocation"],
-            "optimization_boundary": "preserve the concentrated push",
-            "direction": "adjust",
-        },
-        "strategy_mechanism_assessment": {
-            "core_mechanism_realization": "wins assemble the force; losses contact before it is complete",
-            "critical_timing_comparison": "losses miss the intended relative power window",
-            "failure_stage": "before_core_mechanism",
-            "optimization_implication": "repair package completion without replacing the push",
-        },
-        "core_mechanism_guard": {
-            "identity_effect": "preserve",
-            "first_commitment_effect": "same",
-            "relative_power_effect": "improve",
-            "evidence": ["Game 2 @ 430s: the incomplete force meets pressure"],
-            "justification": "complete the same push without replacing its timing identity",
-        },
-        "information_grounding": {
-            "uses_runtime_enemy_information": False,
-            "facts": [],
-            "execution_rule": "No enemy information is used as a strategy condition.",
-        },
         "strengths_to_preserve": [{"pattern": "two-base opener", "evidence": ["Game 1 @ 90s"]}],
+        "outcome_contrast": {
+            "winning_pattern": "completed gathered push survives first contact",
+            "winning_evidence": ["Game 1 @ 620s"],
+            "loss_shortfall": "the core force is incomplete at contact",
+            "loss_evidence": ["Game 2 @ 430s", "Game 5 @ 510s"],
+            "loss_relationship_to_wins": "winning_mechanism_reproduced_but_failed",
+            "causal_difference": "wins retain more of the intended core force",
+            "preservation_rule": "retain the two-base gathered-push structure",
+        },
         "priority_problem": {
             "problem": "first fight is too weak",
             "evidence": ["Game 2 @ 430s"],
@@ -916,6 +917,7 @@ def _propose_decision(**overrides) -> dict:
         },
         "hypothesis": "a second factory completes more tanks before contact",
         "failure_mode_analysis": {
+            "failure_stage": "during_commitment_or_engagement",
             "failure_mode": "the army breaks in the first decisive engagement",
             "survival_prerequisite": "the opener usually survives until the planned change is active",
             "opponent_pressure_pattern": "pressure repeatedly arrives before the intended push",
@@ -966,6 +968,26 @@ def _propose_decision(**overrides) -> dict:
                 },
             ],
             "preserve": ["two-base opener"],
+            "contact_window_effect": "similar",
+            "new_hard_prerequisites": [],
+            "production_tradeoffs": ["more Factory capacity before marine scaling"],
+            "window_tradeoff_evidence": [],
+            "why_window_remains_favorable": "the same window contains more of the intended core force",
+            "preservation_checks": [
+                {
+                    "invariant": "two-base gathered-push structure",
+                    "effect": "preserve",
+                    "reason": "the economy and commitment style remain unchanged",
+                    "evidence": ["Game 1 @ 620s"],
+                }
+            ],
+            "composition_change_allowed": False,
+            "retreat_change_allowed": False,
+            "stage_scope_evidence": [],
+            "stage_scope_reason": (
+                "The failure is at first contact, but the selected mechanism changes "
+                "production completion rather than composition or retreat behavior."
+            ),
         },
         "evidence_limits": [],
     }
@@ -1006,6 +1028,36 @@ def _verified_knowledge_run() -> dict:
     }
 
 
+def test_true_composition_or_retreat_permission_requires_repeated_stage_evidence() -> None:
+    decision = _propose_decision()
+    decision["plan"]["retreat_change_allowed"] = True
+    decision["plan"]["stage_scope_evidence"] = [
+        "Game 2 @ 430s: retreat fires after the main force is already broken"
+    ]
+
+    payload, error = _normalize_cross_match_decision(
+        decision,
+        strategy_name="tank",
+        require_outcome_contract=True,
+    )
+
+    assert payload is None
+    assert "at least two distinct" in error
+
+    decision["plan"]["stage_scope_evidence"].append(
+        "Game 5 @ 510s: the same late retreat leaves no force to regroup"
+    )
+    payload, error = _normalize_cross_match_decision(
+        decision,
+        strategy_name="tank",
+        require_outcome_contract=True,
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["plan"]["retreat_change_allowed"] is True
+
+
 def test_round2_prompt_reuses_discovery_findings() -> None:
     prompt = build_cross_match_decision_prompt(
         strategy_name="tank",
@@ -1035,11 +1087,7 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
         },
         knowledge_runs=[],
     )
-    compact_prompt = " ".join(prompt.split())
     assert "Cross-Match Decision Agent" in prompt
-    assert "re-evaluate the strategy contract inferred in discovery" in prompt
-    assert '"strategy_mechanism_assessment"' in prompt
-    assert '"failure_stage"' in prompt
     assert "Knowledge may invalidate an earlier interpretation" in prompt
     assert "Do not query the knowledge database again" in prompt
     assert "tank production cap" in prompt
@@ -1051,32 +1099,19 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
     assert "considered_explanations" in prompt
     assert "Do not treat a hypothesis as the primary cause if repeated counterexamples" in prompt
     assert "## SC2 Strategic Priority" in prompt
-    assert "not a fixed ranking enum" in prompt
-    assert "deterministic category selector" in prompt
-    assert "Use one ordered analysis" in prompt
-    assert "critical relative power window" in prompt
-    assert "own gains exceed opponent growth" in prompt
-    assert "earlier contact with a smaller own force" in prompt
-    assert "lower readiness threshold" in compact_prompt
-    assert "faster attainment of the current threshold" in compact_prompt
-    assert "do not preserve the current threshold by default" in compact_prompt
-    assert "directional trajectory" in compact_prompt
-    assert "failed increase disproves further waiting" in compact_prompt
-    assert "do not conclude that the original gate is immutable" in compact_prompt
-    assert "do not treat the current numerical attack gate as immutable" in compact_prompt
-    assert "Merely appearing in" in compact_prompt
-    assert "does not make a number a core commitment" in compact_prompt
-    assert '"core_mechanism_guard"' in prompt
-    assert '"first_commitment_effect":"earlier|same|later|conditional"' in prompt
-    assert "does not exhaust the strategy" in prompt
-    assert "evaluate an earlier-window intervention" in prompt
-    assert "For timing strategies" in prompt
-    assert "If losing games" in prompt
-    assert "reached the planned gate" in prompt
-    assert "first failed stage" in prompt
-    assert "decision-time observable fact" in prompt
-    assert "Replay-only enemy_truth is diagnosis-only" in prompt
-    assert "optional and non-blocking" in prompt
+    assert "without using a fixed category ranking" in prompt
+    assert "commitment and first-contact timing" in prompt
+    assert "own and opponent packages at contact" in prompt
+    assert "force retained and reinforced" in prompt
+    assert "larger own force is not automatically better" in prompt
+    assert "a higher value retreats earlier" in prompt
+    assert "default 0.6" in prompt
+    assert "Replay-grounded reasoning demonstrations" in prompt
+    assert "build 142471" in prompt
+    assert "must not be inferred from the configured ratio alone" in prompt
+    assert "earliest shared strategy-fixable break" in prompt
+    assert "losing at the current or a later contact does not rule out" in prompt
+    assert "Scouting or scanning is useful only" in prompt
     assert "## Prior Experiment Interpretation" in prompt
     assert "Candidate selection and causal-hypothesis evaluation are separate" in prompt
     assert "minimum material mechanism change occurred" in prompt

@@ -409,7 +409,8 @@ def test_rejected_candidate_is_saved_as_experience(tmp_path: Path) -> None:
     )
     state = runner.run()
 
-    assert state["status"] == "total_budget_exhausted"
+    assert state["status"] == "completed"
+    assert state["completion_reason"] == "generation_budget_reached"
     assert state["champion"] == "tank"
     assert state["games_used"] == 20
     assert len(state["experiment_history"]) == 1
@@ -704,6 +705,9 @@ def test_later_generation_does_not_overwrite_confirmed_champion_with_smaller_sam
 def test_candidate_with_ninety_percent_win_rate_skips_confirmation_and_advances(
     tmp_path: Path,
 ) -> None:
+    parent_dir = tmp_path / "skills" / "terran" / "tank"
+    parent_dir.mkdir(parents=True)
+    (parent_dir / "strategy.md").write_text("parent strategy", encoding="utf-8")
     results = {"tank": 8, "tank_opt1": 9}
     calls = {"tank": 0, "tank_opt1": 0}
 
@@ -719,10 +723,21 @@ def test_candidate_with_ninety_percent_win_rate_skips_confirmation_and_advances(
     ) -> EvolRunResult:
         candidate = tmp_path / "skills" / "terran" / "tank_opt1"
         candidate.mkdir(parents=True, exist_ok=True)
+        (candidate / "strategy.md").write_text(
+            "candidate strategy", encoding="utf-8"
+        )
         return EvolRunResult(ok=True, message="OK", output_dir=candidate)
 
     def audit(**_kwargs: object) -> dict[str, object]:
-        raise AssertionError("mastered candidate should skip mechanism audit")
+        return {
+            "implementation_verdict": "implemented",
+            "hypothesis_verdict": "supported",
+            "mechanism_evidence": ["the candidate realized the planned change"],
+            "combat_evidence": ["the decisive engagement improved"],
+            "runtime_findings": [],
+            "evidence_limits": [],
+            "lesson": "The mastered candidate also passed the mechanism audit.",
+        }
 
     runner = EvolutionRunner(
         EvolutionConfig(
@@ -753,9 +768,9 @@ def test_candidate_with_ninety_percent_win_rate_skips_confirmation_and_advances(
     assert decision["candidate_mastered"] is True
     assert decision["candidate_win_rate"] == 0.9
     assert decision["confirmation"] is None
-    assert decision["selection_rule"] == "candidate_win_rate_meets_mastery_threshold"
-    assert decision["implementation_verdict"] == "unknown"
-    assert "mastery threshold" in decision["audit_evidence_limits"][0]
+    assert decision["selection_rule"] == "candidate_score_strictly_greater"
+    assert decision["implementation_verdict"] == "implemented"
+    assert decision["audit_evidence_limits"] == []
 
 
 def test_execution_invalid_audit_blocks_candidate_promotion(tmp_path: Path) -> None:
@@ -875,14 +890,9 @@ def test_accepted_candidate_keeps_score_gain_separate_from_contradicted_cause(
     assert record["performance_result"] == "accepted"
     assert record["causal_result"] == "contradicted"
     assert record["performance_gain_cause"] == "unknown"
-    assert record["mechanism_signature"] == "liberator_viking"
+    assert record["mechanism_signature"] == "viking_air_denial_vs_liberator"
     blocked = runner._blocked_mechanism_families(state, difficulty="harder")
-    blocked_family, reason = runner._blocked_mechanism_reason(
-        blocked,
-        "viking_count_and_timing_vs_liberator",
-    )
-    assert blocked_family == "viking_air_denial_vs_liberator"
-    assert "contradicted" in reason
+    assert blocked == {}
 
 
 def test_close_batch_results_uses_one_outcome_point_threshold(tmp_path: Path) -> None:
@@ -910,7 +920,7 @@ def test_close_batch_results_compares_rates_when_game_counts_differ(
     assert close_batch_results(champion, candidate)
 
 
-def test_mechanism_family_is_blocked_after_two_nonaccepted_attempts(
+def test_mechanism_family_is_blocked_after_two_inconclusive_attempts(
     tmp_path: Path,
 ) -> None:
     runner = EvolutionRunner(
@@ -923,7 +933,7 @@ def test_mechanism_family_is_blocked_after_two_nonaccepted_attempts(
         {
             "difficulty": "harder",
             "mechanism_family": "anti_air_support",
-            "decision": "rejected",
+            "decision": "inconclusive",
             "implementation_verdict": "implemented",
             "hypothesis_verdict": "inconclusive",
         },
@@ -941,7 +951,7 @@ def test_mechanism_family_is_blocked_after_two_nonaccepted_attempts(
     assert "anti_air_support" in blocked
 
 
-def test_execution_invalid_blocks_mechanism_family_immediately(
+def test_execution_invalid_does_not_block_entire_mechanism_family_immediately(
     tmp_path: Path,
 ) -> None:
     runner = EvolutionRunner(
@@ -962,10 +972,12 @@ def test_execution_invalid_blocks_mechanism_family_immediately(
 
     blocked = runner._blocked_mechanism_families(state, difficulty="harder")
 
-    assert blocked["runtime_transformation_gate"].startswith("depends on")
+    assert "runtime_transformation_gate" not in blocked
 
 
-def test_mechanism_policy_blocks_cosmetic_family_renames(tmp_path: Path) -> None:
+def test_mechanism_policy_leaves_semantic_rename_judgement_to_analysis(
+    tmp_path: Path,
+) -> None:
     runner = EvolutionRunner(
         EvolutionConfig(strategy="tank", commander_model="model"),
         run_dir=tmp_path / "run",
@@ -976,7 +988,7 @@ def test_mechanism_policy_blocks_cosmetic_family_renames(tmp_path: Path) -> None
         {
             "difficulty": "harder",
             "mechanism_family": "viking_air_denial_vs_liberator",
-            "decision": "accepted",
+            "decision": "inconclusive",
             "implementation_verdict": "implemented",
             "hypothesis_verdict": "contradicted",
         }
@@ -988,8 +1000,68 @@ def test_mechanism_policy_blocks_cosmetic_family_renames(tmp_path: Path) -> None
         "viking_count_and_timing_vs_liberator",
     )
 
+    assert blocked_family == ""
+    assert reason == ""
+
+    blocked_family, reason = runner._blocked_mechanism_reason(
+        blocked,
+        "viking_air_denial_vs_liberator",
+    )
     assert blocked_family == "viking_air_denial_vs_liberator"
     assert "contradicted" in reason
+
+
+def test_stale_policy_rejection_is_not_returned_after_block_is_relaxed(
+    tmp_path: Path,
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(strategy="tank", commander_model="model"),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    state = runner._new_state()
+    state["experiment_history"] = [
+        {
+            "difficulty": "harder",
+            "mechanism_family": "earlier_commitment_window",
+            "decision": "accepted",
+            "implementation_verdict": "implemented",
+            "hypothesis_verdict": "contradicted",
+        }
+    ]
+    state["mechanism_policy_rejections"] = [
+        {
+            "kind": "mechanism_policy_rejection",
+            "difficulty": "harder",
+            "mechanism_family": "earlier_commitment_window",
+        }
+    ]
+
+    experiences = runner._prior_experiences(state, difficulty="harder")
+
+    assert len(experiences) == 1
+    assert experiences[0]["decision"] == "accepted"
+
+
+def test_policy_rejected_candidate_is_removed_only_from_run_strategies(
+    tmp_path: Path,
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(strategy="tank", commander_model="model"),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    candidate = runner.strategies_dir / "tank_opt1"
+    candidate.mkdir()
+    (candidate / "strategy.md").write_text("candidate", encoding="utf-8")
+
+    assert runner._discard_policy_rejected_candidate(candidate)
+    assert not candidate.exists()
+
+    outside = tmp_path / "tank_opt2"
+    outside.mkdir()
+    assert not runner._discard_policy_rejected_candidate(outside)
+    assert outside.exists()
 
 
 def test_completed_record_count_ignores_autosaves(tmp_path: Path) -> None:
@@ -1060,7 +1132,9 @@ def test_candidate_generation_failure_retries_within_the_same_run(tmp_path: Path
     assert state["champion"] == "tank_opt1"
 
 
-def test_runtime_action_pauses_without_candidate_retries(tmp_path: Path) -> None:
+def test_runtime_action_changes_search_direction_until_budget_completes(
+    tmp_path: Path,
+) -> None:
     attempts = 0
 
     def play(strategy: str, difficulty: str) -> BatchResult:
@@ -1091,11 +1165,13 @@ def test_runtime_action_pauses_without_candidate_retries(tmp_path: Path) -> None
 
     state = runner.run()
 
-    assert attempts == 1
-    assert state["status"] == "runtime_attention_required"
+    assert attempts == 6
+    assert state["status"] == "completed"
+    assert state["completion_reason"] == "generation_budget_reached"
     assert state["last_agent_decision"]["action"] == "inspect_runtime"
     assert state.get("candidate_generation_failures") == []
     assert state.get("experiment_history") == []
+    assert len(state["skipped_generations"]) == 2
 
 
 def test_candidate_evaluation_requests_exactly_ten_games(tmp_path: Path) -> None:
@@ -1169,7 +1245,9 @@ def test_equal_five_five_is_inconclusive(tmp_path: Path) -> None:
     ) - 0.5) < 0.02
 
 
-def test_second_consecutive_inconclusive_forces_latest_candidate(tmp_path: Path) -> None:
+def test_second_consecutive_inconclusive_preserves_single_champion_parent(
+    tmp_path: Path,
+) -> None:
     generation_calls = 0
     mutation_parents: list[str] = []
 
@@ -1203,30 +1281,31 @@ def test_second_consecutive_inconclusive_forces_latest_candidate(tmp_path: Path)
     ).run()
 
     assert state["games_used"] == 30
-    assert state["champion"] == "tank_opt2"
-    assert state["search_parent"] == "tank_opt2"
-    assert state["inconclusive_streak"] == 0
-    assert mutation_parents == ["tank", "tank_opt1"]
+    assert state["champion"] == "tank"
+    assert state["search_parent"] == "tank"
+    assert state["inconclusive_streak"] == 2
+    assert mutation_parents == ["tank", "tank"]
     assert [item["decision"] for item in state["experiment_history"]] == [
         "inconclusive",
-        "accepted",
+        "inconclusive",
     ]
     forced = state["experiment_history"][1]
     assert forced["base_decision"] == "inconclusive"
-    assert forced["forced_promotion_after_inconclusive"] is True
+    assert forced["forced_promotion_after_inconclusive"] is False
+    assert forced["forced_mechanism_change_after_inconclusive"] is True
     decision = json.loads(
         (tmp_path / "run" / "generation_001" / "decision.json").read_text(
             encoding="utf-8"
         )
     )
-    assert decision["selection_rule"] == (
-        "force_latest_candidate_after_two_consecutive_inconclusive"
-    )
-    assert decision["mutation_parent"] == "tank_opt1"
+    assert decision["selection_rule"] == "candidate_score_strictly_greater"
+    assert decision["mutation_parent"] == "tank"
     assert decision["comparison_champion"] == "tank"
 
 
-def test_rejection_preserves_search_parent_but_resets_streak(tmp_path: Path) -> None:
+def test_rejection_returns_search_parent_to_champion_and_resets_streak(
+    tmp_path: Path,
+) -> None:
     generation_calls = 0
     mutation_parents: list[str] = []
     wins = {"tank": 5, "tank_opt1": 5, "tank_opt2": 2}
@@ -1260,9 +1339,9 @@ def test_rejection_preserves_search_parent_but_resets_streak(tmp_path: Path) -> 
         candidate_generator=evolve,
     ).run()
 
-    assert mutation_parents == ["tank", "tank_opt1"]
+    assert mutation_parents == ["tank", "tank"]
     assert state["champion"] == "tank"
-    assert state["search_parent"] == "tank_opt1"
+    assert state["search_parent"] == "tank"
     assert state["inconclusive_streak"] == 0
     assert [item["decision"] for item in state["experiment_history"]] == [
         "inconclusive",
@@ -1270,7 +1349,7 @@ def test_rejection_preserves_search_parent_but_resets_streak(tmp_path: Path) -> 
     ]
 
 
-def test_underpowered_candidate_is_inherited_once_for_implementation_repair(
+def test_underpowered_retry_rebuilds_from_champion_without_failed_edit_inheritance(
     tmp_path: Path,
 ) -> None:
     parent = tmp_path / "skills" / "terran" / "tank"
@@ -1333,12 +1412,12 @@ def test_underpowered_candidate_is_inherited_once_for_implementation_repair(
         experiment_auditor=audit,
     ).run()
 
-    assert mutation_parents == ["tank", "tank_opt1"]
+    assert mutation_parents == ["tank", "tank"]
     assert state["champion"] == "tank"
     assert state["search_parent"] == "tank"
     first, second = state["experiment_history"]
     assert first["repairable_underpowered_retry"] is True
-    assert first["search_parent_after"] == "tank_opt1"
+    assert first["search_parent_after"] == "tank"
     assert second["repairable_underpowered_retry"] is False
     assert second["underpowered_retry_exhausted"] is True
     assert second["search_parent_after"] == "tank"
@@ -1425,7 +1504,9 @@ def test_champion_baseline_ignores_historical_pool_games(tmp_path: Path) -> None
     assert state["champion"] == "tank"
 
 
-def test_generation_failures_are_not_prior_experiences(tmp_path: Path) -> None:
+def test_generation_failures_are_bounded_and_become_search_feedback(
+    tmp_path: Path,
+) -> None:
     seen: list[list[object]] = []
 
     def play(strategy: str, difficulty: str) -> BatchResult:
@@ -1449,16 +1530,70 @@ def test_generation_failures_are_not_prior_experiences(tmp_path: Path) -> None:
     ).run()
 
     assert seen[0] == []
-    assert len(seen) == 4
-    assert all(experiences == [] for experiences in seen)
+    assert len(seen) == 8
+    assert all(experiences == [] for experiences in seen[:4])
+    assert any(
+        isinstance(item, dict) and item.get("kind") == "generation_search_restart"
+        for item in seen[4]
+    )
     assert state["candidate_generation_failures"][0]["message"] == "optimizer json invalid"
     assert [item["attempt"] for item in state["candidate_generation_failures"]] == [
-        1,
-        2,
-        3,
-        4,
+        1, 2, 3, 4, 1, 2, 3, 4
     ]
     assert state["experiment_history"] == []
+    assert len(state["skipped_generations"]) == 2
+
+
+def test_legacy_attention_status_resumes_under_continuous_search_protocol(
+    tmp_path: Path,
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="marine",
+            commander_model="model",
+            max_total_generations=10,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    state = runner._new_state()
+    state["status"] = "mechanism_policy_attention_required"
+    state["generation"] = 3
+
+    changed = runner._migrate_lifecycle_state(state)
+
+    assert changed
+    assert state["status"] == "running"
+    assert state["generation_search_restarts"] == []
+
+
+def test_resume_allows_run_control_budget_changes(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    original = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            concurrency=3,
+            max_total_generations=10,
+        ),
+        run_dir=run_dir,
+        project_root=tmp_path,
+    )
+    original._save_state(original._new_state())
+
+    resumed = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            concurrency=2,
+            max_total_generations=12,
+        ),
+        run_dir=run_dir,
+        project_root=tmp_path,
+    ).load_or_create_state()
+
+    assert resumed["config"]["concurrency"] == 2
+    assert resumed["config"]["max_total_generations"] == 12
 
 
 def test_resume_pending_candidate_does_not_regenerate(tmp_path: Path) -> None:
@@ -1789,6 +1924,36 @@ def test_migrates_failed_experiences_into_experiment_history(tmp_path: Path) -> 
     assert "candidate_matches" in loaded["config"]
 
 
+def test_missing_pending_candidate_is_cleared_for_safe_resume(tmp_path: Path) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    state = runner.load_or_create_state()
+    missing_candidate = tmp_path / "run" / "strategies" / "tank_opt1"
+    checkpoint = tmp_path / "logs" / "stale_analysis"
+    state["pending_candidate"] = {
+        "strategy": "tank_opt1",
+        "strategy_dir": str(missing_candidate),
+        "analysis_checkpoint_dir": str(checkpoint),
+    }
+    state["candidate_resume_dir"] = str(checkpoint)
+    state["status"] = "running"
+    runner._save_state(state)
+
+    loaded = runner.load_or_create_state()
+
+    assert loaded["pending_candidate"] is None
+    assert loaded["candidate_resume_dir"] is None
+    assert loaded["status"] == "running"
+    assert str(checkpoint.resolve()) in loaded["abandoned_analysis_checkpoints"]
+
+
 def test_nine_wins_one_loss_masters_difficulty(tmp_path: Path) -> None:
     evolve_calls = 0
 
@@ -1917,7 +2082,8 @@ def test_accepted_below_mastery_keeps_same_difficulty(tmp_path: Path) -> None:
         candidate_generator=evolve,
     ).run()
 
-    assert state["status"] == "total_budget_exhausted"
+    assert state["status"] == "completed"
+    assert state["completion_reason"] == "generation_budget_reached"
     assert state["champion"] == "tank_opt1"
     assert state["difficulty_index"] == 0
     assert state["mastered_difficulties"] == []
@@ -1978,7 +2144,7 @@ def test_request_more_matches_adds_analysis_games_then_reruns(tmp_path: Path) ->
     assert state["difficulty_generation"] == 1
 
 
-def test_request_more_matches_stops_after_analysis_cap(tmp_path: Path) -> None:
+def test_request_more_matches_continues_after_analysis_cap(tmp_path: Path) -> None:
     requested: list[tuple[str, int]] = []
 
     def play(strategy: str, difficulty: str, target_games: int = 10) -> BatchResult:
@@ -2014,11 +2180,13 @@ def test_request_more_matches_stops_after_analysis_cap(tmp_path: Path) -> None:
         candidate_generator=evolve,
     ).run()
 
-    assert state["status"] == "insufficient_evidence"
+    assert state["status"] == "completed"
+    assert state["completion_reason"] == "generation_budget_reached"
     assert requested == [("tank", 10), ("tank", 10)]
     assert state.get("experiment_history") == []
-    assert state["difficulty_generation"] == 0
-    assert state["generation"] == 0
+    assert state["difficulty_generation"] == 5
+    assert state["generation"] == 5
+    assert len(state["skipped_generations"]) == 5
 
 
 def test_difficulty_budget_exhausted_does_not_skip_ahead(tmp_path: Path) -> None:
@@ -2050,6 +2218,89 @@ def test_difficulty_budget_exhausted_does_not_skip_ahead(tmp_path: Path) -> None
     assert state["champion"] == "tank"
     assert state["difficulty_generation"] == 1
     assert len(state["experiment_history"]) == 1
+
+
+def test_full_budget_mode_continues_after_final_difficulty_mastery(
+    tmp_path: Path,
+) -> None:
+    evolve_calls = 0
+
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 10, tmp_path)
+
+    def evolve(
+        champion: str,
+        batch: BatchResult,
+        experiences: list[object],
+    ) -> EvolRunResult:
+        nonlocal evolve_calls
+        evolve_calls += 1
+        return EvolRunResult(
+            ok=True,
+            message="no safe patch in this search",
+            decision_action="stop",
+            action_reason="try another mechanism",
+        )
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_total_generations=2,
+            require_full_generation_budget=True,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert state["status"] == "completed"
+    assert state["completion_reason"] == "generation_budget_reached"
+    assert state["generation"] == 2
+    assert state["mastered_difficulties"] == ["harder"]
+    assert state["curriculum_completed"] is True
+    assert evolve_calls == 6
+
+
+def test_full_budget_mode_advances_after_local_budget_without_stopping(
+    tmp_path: Path,
+) -> None:
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        wins = 5 if strategy == "tank" else 2
+        return _batch(strategy, difficulty, wins, tmp_path)
+
+    def evolve(
+        champion: str,
+        batch: BatchResult,
+        experiences: list[object],
+    ) -> EvolRunResult:
+        candidate = tmp_path / "skills" / "terran" / "tank_opt1"
+        candidate.mkdir(parents=True, exist_ok=True)
+        return EvolRunResult(ok=True, message="OK", output_dir=candidate)
+
+    state = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder", "veryhard"),
+            max_generations_per_difficulty=1,
+            max_total_generations=2,
+            require_full_generation_budget=True,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    ).run()
+
+    assert state["status"] == "completed"
+    assert state["completion_reason"] == "generation_budget_reached"
+    assert state["generation"] == 2
+    assert state["difficulty_index"] == 1
+    assert state["exhausted_difficulties"] == ["harder"]
+    assert state["difficulty_budget_events"][0]["action"] == "advance_without_mastery"
 
 
 def test_experiment_id_uses_style_generation_difficulty_candidate(tmp_path: Path) -> None:
@@ -2111,3 +2362,35 @@ def test_eight_vs_nine_is_accepted_and_masters(tmp_path: Path) -> None:
     assert state["status"] == "completed"
     assert state["champion"] == "tank_opt1"
     assert state["mastered_difficulties"] == ["harder"]
+
+
+def test_rejected_underpowered_attempts_exhaust_mechanism_retry(tmp_path: Path) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(strategy="marine", commander_model="model"),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    state = runner._new_state()
+    state["experiment_history"] = [
+        {
+            "difficulty": "harder",
+            "mechanism_family": "support_unit_break_siege",
+            "decision": "rejected",
+            "implementation_verdict": "underpowered",
+            "hypothesis_verdict": "inconclusive",
+        },
+        {
+            "difficulty": "harder",
+            "mechanism_family": "support_unit_break_siege",
+            "decision": "rejected",
+            "implementation_verdict": "underpowered",
+            "hypothesis_verdict": "not_tested",
+            "underpowered_retry_exhausted": True,
+        },
+    ]
+
+    blocked = runner._blocked_mechanism_families(state, difficulty="harder")
+
+    assert blocked["support_unit_break_siege"] == (
+        "underpowered retry budget was exhausted"
+    )

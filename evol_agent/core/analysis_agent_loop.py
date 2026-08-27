@@ -74,12 +74,26 @@ _ASSESSMENTS = frozenset(
     }
 )
 _CONFIDENCE = frozenset({"low", "medium", "high"})
-_FIRST_COMMITMENT_EFFECTS = frozenset({"earlier", "same", "later", "conditional"})
-_RELATIVE_POWER_EFFECTS = frozenset({"improve", "preserve", "weaken", "unknown"})
-_INFORMATION_SOURCES = frozenset(
-    {"enemy_observed", "own_observation", "static_knowledge", "enemy_truth"}
+_OUTCOME_RELATIONSHIPS = frozenset(
+    {
+        "winning_mechanism_not_reproduced",
+        "winning_mechanism_reproduced_but_failed",
+        "mixed",
+        "uncertain",
+    }
 )
-_INFORMATION_USES = frozenset({"diagnosis_only", "strategy_condition"})
+_WINDOW_EFFECTS = frozenset({"earlier", "similar", "later", "unknown"})
+_FAILURE_STAGES = frozenset(
+    {
+        "before_core_mechanism",
+        "during_commitment_or_engagement",
+        "after_successful_engagement",
+        "mixed",
+    }
+)
+_PRESERVATION_EFFECTS = frozenset(
+    {"preserve", "improve", "evidence_supported_tradeoff"}
+)
 
 
 def _clean_strings(value: Any, *, limit: int | None = None) -> list[str]:
@@ -277,30 +291,10 @@ def _normalize_cross_match_discovery(
     raw: dict[str, Any],
     *,
     knowledge_mode: str,
-    strategy_name: str = "current",
-    require_strategy_identity: bool = False,
+    strategy_name: str = "strategy",
 ) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(raw, dict):
         return None, "discovery returned no JSON object"
-    strategy_contract = normalize_strategy_contract(
-        raw.get("strategy_contract"), strategy_name=strategy_name
-    )
-    if require_strategy_identity:
-        missing_identity = [
-            field
-            for field in (
-                "style",
-                "core_win_mechanism",
-                "critical_timing_or_power_spike",
-            )
-            if not str(strategy_contract.get(field) or "").strip()
-        ]
-        if not strategy_contract.get("core_commitments"):
-            missing_identity.append("core_commitments")
-        if missing_identity:
-            return None, (
-                "strategy_contract requires " + ", ".join(missing_identity)
-            )
     strengths = _normalize_pattern_items(raw.get("strengths"))
     weaknesses = _normalize_pattern_items(raw.get("weaknesses"))
     for item in weaknesses:
@@ -334,7 +328,12 @@ def _normalize_cross_match_discovery(
     }
     return (
         {
-            "strategy_contract": strategy_contract,
+            "strategy_contract": normalize_strategy_contract(
+                raw.get("strategy_contract"), strategy_name=strategy_name
+            ),
+            "outcome_contrast": _normalize_outcome_contrast(
+                raw.get("outcome_contrast")
+            ),
             "strengths": strengths,
             "weaknesses": weaknesses,
             "unknowns": unknowns,
@@ -380,225 +379,6 @@ def _normalize_priority_problem(raw: Any) -> tuple[dict[str, Any] | None, str]:
     )
 
 
-_FAILURE_STAGES = frozenset(
-    {
-        "before_core_mechanism",
-        "during_core_mechanism",
-        "after_core_mechanism",
-        "mixed",
-        "unknown",
-    }
-)
-
-
-def _normalize_strategy_mechanism_assessment(
-    raw: Any,
-) -> tuple[dict[str, str] | None, str]:
-    if not isinstance(raw, dict):
-        return None, "strategy_mechanism_assessment must be an object"
-    fields = (
-        "core_mechanism_realization",
-        "critical_timing_comparison",
-        "optimization_implication",
-    )
-    normalized = {field: str(raw.get(field) or "").strip() for field in fields}
-    missing = [field for field, value in normalized.items() if not value]
-    failure_stage = str(raw.get("failure_stage") or "").strip().lower()
-    if failure_stage not in _FAILURE_STAGES:
-        missing.append("failure_stage")
-    if missing:
-        return None, "strategy_mechanism_assessment requires " + ", ".join(missing)
-    normalized["failure_stage"] = failure_stage
-    return normalized, ""
-
-
-def _normalize_core_mechanism_guard(
-    raw: Any,
-) -> tuple[dict[str, Any] | None, str]:
-    if not isinstance(raw, dict):
-        return None, "core_mechanism_guard must be an object"
-    identity_effect = str(raw.get("identity_effect") or "").strip().lower()
-    first_commitment_effect = str(
-        raw.get("first_commitment_effect") or ""
-    ).strip().lower()
-    relative_power_effect = str(raw.get("relative_power_effect") or "").strip().lower()
-    evidence = _clean_strings(raw.get("evidence"), limit=6)
-    delayed_first_commitment_success_evidence = _clean_strings(
-        raw.get("delayed_first_commitment_success_evidence"), limit=6
-    )
-    if identity_effect not in {"preserve", "adjust", "replace"}:
-        return None, "core_mechanism_guard.identity_effect is invalid"
-    if first_commitment_effect not in _FIRST_COMMITMENT_EFFECTS:
-        return None, "core_mechanism_guard.first_commitment_effect is invalid"
-    if relative_power_effect not in _RELATIVE_POWER_EFFECTS:
-        return None, "core_mechanism_guard.relative_power_effect is invalid"
-    if not evidence:
-        return None, "core_mechanism_guard.evidence requires at least one match reference"
-    if (
-        first_commitment_effect in {"later", "conditional"}
-        and relative_power_effect != "improve"
-    ):
-        return None, (
-            "a later or conditional first commitment requires evidence that the "
-            "relative power window improves"
-        )
-    if first_commitment_effect in {"later", "conditional"} and len(evidence) < 2:
-        return None, (
-            "a later or conditional first commitment requires evidence from at "
-            "least two matches"
-        )
-    if (
-        first_commitment_effect in {"later", "conditional"}
-        and len(delayed_first_commitment_success_evidence) < 2
-    ):
-        return None, (
-            "a later or conditional first commitment requires at least two "
-            "successful first-commitment comparisons under the same failure context"
-        )
-    return (
-        {
-            "identity_effect": identity_effect,
-            "first_commitment_effect": first_commitment_effect,
-            "relative_power_effect": relative_power_effect,
-            "evidence": evidence,
-            "delayed_first_commitment_success_evidence": (
-                delayed_first_commitment_success_evidence
-            ),
-            "justification": str(raw.get("justification") or "").strip(),
-        },
-        "",
-    )
-
-
-def _plan_uses_runtime_information(plan: dict[str, Any] | None) -> bool:
-    if not isinstance(plan, dict):
-        return False
-    text = " ".join(
-        [
-            str(plan.get("direction") or ""),
-            str(plan.get("material_behavior_change") or ""),
-            *[
-                " ".join(
-                    [str(item.get("change") or ""), str(item.get("why_required") or "")]
-                )
-                for item in plan.get("coordinated_changes") or []
-                if isinstance(item, dict)
-            ],
-        ]
-    ).lower()
-    return bool(
-        re.search(
-            r"\b(?:scan|scout|vision|visible|observed|intel|last[- ]seen|"
-            r"enemy\s+(?:composition|unit|army|building|technology))\b",
-            text,
-        )
-    )
-
-
-def _normalize_information_grounding(
-    raw: Any,
-    *,
-    plan_uses_information: bool,
-    require_control_necessity: bool = False,
-) -> tuple[dict[str, Any] | None, str]:
-    if not isinstance(raw, dict):
-        if plan_uses_information:
-            return None, "information_grounding is required for an information-dependent plan"
-        return {
-            "uses_runtime_enemy_information": False,
-            "facts": [],
-            "execution_rule": "No enemy information is used as a strategy condition.",
-            "control_necessity": {},
-        }, ""
-
-    uses_runtime = bool(raw.get("uses_runtime_enemy_information"))
-    facts: list[dict[str, Any]] = []
-    for index, item in enumerate(raw.get("facts") or [], start=1):
-        if not isinstance(item, dict):
-            return None, f"information_grounding.facts[{index}] must be an object"
-        claim = str(item.get("claim") or "").strip()
-        source = str(item.get("source") or "").strip().lower()
-        use = str(item.get("use") or "").strip().lower()
-        available = item.get("available_before_decision") is True
-        supported = item.get("runtime_supported") is True
-        if not claim or source not in _INFORMATION_SOURCES or use not in _INFORMATION_USES:
-            return None, f"information_grounding.facts[{index}] is incomplete"
-        if use == "strategy_condition" and (
-            source not in {"enemy_observed", "own_observation"}
-            or not available
-            or not supported
-        ):
-            return None, (
-                "strategy conditions may use only decision-time observable and "
-                "runtime-supported information"
-            )
-        facts.append(
-            {
-                "claim": claim,
-                "source": source,
-                "use": use,
-                "available_before_decision": available,
-                "runtime_supported": supported,
-                "evidence": _clean_strings(item.get("evidence"), limit=4),
-            }
-        )
-    condition_facts = [item for item in facts if item["use"] == "strategy_condition"]
-    if plan_uses_information and (not uses_runtime or not condition_facts):
-        return None, (
-            "an information-dependent plan requires at least one grounded "
-            "strategy_condition fact"
-        )
-    execution_rule = str(raw.get("execution_rule") or "").strip()
-    if plan_uses_information and not execution_rule:
-        return None, "information_grounding.execution_rule is required"
-    control_raw = raw.get("control_necessity")
-    control_necessity: dict[str, Any] = {}
-    if isinstance(control_raw, dict):
-        control_necessity = {
-            "condition": str(control_raw.get("condition") or "").strip(),
-            "action_change": str(control_raw.get("action_change") or "").strip(),
-            "simpler_alternative": str(
-                control_raw.get("simpler_alternative") or ""
-            ).strip(),
-            "why_information_is_required": str(
-                control_raw.get("why_information_is_required") or ""
-            ).strip(),
-            "discriminative_evidence": _clean_strings(
-                control_raw.get("discriminative_evidence"), limit=6
-            ),
-            "counterexample_assessment": str(
-                control_raw.get("counterexample_assessment") or ""
-            ).strip(),
-        }
-    if plan_uses_information and require_control_necessity:
-        missing = [
-            key
-            for key in (
-                "condition",
-                "action_change",
-                "simpler_alternative",
-                "why_information_is_required",
-                "counterexample_assessment",
-            )
-            if not str(control_necessity.get(key) or "").strip()
-        ]
-        evidence = control_necessity.get("discriminative_evidence") or []
-        if len({str(item).casefold() for item in evidence}) < 2:
-            missing.append("discriminative_evidence from at least two matches")
-        if missing:
-            return None, (
-                "an information-dependent plan must justify promotion from "
-                "diagnostic evidence to a live control condition: "
-                + ", ".join(missing)
-            )
-    return {
-        "uses_runtime_enemy_information": uses_runtime,
-        "facts": facts,
-        "execution_rule": execution_rule,
-        "control_necessity": control_necessity,
-    }, ""
-
-
 def _normalize_mechanism_family(raw: Any, plan: dict[str, Any] | None) -> str:
     value = str(raw or "").strip().lower()
     if not value and plan:
@@ -615,6 +395,16 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
         material_behavior_change = ""
         coordinated_changes: list[dict[str, str]] = []
         preserve: list[str] = []
+        contact_window_effect = "unknown"
+        new_hard_prerequisites: list[str] = []
+        production_tradeoffs: list[str] = []
+        window_tradeoff_evidence: list[str] = []
+        why_window_remains_favorable = ""
+        preservation_checks: list[dict[str, Any]] = []
+        composition_change_allowed = False
+        retreat_change_allowed = False
+        stage_scope_evidence: list[str] = []
+        stage_scope_reason = ""
     elif isinstance(raw, dict):
         direction = str(
             raw.get("direction") or raw.get("name") or raw.get("plan") or ""
@@ -628,13 +418,58 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
                 continue
             change = str(item.get("change") or "").strip()
             why_required = str(item.get("why_required") or "").strip()
-            if change and why_required:
+            if change:
                 coordinated_changes.append(
-                    {"change": change, "why_required": why_required}
+                    {
+                        "change": change,
+                        "why_required": why_required
+                        or "Required by the selected coherent intervention.",
+                    }
                 )
             if len(coordinated_changes) >= 10:
                 break
         preserve = _clean_strings(raw.get("preserve"), limit=5)
+        contact_window_effect = str(
+            raw.get("contact_window_effect") or "unknown"
+        ).strip().lower()
+        if contact_window_effect not in _WINDOW_EFFECTS:
+            contact_window_effect = "unknown"
+        new_hard_prerequisites = _clean_strings(
+            raw.get("new_hard_prerequisites"), limit=8
+        )
+        production_tradeoffs = _clean_strings(
+            raw.get("production_tradeoffs"), limit=8
+        )
+        window_tradeoff_evidence = _clean_strings(
+            raw.get("window_tradeoff_evidence"), limit=6
+        )
+        why_window_remains_favorable = str(
+            raw.get("why_window_remains_favorable") or ""
+        ).strip()
+        composition_change_allowed = bool(raw.get("composition_change_allowed"))
+        retreat_change_allowed = bool(raw.get("retreat_change_allowed"))
+        stage_scope_evidence = _clean_strings(
+            raw.get("stage_scope_evidence"), limit=6
+        )
+        stage_scope_reason = str(raw.get("stage_scope_reason") or "").strip()
+        preservation_checks = []
+        for item in raw.get("preservation_checks") or []:
+            if not isinstance(item, dict):
+                continue
+            invariant = str(item.get("invariant") or "").strip()
+            effect = str(item.get("effect") or "").strip().lower()
+            if not invariant or effect not in _PRESERVATION_EFFECTS:
+                continue
+            preservation_checks.append(
+                {
+                    "invariant": invariant,
+                    "effect": effect,
+                    "reason": str(item.get("reason") or "").strip(),
+                    "evidence": _clean_strings(item.get("evidence"), limit=4),
+                }
+            )
+            if len(preservation_checks) >= 8:
+                break
     else:
         return None, "plan must be an object with direction"
     if not direction:
@@ -644,6 +479,16 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
         "material_behavior_change": material_behavior_change,
         "coordinated_changes": coordinated_changes,
         "preserve": preserve,
+        "contact_window_effect": contact_window_effect,
+        "new_hard_prerequisites": new_hard_prerequisites,
+        "production_tradeoffs": production_tradeoffs,
+        "window_tradeoff_evidence": window_tradeoff_evidence,
+        "why_window_remains_favorable": why_window_remains_favorable,
+        "preservation_checks": preservation_checks,
+        "composition_change_allowed": composition_change_allowed,
+        "retreat_change_allowed": retreat_change_allowed,
+        "stage_scope_evidence": stage_scope_evidence,
+        "stage_scope_reason": stage_scope_reason,
     }, ""
 
 
@@ -680,7 +525,52 @@ def _normalize_failure_mode_analysis(
             "counterexamples": counterexamples,
         }
     )
+    # These fields preserve the decision agent's compact combat-causal chain for
+    # the optimizer and experiment history. They are optional for compatibility
+    # with older checkpoints, but new prompts request all of them.
+    for field in (
+        "failure_stage",
+        "commitment_and_contact_timing",
+        "own_package_at_contact",
+        "opponent_package_and_growth",
+        "post_contact_continuity",
+        "production_feasibility",
+        "optimization_implication",
+    ):
+        value = str(raw.get(field) or "").strip()
+        if value:
+            normalized[field] = value
+    stage = str(raw.get("failure_stage") or "").strip().lower()
+    if stage and stage not in _FAILURE_STAGES:
+        return None, (
+            "failure_mode_analysis.failure_stage must be "
+            "before_core_mechanism, during_commitment_or_engagement, "
+            "after_successful_engagement, or mixed"
+        )
+    if stage:
+        normalized["failure_stage"] = stage
     return normalized, ""
+
+
+def _normalize_outcome_contrast(raw: Any) -> dict[str, Any]:
+    """Keep the win/loss comparison explicit across analysis and optimization."""
+    value = raw if isinstance(raw, dict) else {}
+    relationship = str(
+        value.get("loss_relationship_to_wins")
+        or value.get("relationship")
+        or "uncertain"
+    ).strip().lower()
+    if relationship not in _OUTCOME_RELATIONSHIPS:
+        relationship = "uncertain"
+    return {
+        "winning_pattern": str(value.get("winning_pattern") or "").strip(),
+        "winning_evidence": _clean_strings(value.get("winning_evidence"), limit=6),
+        "loss_shortfall": str(value.get("loss_shortfall") or "").strip(),
+        "loss_evidence": _clean_strings(value.get("loss_evidence"), limit=6),
+        "loss_relationship_to_wins": relationship,
+        "causal_difference": str(value.get("causal_difference") or "").strip(),
+        "preservation_rule": str(value.get("preservation_rule") or "").strip(),
+    }
 
 
 def _normalize_priority_alignment(
@@ -743,115 +633,6 @@ _STATIC_DEFENSE_DIRECTION_TERMS = (
     "地堡",
     "静态防御",
 )
-
-_RUNTIME_TRANSFORMATION_IDENTIFIERS = re.compile(
-    r"\b(?:siegetanksieged|vikingassault|vikingfighter|liberatorag)\b",
-    re.IGNORECASE,
-)
-_UNEXECUTABLE_STATEFUL_MECHANISMS = (
-    (
-        re.compile(
-            r"\bscan_ready\b.{0,80}\b(?:fired|complete(?:d|s)?|execut(?:ed|ion)|"
-            r"since|verified)\b|\b(?:scan|scanner sweep).{0,80}"
-            r"\b(?:has|was|been).{0,24}\bcomplete(?:d|s)?\b",
-            re.IGNORECASE,
-        ),
-        "treats scan completion/history as persistent strategy state",
-    ),
-    (
-        re.compile(
-            r"\b(?:last_seen_enemy_contents|seconds_since_last_seen|"
-            r"enemy_information_age_seconds)\b",
-            re.IGNORECASE,
-        ),
-        "uses a runtime observation-field name as a strategy condition",
-    ),
-    (
-        re.compile(
-            r"\b(?:sieged|siege\s+mode|transformation\s+state)\b.{0,80}"
-            r"\b(?:before|until|gate|condition|assault|attack|commit)\b",
-            re.IGNORECASE,
-        ),
-        "uses a runtime transformation state as a strategy prerequisite",
-    ),
-)
-
-_NON_EVOLVABLE_PLAN_PATTERNS = (
-    (
-        re.compile(
-            r"\b(?:scan|scanner\s+sweep|scout|scouting|reconnaissance|"
-            r"wake(?:\s+event)?|redecision|decision\s+cycle)\b",
-            re.IGNORECASE,
-        ),
-        "information acquisition and wake-event behavior are Commander-owned",
-    ),
-    (
-        re.compile(
-            r"\b(?:reinforcement|reinforce|rally|retreat|withdraw|withdrawal|"
-            r"recovery|recover|rebuild|re-engage|reengage|cleanup)\b",
-            re.IGNORECASE,
-        ),
-        "reinforcement, retreat, recovery, and cleanup are preservation-only behaviors",
-    ),
-)
-
-
-def _strategy_scope_error(
-    *,
-    hypothesis: str,
-    plan: dict[str, Any] | None,
-    mechanism_prediction: dict[str, Any] | None,
-) -> str:
-    """Reject plans that cannot be represented by strategy.md controls.
-
-    Runtime facts may explain a failure, but they cannot be promoted into a
-    strategy prerequisite.  Check only the proposed intervention, never the
-    match evidence, which may legitimately name a runtime state.
-    """
-    fragments = [hypothesis]
-    plan_fragments: list[str] = []
-    if isinstance(plan, dict):
-        plan_fragments = [
-            str(plan.get("direction") or ""),
-            str(plan.get("material_behavior_change") or ""),
-            *[
-                " ".join(
-                    [
-                        str(item.get("change") or ""),
-                        str(item.get("why_required") or ""),
-                    ]
-                )
-                for item in (plan.get("coordinated_changes") or [])
-                if isinstance(item, dict)
-            ],
-        ]
-        fragments.extend(plan_fragments)
-    if isinstance(mechanism_prediction, dict):
-        fragments.extend(str(value or "") for value in mechanism_prediction.values())
-    proposed_text = " ".join(fragments)
-    match = _RUNTIME_TRANSFORMATION_IDENTIFIERS.search(proposed_text)
-    if match:
-        return (
-            "selected strategy mechanism uses runtime transformation-state "
-            f"identifier '{match.group(0)}'; explain its observed effect but choose "
-            "an allowed economy, production, technology, composition, readiness, or objective lever"
-        )
-    for pattern, reason in _UNEXECUTABLE_STATEFUL_MECHANISMS:
-        if pattern.search(proposed_text):
-            return (
-                "selected strategy mechanism is not executable because it "
-                f"{reason}; request information and use the next decision cycle, "
-                "but do not require remembered scan state or raw observation fields"
-            )
-    plan_text = " ".join(plan_fragments)
-    for pattern, reason in _NON_EVOLVABLE_PLAN_PATTERNS:
-        match = pattern.search(plan_text)
-        if match:
-            return (
-                "selected strategy mechanism is outside EvolAgent's optimization "
-                f"scope because {reason}: {match.group(0)}"
-            )
-    return ""
 
 
 def _static_defense_direction_error(plan: dict[str, Any] | None) -> str:
@@ -993,7 +774,11 @@ def _normalize_mechanism_prediction(
         "disproof_condition",
     )
     normalized = {field: str(raw.get(field) or "").strip() for field in fields}
-    missing = [field for field, value in normalized.items() if not value]
+    missing = [
+        field
+        for field in ("expected_change", "minimum_material_change", "disproof_condition")
+        if not normalized[field]
+    ]
     if missing:
         return None, (
             "mechanism_prediction requires " + ", ".join(missing)
@@ -1054,8 +839,17 @@ def _adapt_decision_for_optimizer(
     payload["problems"] = [priority] if priority.get("problem") else []
     payload["primary_problem"] = priority
     payload["winning_mechanism"] = (
-        strengths[0]["pattern"] if strengths and isinstance(strengths[0], dict) else ""
+        str((decision.get("strategy_contract") or {}).get("observed_winning_signature") or "").strip()
+        or (strengths[0]["pattern"] if strengths and isinstance(strengths[0], dict) else "")
     )
+    payload["cross_outcome_comparison"] = [
+        text
+        for text in (
+            str((decision.get("outcome_contrast") or {}).get("causal_difference") or "").strip(),
+            str((decision.get("outcome_contrast") or {}).get("preservation_rule") or "").strip(),
+        )
+        if text
+    ]
     payload["knowledge_questions"] = []
     plans: list[dict[str, Any]] = []
     if next_action == "propose_strategy_patch" and plan:
@@ -1087,6 +881,10 @@ def _adapt_decision_for_optimizer(
                 "expected_benefit": "",
                 "risk_to_winning_mechanism": "",
                 "preserve": list(plan.get("preserve") or []),
+                "preservation_checks": list(plan.get("preservation_checks") or []),
+                "contact_window_effect": str(
+                    plan.get("contact_window_effect") or "unknown"
+                ),
             }
         )
     payload["candidate_plans"] = plans
@@ -1119,10 +917,11 @@ def _normalize_cross_match_decision(
     *,
     strategy_name: str,
     require_retrieval_assessment: bool = False,
-    require_strategy_identity: bool = False,
-    fallback_strategy_contract: dict[str, Any] | None = None,
     retrieval_evidence: dict[str, Any] | None = None,
     knowledge_runs: list[dict[str, Any]] | None = None,
+    fallback_strategy_contract: dict[str, Any] | None = None,
+    fallback_outcome_contrast: dict[str, Any] | None = None,
+    require_outcome_contract: bool = False,
 ) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(raw, dict):
         return None, "decision returned no JSON object"
@@ -1133,33 +932,17 @@ def _normalize_cross_match_decision(
             "inspect_runtime, or stop"
         )
     action_reason = str(raw.get("action_reason") or "").strip()
-    strategy_contract = normalize_strategy_contract(
-        raw.get("strategy_contract") or fallback_strategy_contract,
-        strategy_name=strategy_name,
-    )
-    strategy_mechanism_assessment, strategy_mechanism_error = (
-        _normalize_strategy_mechanism_assessment(
-            raw.get("strategy_mechanism_assessment")
-        )
-    )
-    core_mechanism_guard, core_guard_error = _normalize_core_mechanism_guard(
-        raw.get("core_mechanism_guard")
-    )
     strengths = _normalize_pattern_items(
         raw.get("strengths_to_preserve") or raw.get("strengths")
+    )
+    outcome_contrast = _normalize_outcome_contrast(
+        raw.get("outcome_contrast") or fallback_outcome_contrast
     )
     priority, priority_error = _normalize_priority_problem(raw.get("priority_problem"))
     if priority_error:
         return None, priority_error
     hypothesis = str(raw.get("hypothesis") or "").strip()
     plan, plan_error = _normalize_plan(raw.get("plan"))
-    information_grounding, information_grounding_error = (
-        _normalize_information_grounding(
-            raw.get("information_grounding"),
-            plan_uses_information=_plan_uses_runtime_information(plan),
-            require_control_necessity=require_strategy_identity,
-        )
-    )
     mechanism_family = _normalize_mechanism_family(
         raw.get("mechanism_family"), plan
     )
@@ -1189,41 +972,6 @@ def _normalize_cross_match_decision(
 
     if next_action == "propose_strategy_patch":
         control = str((priority or {}).get("control_class") or "")
-        static_defense_error = _static_defense_direction_error(plan)
-        strategy_scope_error = _strategy_scope_error(
-            hypothesis=hypothesis,
-            plan=plan,
-            mechanism_prediction=mechanism_prediction,
-        )
-        missing_identity = [
-            field
-            for field in (
-                "style",
-                "core_win_mechanism",
-                "critical_timing_or_power_spike",
-            )
-            if not str(strategy_contract.get(field) or "").strip()
-        ]
-        if not strategy_contract.get("core_commitments"):
-            missing_identity.append("core_commitments")
-        if require_strategy_identity and missing_identity:
-            return None, (
-                "strategy_contract requires " + ", ".join(missing_identity)
-            )
-        if require_strategy_identity and (
-            strategy_mechanism_error or not strategy_mechanism_assessment
-        ):
-            return None, strategy_mechanism_error or (
-                "propose_strategy_patch requires strategy_mechanism_assessment"
-            )
-        if require_strategy_identity and (
-            core_guard_error or not core_mechanism_guard
-        ):
-            return None, core_guard_error or (
-                "propose_strategy_patch requires core_mechanism_guard"
-            )
-        if information_grounding_error:
-            return None, information_grounding_error
         if control in {"runtime_execution", "commander_execution"}:
             next_action = "inspect_runtime"
             action_reason = action_reason or (
@@ -1244,10 +992,6 @@ def _normalize_cross_match_decision(
             return None, "propose_strategy_patch requires priority_problem with evidence"
         elif not priority.get("strategy_fixable"):
             return None, "propose_strategy_patch requires control_class=strategy_fixable"
-        elif static_defense_error:
-            return None, static_defense_error
-        elif strategy_scope_error:
-            return None, strategy_scope_error
         elif not hypothesis:
             return None, "propose_strategy_patch requires hypothesis"
         elif not plan:
@@ -1260,19 +1004,49 @@ def _normalize_cross_match_decision(
             return None, "propose_strategy_patch requires plan.material_behavior_change"
         elif not plan.get("coordinated_changes"):
             return None, "propose_strategy_patch requires plan.coordinated_changes"
-        elif failure_mode_error or not failure_mode_analysis:
-            return None, failure_mode_error or (
-                "propose_strategy_patch requires failure_mode_analysis"
+        elif require_outcome_contract and not failure_mode_analysis.get("failure_stage"):
+            return None, (
+                "propose_strategy_patch requires failure_mode_analysis.failure_stage"
             )
-        elif priority_alignment_error or not priority_alignment:
-            return None, priority_alignment_error or (
-                "propose_strategy_patch requires priority_alignment"
+        elif require_outcome_contract and not plan.get("stage_scope_reason"):
+            return None, (
+                "propose_strategy_patch requires plan.stage_scope_reason for "
+                "composition and retreat permissions"
             )
-        elif require_retrieval_assessment and (
-            retrieval_error or not retrieval_assessment
+        elif (
+            require_outcome_contract
+            and (
+                plan.get("composition_change_allowed")
+                or plan.get("retreat_change_allowed")
+            )
+        ) and len(
+            {
+                str(item).strip().casefold()
+                for item in (plan.get("stage_scope_evidence") or [])
+                if str(item).strip()
+            }
+        ) < 2:
+            return None, (
+                "composition or retreat changes require at least two distinct "
+                "plan.stage_scope_evidence references"
+            )
+        elif require_outcome_contract and not outcome_contrast.get("preservation_rule"):
+            return None, (
+                "propose_strategy_patch requires outcome_contrast.preservation_rule "
+                "derived from wins and losses"
+            )
+        elif require_outcome_contract and not plan.get("preservation_checks"):
+            return None, (
+                "propose_strategy_patch requires plan.preservation_checks for the "
+                "Champion's winning mechanisms"
+            )
+        elif (
+            require_outcome_contract
+            and plan.get("contact_window_effect") == "later"
+            and not plan.get("window_tradeoff_evidence")
         ):
-            return None, retrieval_error or (
-                "propose_strategy_patch requires retrieval_assessment"
+            return None, (
+                "a later contact window requires plan.window_tradeoff_evidence"
             )
         elif require_retrieval_assessment and retrieval_assessment:
             retrieval_link_error = _validate_retrieval_assessment_links(
@@ -1290,18 +1064,15 @@ def _normalize_cross_match_decision(
         plan = None
 
     decision = {
-        "strategy_contract": strategy_contract,
-        "strategy_mechanism_assessment": strategy_mechanism_assessment or {},
-        "core_mechanism_guard": core_mechanism_guard or {},
-        "information_grounding": information_grounding or {},
         "strengths_to_preserve": strengths,
+        "outcome_contrast": outcome_contrast,
         "priority_problem": priority or {},
         "hypothesis": hypothesis,
         "mechanism_family": mechanism_family,
-        "failure_mode_analysis": failure_mode_analysis or {},
-        "priority_alignment": priority_alignment or {},
+        "failure_mode_analysis": failure_mode_analysis if not failure_mode_error else {},
+        "priority_alignment": priority_alignment if not priority_alignment_error else {},
         "mechanism_prediction": mechanism_prediction or {},
-        "retrieval_assessment": retrieval_assessment or {},
+        "retrieval_assessment": retrieval_assessment if not retrieval_error else {},
         "next_action": next_action,
         "action_reason": action_reason,
         "considered_explanations": _normalize_considered_explanations(
@@ -1309,6 +1080,10 @@ def _normalize_cross_match_decision(
         ),
         "plan": plan,
         "evidence_limits": _clean_strings(raw.get("evidence_limits")),
+        "strategy_contract": normalize_strategy_contract(
+            raw.get("strategy_contract") or fallback_strategy_contract,
+            strategy_name=strategy_name,
+        ),
     }
     return _adapt_decision_for_optimizer(decision, strategy_name=strategy_name), ""
 
@@ -1390,7 +1165,6 @@ def _run_cross_match_discovery(
             raw,
             knowledge_mode=knowledge_mode,
             strategy_name=strategy_name,
-            require_strategy_identity=True,
         ),
         events=events,
         label="cross_match_discovery",
@@ -1449,13 +1223,12 @@ def _run_cross_match_decision(
         normalizer=lambda raw: _normalize_cross_match_decision(
             raw,
             strategy_name=strategy_name,
-            require_retrieval_assessment=True,
-            require_strategy_identity=True,
-            fallback_strategy_contract=discovery.get("strategy_contract")
-            if isinstance(discovery, dict)
-            else None,
+            require_retrieval_assessment=False,
             retrieval_evidence=retrieval_evidence,
             knowledge_runs=knowledge_runs,
+            fallback_strategy_contract=discovery.get("strategy_contract"),
+            fallback_outcome_contrast=discovery.get("outcome_contrast"),
+            require_outcome_contract=True,
         ),
         events=events,
         label="cross_match_decision",

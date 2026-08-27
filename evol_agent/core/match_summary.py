@@ -164,7 +164,10 @@ def _normalize_summary_payload(
             "enemy_observed",
             "enemy_truth",
             "own_force_after",
+            "own_reinforcement_after",
+            "production_context_before",
             "runtime_override",
+            "retreat_policy",
             "loss_timing",
             "outcome",
         )

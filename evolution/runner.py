@@ -38,6 +38,7 @@ DEFAULT_DIFFICULTIES = (
     "cheatmoney",
     "cheatinsane",
 )
+MAX_SEARCH_RESTARTS_PER_GENERATION = 3
 HISTORY_FIELDS = (
     "strategy_style",
     "generation",
@@ -56,55 +57,13 @@ HISTORY_FIELDS = (
     "batch",
 )
 
-_MECHANISM_RENAME_NOISE = {
-    "a",
-    "air",
-    "and",
-    "against",
-    "balance",
-    "count",
-    "denial",
-    "earlier",
-    "early",
-    "for",
-    "from",
-    "improve",
-    "improved",
-    "improvement",
-    "increase",
-    "increased",
-    "late",
-    "later",
-    "matchup",
-    "mechanism",
-    "of",
-    "package",
-    "response",
-    "strategy",
-    "support",
-    "the",
-    "timing",
-    "to",
-    "unit",
-    "units",
-    "versus",
-    "vs",
-    "with",
-}
-
-
 def canonical_mechanism_signature(value: Any) -> str:
-    """Collapse cosmetic family renames while retaining causal anchor terms."""
-    tokens = re.findall(r"[a-z0-9]+", str(value or "").casefold())
-    anchors = sorted(
-        {
-            token
-            for token in tokens
-            if len(token) > 1 and token not in _MECHANISM_RENAME_NOISE
-        }
-    )
-    if anchors:
-        return "_".join(anchors)
+    """Normalize a model-provided family id without guessing semantic equivalence.
+
+    Whether two differently named mechanisms express the same causal intervention
+    is a semantic judgement made from experiment history by the analysis model.
+    The runner only normalizes spelling for stable storage and exact-id lookup.
+    """
     return re.sub(r"[^a-z0-9]+", "_", str(value or "").casefold()).strip("_")
 
 
@@ -128,6 +87,7 @@ class EvolutionConfig:
     max_analysis_games_per_generation: int = 20
     max_generations_per_difficulty: int = 10
     max_total_generations: int = 50
+    require_full_generation_budget: bool = False
     knowledge_mode: str = "enabled"
     bot_name: str = "commander"
     bot_instruct: str = ""
@@ -416,6 +376,9 @@ class EvolutionRunner:
             "mechanism_ledger": [],
             "candidate_generation_failures": [],
             "mechanism_policy_rejections": [],
+            "generation_search_restarts": [],
+            "skipped_generations": [],
+            "abandoned_analysis_checkpoints": [],
             "candidate_resume_dir": None,
             "analysis_checkpoints": {},
             "evidence_pool": {},
@@ -470,8 +433,22 @@ class EvolutionRunner:
                 "max_analysis_games_per_generation",
                 "max_generations_per_difficulty",
                 "confirmation_matches",
+                "require_full_generation_budget",
             ):
                 if key not in saved:
+                    saved[key] = current[key]
+                    config_changed = True
+            # These are run-control budgets rather than experiment identity.
+            # Allow a stopped run to resume with safer concurrency or a revised
+            # generation budget while keeping strategy/model/map settings fixed.
+            for key in (
+                "concurrency",
+                "candidate_generation_retries",
+                "max_total_generations",
+                "max_generations_per_difficulty",
+                "require_full_generation_budget",
+            ):
+                if saved.get(key) != current[key]:
                     saved[key] = current[key]
                     config_changed = True
             if saved != current:
@@ -780,7 +757,14 @@ class EvolutionRunner:
                     ),
                     "search_parent_after": str(
                         item.get("search_parent_after")
-                        or (key[1] if decision == "accepted" or valid_inconclusive else "")
+                        or (
+                            key[1]
+                            if decision == "accepted"
+                            else item.get("comparison_champion")
+                            or item.get("champion")
+                            or item.get("parent")
+                            or ""
+                        )
                     ),
                     "inconclusive_streak_before": int(
                         item.get("inconclusive_streak_before") or 0
@@ -859,38 +843,14 @@ class EvolutionRunner:
         if state.get("mastery_protocol") != mastery_protocol:
             state["mastery_protocol"] = mastery_protocol
             changed = True
-        if "search_parent" not in state:
-            search_parent = str(state.get("champion") or self.config.strategy)
-            streak = 0
-            difficulty = str(state.get("difficulty") or "")
-            history = [
-                item
-                for item in (state.get("experiment_history") or [])
-                if isinstance(item, dict)
-                and str(item.get("difficulty") or "") in {"", difficulty}
-            ]
-            if history:
-                latest = history[-1]
-                if (
-                    str(latest.get("decision") or "") == "inconclusive"
-                    and str(latest.get("implementation_verdict") or "")
-                    != "execution_invalid"
-                    and str(latest.get("candidate") or "").strip()
-                ):
-                    search_parent = str(latest["candidate"])
-                    streak = 1
-            state["search_parent"] = search_parent
-            state["inconclusive_streak"] = streak
+        # There is exactly one textual parent: the official Champion. Rejected or
+        # equal-score candidates remain experiment evidence, but their unverified
+        # text is never inherited by the next generation.
+        champion_name = str(state.get("champion") or self.config.strategy)
+        if str(state.get("search_parent") or "") != champion_name:
+            state["search_parent"] = champion_name
+            state["search_parent_batch"] = None
             changed = True
-            pending = state.get("pending_candidate")
-            if isinstance(pending, dict) and str(
-                pending.get("mutation_parent") or ""
-            ) != search_parent:
-                # Legacy pending candidates were always generated from Champion.
-                # Once an inconclusive child becomes the search parent, that old
-                # candidate no longer has the required inheritance lineage.
-                state["pending_candidate"] = None
-                changed = True
         if "inconclusive_streak" not in state:
             state["inconclusive_streak"] = 0
             changed = True
@@ -934,6 +894,48 @@ class EvolutionRunner:
         if not isinstance(state.get("analysis_checkpoints"), dict):
             state["analysis_checkpoints"] = {}
             changed = True
+        for key in (
+            "generation_search_restarts",
+            "skipped_generations",
+            "abandoned_analysis_checkpoints",
+        ):
+            if not isinstance(state.get(key), list):
+                state[key] = []
+                changed = True
+        pending = state.get("pending_candidate")
+        if isinstance(pending, dict):
+            strategy_dir = Path(str(pending.get("strategy_dir") or ""))
+            if not strategy_dir.is_dir():
+                checkpoint = str(
+                    pending.get("analysis_checkpoint_dir") or ""
+                ).strip()
+                if checkpoint:
+                    abandoned = state.setdefault(
+                        "abandoned_analysis_checkpoints", []
+                    )
+                    resolved_checkpoint = str(Path(checkpoint).resolve())
+                    if resolved_checkpoint not in abandoned:
+                        abandoned.append(resolved_checkpoint)
+                state["pending_candidate"] = None
+                state["candidate_resume_dir"] = None
+                state["status"] = "running"
+                changed = True
+        resumable_statuses = {
+            "evol_agent_failed",
+            "mechanism_policy_attention_required",
+            "runtime_attention_required",
+            "stopped_no_actionable_improvement",
+            "insufficient_evidence",
+            "agent_paused",
+        }
+        if (
+            str(state.get("status") or "") in resumable_statuses
+            and state.get("pending_candidate") is None
+            and int(state.get("generation") or 0) < self.config.max_total_generations
+        ):
+            state["status"] = "running"
+            state["completion_reason"] = ""
+            changed = True
         return changed
 
     def _remember_analysis_checkpoint(
@@ -962,6 +964,11 @@ class EvolutionRunner:
         record_paths: list[Path],
     ) -> Path | None:
         current_records = {str(path.resolve()) for path in record_paths}
+        abandoned = {
+            str(Path(str(path)).resolve())
+            for path in (state.get("abandoned_analysis_checkpoints") or [])
+            if str(path).strip()
+        }
         if not current_records:
             return None
         candidates: list[Path] = []
@@ -982,6 +989,8 @@ class EvolutionRunner:
             resolved = path.resolve()
             key = str(resolved)
             if key in seen:
+                continue
+            if key in abandoned:
                 continue
             seen.add(key)
             try:
@@ -1019,16 +1028,24 @@ class EvolutionRunner:
     def _find_resumable_analysis_checkpoint(
         self,
         *,
+        state: dict[str, Any] | None = None,
         strategy: str,
         record_paths: list[Path],
     ) -> Path | None:
         current_records = {str(path.resolve()) for path in record_paths}
+        abandoned = {
+            str(Path(str(path)).resolve())
+            for path in ((state or {}).get("abandoned_analysis_checkpoints") or [])
+            if str(path).strip()
+        }
         log_root = self.project_root / "evol_agent" / "logs" / strategy
         if not current_records or not log_root.is_dir():
             return None
         resumable: list[tuple[int, Path]] = []
         for path in log_root.iterdir():
             if not path.is_dir():
+                continue
+            if str(path.resolve()) in abandoned:
                 continue
             try:
                 checkpoint = load_checkpoint(path)
@@ -1171,11 +1188,16 @@ class EvolutionRunner:
             if str(item.get("difficulty") or "") in {"", difficulty}
         ]
         blocked = self._blocked_mechanism_families(state, difficulty=difficulty)
+        active_block_signatures = {
+            canonical_mechanism_signature(family) for family in blocked
+        }
         policy_rejections = [
             item
             for item in (state.get("mechanism_policy_rejections") or [])
             if isinstance(item, dict)
             and str(item.get("difficulty") or "") in {"", difficulty}
+            and canonical_mechanism_signature(item.get("mechanism_family"))
+            in active_block_signatures
         ]
         policy = []
         if blocked:
@@ -1189,7 +1211,13 @@ class EvolutionRunner:
                     ),
                 }
             )
-        return related + policy_rejections + policy
+        search_restarts = [
+            item
+            for item in (state.get("generation_search_restarts") or [])
+            if isinstance(item, dict)
+            and str(item.get("difficulty") or "") in {"", difficulty}
+        ][-6:]
+        return related + policy_rejections + policy + search_restarts
 
     def _blocked_mechanism_families(
         self,
@@ -1197,7 +1225,7 @@ class EvolutionRunner:
         *,
         difficulty: str,
     ) -> dict[str, str]:
-        attempts: dict[str, int] = {}
+        inconclusive_attempts: dict[str, int] = {}
         representative: dict[str, str] = {}
         blocked: dict[str, str] = {}
         for item in state.get("experiment_history") or []:
@@ -1213,21 +1241,129 @@ class EvolutionRunner:
             decision = str(item.get("decision") or "")
             implementation = str(item.get("implementation_verdict") or "")
             hypothesis = str(item.get("hypothesis_verdict") or "")
-            if decision != "accepted":
-                attempts[signature] = attempts.get(signature, 0) + 1
-            if implementation == "execution_invalid":
-                blocked[representative[signature]] = (
-                    "depends on an unsupported execution capability"
+            if (
+                decision != "accepted"
+                and implementation != "execution_invalid"
+                and hypothesis in {"inconclusive", "not_tested"}
+            ):
+                inconclusive_attempts[signature] = (
+                    inconclusive_attempts.get(signature, 0) + 1
                 )
-            elif implementation == "implemented" and hypothesis == "contradicted":
+            if (
+                decision != "accepted"
+                and implementation == "implemented"
+                and hypothesis == "contradicted"
+            ):
                 blocked[representative[signature]] = (
                     "implemented experiment contradicted the hypothesis"
                 )
-        for signature, count in attempts.items():
+            if bool(item.get("underpowered_retry_exhausted")):
+                blocked.setdefault(
+                    representative[signature],
+                    "underpowered retry budget was exhausted",
+                )
+        for signature, count in inconclusive_attempts.items():
             family = representative[signature]
             if count >= 2:
-                blocked.setdefault(family, f"already has {count} non-accepted attempts")
+                blocked.setdefault(
+                    family,
+                    f"already has {count} underpowered tests without realizing the mechanism",
+                )
         return blocked
+
+    def _restart_generation_search(
+        self,
+        state: dict[str, Any],
+        *,
+        difficulty: str,
+        champion: str,
+        reason: str,
+        source_action: str,
+        checkpoint_dir: Path | str | None = None,
+        mechanism_family: str = "",
+        consume_generation: bool = False,
+    ) -> bool:
+        """Continue a bounded strategy search instead of terminating the run."""
+        checkpoint_value = str(checkpoint_dir or state.get("candidate_resume_dir") or "").strip()
+        if checkpoint_value:
+            resolved = str(Path(checkpoint_value).resolve())
+            abandoned = state.setdefault("abandoned_analysis_checkpoints", [])
+            if resolved not in abandoned:
+                abandoned.append(resolved)
+
+        generation = int(state.get("generation") or 0)
+        restart = {
+            "kind": "generation_search_restart",
+            "generation": generation,
+            "difficulty": difficulty,
+            "champion": champion,
+            "source_action": source_action,
+            "reason": str(reason or "search attempt did not produce an evaluable candidate"),
+            "mechanism_family": str(mechanism_family or "").strip(),
+            "instruction": (
+                "Keep the current Champion and select a materially different, "
+                "evidence-supported strategy-fixable mechanism. Do not repeat the "
+                "failed concrete package or its unavailable dependency."
+            ),
+            "created_at": datetime.now().isoformat(),
+        }
+        restarts = state.setdefault("generation_search_restarts", [])
+        restarts.append(restart)
+        restart_count = sum(
+            1
+            for item in restarts
+            if isinstance(item, dict)
+            and int(item.get("generation", -1)) == generation
+            and str(item.get("difficulty") or "") == difficulty
+        )
+
+        state["status"] = "running"
+        state["pending_candidate"] = None
+        state["candidate_resume_dir"] = None
+        state["inconclusive_streak"] = 0
+        try:
+            champion_evidence = self._aggregate_evidence(
+                state, difficulty=difficulty, strategy=champion
+            )
+        except RuntimeError:
+            champion_evidence = (
+                BatchResult.from_dict(state["champion_batch"])
+                if isinstance(state.get("champion_batch"), dict)
+                else None
+            )
+        self._sync_search_parent(state, champion, champion_evidence)
+
+        if consume_generation or restart_count >= MAX_SEARCH_RESTARTS_PER_GENERATION:
+            state.setdefault("skipped_generations", []).append(
+                {
+                    "generation": generation,
+                    "difficulty": difficulty,
+                    "champion": champion,
+                    "reason": "search_restart_budget_exhausted",
+                    "restart_count": restart_count,
+                    "last_failure": restart["reason"],
+                    "created_at": datetime.now().isoformat(),
+                }
+            )
+            state["generation"] = generation + 1
+            state["difficulty_generation"] = (
+                int(state.get("difficulty_generation") or 0) + 1
+            )
+            print(
+                "EvolAgent exhausted this generation's search alternatives; "
+                "the Champion is retained and the run continues to the next "
+                "configured generation.",
+                flush=True,
+            )
+        else:
+            print(
+                "EvolAgent search attempt was not evaluable; retaining the "
+                f"Champion and trying a different mechanism ({restart_count}/"
+                f"{MAX_SEARCH_RESTARTS_PER_GENERATION}).",
+                flush=True,
+            )
+        self._save_state(state)
+        return True
 
     def _blocked_mechanism_reason(
         self,
@@ -1235,9 +1371,9 @@ class EvolutionRunner:
         candidate_family: str,
     ) -> tuple[str, str]:
         candidate_signature = canonical_mechanism_signature(candidate_family)
-        for blocked_family, reason in blocked.items():
-            if canonical_mechanism_signature(blocked_family) == candidate_signature:
-                return blocked_family, reason
+        for family, reason in blocked.items():
+            if canonical_mechanism_signature(family) == candidate_signature:
+                return family, reason
         return "", ""
 
     def _previous_result_was_statistically_inconclusive(
@@ -1412,6 +1548,27 @@ class EvolutionRunner:
     def _save_state(self, state: dict[str, Any]) -> None:
         state["updated_at"] = datetime.now().isoformat()
         _write_json(self.state_path, state)
+
+    def _discard_policy_rejected_candidate(self, candidate_dir: Path) -> bool:
+        """Remove an unplayed candidate rejected before match evaluation."""
+        candidate_dir = Path(candidate_dir).resolve()
+        strategies_dir = self.strategies_dir.resolve()
+        if candidate_dir.parent != strategies_dir:
+            print(
+                "EvolAgent did not remove a policy-rejected candidate outside "
+                f"the run strategy directory: {candidate_dir}",
+                flush=True,
+            )
+            return False
+        if not candidate_dir.exists():
+            return True
+        if candidate_dir.is_symlink():
+            candidate_dir.unlink()
+        elif candidate_dir.is_dir():
+            shutil.rmtree(candidate_dir)
+        else:
+            candidate_dir.unlink()
+        return True
 
     def _batch_name(self, generation: int, role: str, difficulty: str = "") -> str:
         # Include difficulty so a mastered champion baseline is not reused as
@@ -1758,22 +1915,54 @@ class EvolutionRunner:
             writer.writerows(rows)
         temp_path.replace(self.history_path)
 
-    def _advance_difficulty(self, state: dict[str, Any]) -> None:
+    def _advance_difficulty(
+        self,
+        state: dict[str, Any],
+        *,
+        mastered: bool = True,
+    ) -> None:
         difficulty = self._current_difficulty(state)
-        if difficulty:
-            mastered = state.setdefault("mastered_difficulties", [])
-            if difficulty not in mastered:
-                mastered.append(difficulty)
-        state["difficulty_index"] = int(state.get("difficulty_index") or 0) + 1
+        if difficulty and mastered:
+            mastered_difficulties = state.setdefault("mastered_difficulties", [])
+            if difficulty not in mastered_difficulties:
+                mastered_difficulties.append(difficulty)
+        elif difficulty:
+            exhausted = state.setdefault("exhausted_difficulties", [])
+            if difficulty not in exhausted:
+                exhausted.append(difficulty)
+
+        current_index = int(state.get("difficulty_index") or 0)
+        next_index = current_index + 1
+        if next_index >= len(self.config.difficulties):
+            if not self.config.require_full_generation_budget:
+                state["difficulty_index"] = next_index
+                self._sync_champion_baseline(state, None)
+                self._sync_search_parent(
+                    state, str(state.get("champion") or ""), None
+                )
+                state["inconclusive_streak"] = 0
+                self._reset_generation_local_analysis_state(state)
+                state["difficulty_generation"] = 0
+                self._complete_curriculum(state)
+                return
+            # The configured experiment requires all evolution rounds.  Once
+            # the curriculum ends, keep evaluating on its strongest level
+            # until the total generation budget is genuinely exhausted.
+            state["curriculum_completed"] = bool(mastered)
+            state["difficulty_index"] = current_index
+            state["difficulty"] = self.config.difficulties[current_index]
+            state["difficulty_generation"] = 0
+            state["inconclusive_streak"] = 0
+            self._reset_generation_local_analysis_state(state)
+            return
+
+        state["difficulty_index"] = next_index
         self._sync_champion_baseline(state, None)
         self._sync_search_parent(state, str(state.get("champion") or ""), None)
         state["inconclusive_streak"] = 0
         self._reset_generation_local_analysis_state(state)
         state["difficulty_generation"] = 0
-        if state["difficulty_index"] >= len(self.config.difficulties):
-            self._complete_curriculum(state)
-        else:
-            state["difficulty"] = self.config.difficulties[state["difficulty_index"]]
+        state["difficulty"] = self.config.difficulties[state["difficulty_index"]]
 
     def _record_agent_decision(
         self,
@@ -1836,24 +2025,50 @@ class EvolutionRunner:
                 self._save_state(state)
 
             champion_batch = self._evaluation_baseline(state)
-            if self._is_mastered(champion_batch):
+            already_mastered_final = bool(
+                self.config.require_full_generation_budget
+                and int(state.get("difficulty_index") or 0)
+                == len(self.config.difficulties) - 1
+                and difficulty in (state.get("mastered_difficulties") or [])
+            )
+            if self._is_mastered(champion_batch) and not already_mastered_final:
                 self._advance_difficulty(state)
                 self._save_state(state)
                 continue
 
             if int(state.get("generation") or 0) >= self.config.max_total_generations:
-                state["status"] = "total_budget_exhausted"
+                state["status"] = "completed"
+                state["completion_reason"] = "generation_budget_reached"
                 self._save_state(state)
                 break
             if (
                 int(state.get("difficulty_generation") or 0)
                 >= self.config.max_generations_per_difficulty
             ):
-                state["status"] = "difficulty_budget_exhausted"
-                state["failed_difficulty"] = difficulty
-                state["champion_score"] = champion_batch.score
+                if not self.config.require_full_generation_budget:
+                    state["status"] = "difficulty_budget_exhausted"
+                    state["failed_difficulty"] = difficulty
+                    state["champion_score"] = champion_batch.score
+                    self._save_state(state)
+                    break
+                state.setdefault("difficulty_budget_events", []).append(
+                    {
+                        "difficulty": difficulty,
+                        "generation": int(state.get("generation") or 0),
+                        "champion": champion,
+                        "champion_score": champion_batch.score,
+                        "action": (
+                            "advance_without_mastery"
+                            if int(state.get("difficulty_index") or 0)
+                            < len(self.config.difficulties) - 1
+                            else "continue_final_difficulty"
+                        ),
+                        "created_at": datetime.now().isoformat(),
+                    }
+                )
+                self._advance_difficulty(state, mastered=False)
                 self._save_state(state)
-                break
+                continue
 
             pending = state.get("pending_candidate")
             if not isinstance(pending, dict):
@@ -1878,7 +2093,10 @@ class EvolutionRunner:
         champion: str,
         champion_batch: BatchResult,
     ) -> bool:
-        search_parent = str(state.get("search_parent") or champion)
+        # Always mutate the same verified Champion that will be used for scoring.
+        # Experiment history may suggest a direction, but a non-winning candidate
+        # cannot become the strategy text inherited by that direction.
+        search_parent = champion
         parent_evidence_batches = self._evidence_batches(
             state,
             difficulty=difficulty,
@@ -1903,6 +2121,7 @@ class EvolutionRunner:
         ]
         if not resume_value:
             recovered = self._find_resumable_analysis_checkpoint(
+                state=state,
                 strategy=search_parent,
                 record_paths=list(dict.fromkeys(record_paths)),
             )
@@ -2014,14 +2233,18 @@ class EvolutionRunner:
             not candidate_result.ok
             or candidate_result.output_dir is None
         ):
-            state["status"] = "evol_agent_failed"
-            self._save_state(state)
-            print(
-                "EvolAgent could not produce a usable candidate; state and the "
-                f"analysis checkpoint are saved at {self.run_dir}",
-                flush=True,
+            return self._restart_generation_search(
+                state,
+                difficulty=difficulty,
+                champion=champion,
+                reason=str(
+                    candidate_result.message
+                    or "candidate generation retries were exhausted"
+                ),
+                source_action="candidate_generation_failed",
+                checkpoint_dir=candidate_result.checkpoint_dir,
+                consume_generation=True,
             )
-            return False
         rationale = (
             candidate_result.improvement.analysis
             if candidate_result.improvement is not None
@@ -2039,11 +2262,12 @@ class EvolutionRunner:
             mechanism_family,
         )
         if mechanism_family and blocked_reason:
+            candidate_name = candidate_result.output_dir.name
             rejection = {
                 "kind": "mechanism_policy_rejection",
                 "generation": int(state["generation"]),
                 "difficulty": difficulty,
-                "candidate": candidate_result.output_dir.name,
+                "candidate": candidate_name,
                 "mechanism_family": mechanism_family,
                 "mechanism_signature": canonical_mechanism_signature(
                     mechanism_family
@@ -2054,22 +2278,30 @@ class EvolutionRunner:
                 "created_at": datetime.now().isoformat(),
             }
             state.setdefault("mechanism_policy_rejections", []).append(rejection)
-            retries = sum(
-                1
-                for item in state["mechanism_policy_rejections"]
-                if isinstance(item, dict)
-                and int(item.get("generation") or -1) == int(state["generation"])
+            discarded = self._discard_policy_rejected_candidate(
+                candidate_result.output_dir
             )
-            if retries >= 2:
-                state["status"] = "mechanism_policy_attention_required"
+            rejection["candidate_discarded"] = discarded
             self._save_state(state)
             print(
                 "EvolAgent candidate blocked before matches by mechanism policy: "
                 f"{mechanism_family} is equivalent to {blocked_family} "
-                f"({blocked_reason})",
+                f"({blocked_reason}); candidate {candidate_name} "
+                f"{'discarded' if discarded else 'was not removed'}",
                 flush=True,
             )
-            return retries < 2
+            return self._restart_generation_search(
+                state,
+                difficulty=difficulty,
+                champion=champion,
+                reason=(
+                    f"mechanism family {mechanism_family} is blocked by prior "
+                    f"evidence: {blocked_reason}"
+                ),
+                source_action="mechanism_policy_rejected",
+                checkpoint_dir=candidate_result.checkpoint_dir,
+                mechanism_family=mechanism_family,
+            )
         state["pending_candidate"] = {
             "strategy": candidate_result.output_dir.name,
             "strategy_dir": str(candidate_result.output_dir),
@@ -2157,13 +2389,22 @@ class EvolutionRunner:
                 state, difficulty=difficulty, strategy=champion
             )
             if analysis_games >= self.config.max_analysis_games_per_generation:
-                self._pause(
+                self._record_agent_decision(
                     state,
-                    status="insufficient_evidence",
-                    result=result,
+                    result,
                     difficulty=difficulty,
                 )
-                return False
+                return self._restart_generation_search(
+                    state,
+                    difficulty=difficulty,
+                    champion=champion,
+                    reason=(
+                        result.action_reason
+                        or "the analysis evidence limit was reached without a candidate"
+                    ),
+                    source_action="request_more_matches_exhausted",
+                    checkpoint_dir=result.checkpoint_dir,
+                )
             more_batch = self.run_batch(
                 champion,
                 difficulty,
@@ -2182,28 +2423,52 @@ class EvolutionRunner:
             self._save_state(state)
             return True
         if action == "inspect_runtime":
-            self._pause(
+            self._record_agent_decision(
                 state,
-                status="runtime_attention_required",
-                result=result,
+                result,
                 difficulty=difficulty,
             )
-            return False
+            return self._restart_generation_search(
+                state,
+                difficulty=difficulty,
+                champion=champion,
+                reason=(
+                    result.action_reason
+                    or "the selected explanation belongs to runtime execution"
+                ),
+                source_action="inspect_runtime",
+                checkpoint_dir=result.checkpoint_dir,
+            )
         if action == "stop":
-            self._pause(
+            self._record_agent_decision(
                 state,
-                status="stopped_no_actionable_improvement",
-                result=result,
+                result,
                 difficulty=difficulty,
             )
-            return False
-        self._pause(
+            return self._restart_generation_search(
+                state,
+                difficulty=difficulty,
+                champion=champion,
+                reason=(
+                    result.action_reason
+                    or "the current analysis found no actionable strategy change"
+                ),
+                source_action="stop",
+                checkpoint_dir=result.checkpoint_dir,
+            )
+        self._record_agent_decision(
             state,
-            status="agent_paused",
-            result=result,
+            result,
             difficulty=difficulty,
         )
-        return False
+        return self._restart_generation_search(
+            state,
+            difficulty=difficulty,
+            champion=champion,
+            reason=result.action_reason or result.message or f"unknown action: {action}",
+            source_action=action or "unknown",
+            checkpoint_dir=result.checkpoint_dir,
+        )
 
     def _evaluate_and_commit_experiment(
         self,
@@ -2361,7 +2626,10 @@ class EvolutionRunner:
             comparison_candidate.score,
             comparison_champion.score,
         )
-        outcome = "accepted" if candidate_mastered else score_outcome
+        # Mastery advances the curriculum only after a candidate has beaten the
+        # official Champion.  Reaching an absolute threshold must never replace a
+        # stronger Champion with a lower-scoring candidate.
+        outcome = score_outcome
         accepted = outcome == "accepted"
         score_delta = comparison_candidate.score - comparison_champion.score
         experiment_spec = (
@@ -2408,23 +2676,15 @@ class EvolutionRunner:
             "mechanism_evidence": [],
             "combat_evidence": [],
             "runtime_findings": [],
+            "salvageable_changes": [],
+            "failed_dependencies": [],
             "evidence_limits": [
-                (
-                    "mechanism audit skipped because the candidate reached the "
-                    "difficulty mastery threshold"
-                    if candidate_mastered
-                    else "post-experiment mechanism audit was unavailable"
-                )
+                "post-experiment mechanism audit was unavailable"
             ],
-            "lesson": (
-                "The candidate reached the difficulty mastery threshold, so it was "
-                "accepted and advanced without a post-experiment mechanism audit."
-                if candidate_mastered
-                else ""
-            ),
+            "lesson": "",
         }
-        auditor = None if candidate_mastered else self._experiment_auditor
-        if not candidate_mastered and auditor is None and self._batch_executor is None:
+        auditor = self._experiment_auditor
+        if auditor is None and self._batch_executor is None:
             auditor = audit_experiment
         if auditor is not None:
             try:
@@ -2579,12 +2839,13 @@ class EvolutionRunner:
             base_outcome == "inconclusive"
             and implementation_verdict != "execution_invalid"
         )
-        forced_promotion_after_inconclusive = bool(
+        # Equal-score candidates remain useful evidence, but they never become the
+        # official Champion or the textual parent of a later candidate. After two
+        # such trials, history asks analysis to test a different causal direction.
+        forced_mechanism_change_after_inconclusive = bool(
             valid_inconclusive and streak_before >= 1
         )
-        if forced_promotion_after_inconclusive:
-            accepted = True
-            outcome = "accepted"
+        forced_promotion_after_inconclusive = False  # checkpoint compatibility
         promotion_blocked_by_audit = bool(
             accepted
             and implementation_verdict == "execution_invalid"
@@ -2604,20 +2865,14 @@ class EvolutionRunner:
             search_parent_after = candidate
             streak_after = 0
         elif valid_inconclusive:
-            search_parent_after = candidate
-            streak_after = streak_before + 1
-        elif repairable_underpowered:
-            # Keep Champion selection unchanged, but allow one implementation
-            # repair to inherit the concrete candidate instead of rebuilding the
-            # same mechanism from Champion. A second failed family attempt returns
-            # to Champion through the normal rejected path.
-            search_parent_after = candidate
-            streak_after = 0
-        elif underpowered_retry_exhausted:
             search_parent_after = champion
-            streak_after = 0
+            streak_after = streak_before + 1
         else:
-            search_parent_after = str(state.get("search_parent") or mutation_parent)
+            # A lower-scoring candidate remains useful as experiment evidence, but
+            # it must not become the textual parent of the next mutation. Rebuild
+            # any corrected retry from the accepted Champion so failed edits do
+            # not accumulate across generations.
+            search_parent_after = champion
             streak_after = 0 if base_outcome == "rejected" else streak_before
         decision = {
             "generation": state["generation"],
@@ -2646,6 +2901,12 @@ class EvolutionRunner:
             "runtime_findings": list(
                 mechanism_audit.get("runtime_findings") or []
             ),
+            "salvageable_changes": list(
+                mechanism_audit.get("salvageable_changes") or []
+            ),
+            "failed_dependencies": list(
+                mechanism_audit.get("failed_dependencies") or []
+            ),
             "audit_evidence_limits": list(
                 mechanism_audit.get("evidence_limits") or []
             ),
@@ -2659,18 +2920,13 @@ class EvolutionRunner:
             "causal_result": hypothesis_verdict,
             "performance_gain_cause": performance_gain_cause,
             "posterior_probability_better": probability,
-            "selection_rule": (
-                "force_latest_candidate_after_two_consecutive_inconclusive"
-                if forced_promotion_after_inconclusive
-                else (
-                    "candidate_win_rate_meets_mastery_threshold"
-                    if candidate_mastered
-                    else "candidate_score_strictly_greater"
-                )
-            ),
+            "selection_rule": "candidate_score_strictly_greater",
             "base_decision": base_outcome,
             "forced_promotion_after_inconclusive": (
                 forced_promotion_after_inconclusive
+            ),
+            "forced_mechanism_change_after_inconclusive": (
+                forced_mechanism_change_after_inconclusive
             ),
             "search_parent_before": str(
                 state.get("search_parent") or mutation_parent
@@ -2779,9 +3035,7 @@ class EvolutionRunner:
             state["champion"] = candidate
             self._sync_champion_baseline(state, comparison_candidate)
             self._sync_search_parent(state, candidate, comparison_candidate)
-        elif valid_inconclusive or repairable_underpowered:
-            self._sync_search_parent(state, candidate, comparison_candidate)
-        elif underpowered_retry_exhausted:
+        else:
             self._sync_search_parent(state, champion, comparison_champion)
         state["inconclusive_streak"] = streak_after
         parent_evidence = {
@@ -2799,12 +3053,12 @@ class EvolutionRunner:
             "strategy": candidate,
             "difficulty": difficulty,
         }
-        if forced_promotion_after_inconclusive:
+        if forced_mechanism_change_after_inconclusive:
             lesson = (
                 "Two consecutive valid candidates were statistically inconclusive. "
-                "The latest candidate was promoted by the stagnation rule so the next "
-                "generation continues from the newer strategy instead of remaining "
-                "locked to the same Champion."
+                "The official Champion remains the only mutation parent, and the "
+                "next generation must test a different "
+                "causal mechanism instead of relabeling the same direction."
             )
         elif outcome == "accepted":
             lesson = (
@@ -2881,6 +3135,12 @@ class EvolutionRunner:
             "mechanism_evidence": list(decision.get("mechanism_evidence") or []),
             "combat_evidence": list(decision.get("combat_evidence") or []),
             "runtime_findings": list(decision.get("runtime_findings") or []),
+            "salvageable_changes": list(
+                decision.get("salvageable_changes") or []
+            ),
+            "failed_dependencies": list(
+                decision.get("failed_dependencies") or []
+            ),
             "audit_evidence_limits": list(
                 decision.get("audit_evidence_limits") or []
             ),
@@ -2899,6 +3159,9 @@ class EvolutionRunner:
             "base_decision": base_outcome,
             "forced_promotion_after_inconclusive": (
                 forced_promotion_after_inconclusive
+            ),
+            "forced_mechanism_change_after_inconclusive": (
+                forced_mechanism_change_after_inconclusive
             ),
             "repairable_underpowered_retry": repairable_underpowered,
             "underpowered_retry_exhausted": underpowered_retry_exhausted,

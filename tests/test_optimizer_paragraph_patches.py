@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from evol_agent.core.optimization_agent_loop import (
-    _analysis_replan_reason,
     _candidate_knowledge_run,
     _knowledge_runs_for_optimizer,
     _normalize_optimizer_candidate,
@@ -18,18 +17,6 @@ from evol_agent.validation import validate_strategy_markdown
 
 
 TANK_STRATEGY = Path("skills/terran/tank/strategy.md").read_text(encoding="utf-8")
-
-
-def test_decision_grounding_retries_optimizer_before_reanalysis() -> None:
-    errors = [
-        "decision_grounding — Main Attack Gate — candidate omitted a requested change"
-    ]
-
-    assert _analysis_replan_reason(errors, type_attempts={"decision_grounding": 1}) == ""
-    assert "decision_grounding" in _analysis_replan_reason(
-        errors,
-        type_attempts={"decision_grounding": 2},
-    )
 
 
 def _semantic_payload(*, valid: bool = True, errors: list | None = None) -> dict:
@@ -49,6 +36,23 @@ def _semantic_payload(*, valid: bool = True, errors: list | None = None) -> dict
             "total": 119,
             "calculation": "75 Marines plus 44 SCVs equals 119 supply",
             "verdict": "valid",
+        },
+        "style_and_window_audit": {
+            "parent_combat_style": "concentrated timing attack",
+            "candidate_combat_style": "concentrated timing attack",
+            "style_preserved": True,
+            "contact_window_effect": "earlier",
+            "window_change_justified": True,
+            "new_hard_prerequisites": [],
+            "shared_production_tradeoffs": [],
+            "hidden_attack_gate": False,
+            "verdict": "evidence_supported_shift",
+        },
+        "mechanism_history_audit": {
+            "semantic_relation": "no_prior",
+            "related_experiment_ids": [],
+            "repaired_dependencies": [],
+            "verdict": "allowed",
         },
         "errors": list(errors or []),
     }
@@ -291,18 +295,26 @@ def test_optimizer_prompt_does_not_select_a_plan() -> None:
     assert "Select exactly one self-contained candidate plan" not in prompt
     assert "selected_plan_ids" not in prompt
     assert "Do not select among candidate plans" in prompt
-    assert "plan.coordinated_changes" in prompt
-    assert "minimum_material_change" not in prompt
-    assert "core_mechanism_guard" not in prompt
-    assert "information_grounding" in prompt
-    assert "execution, feasibility, and cross-paragraph" in prompt
-    assert "Main Attack Gate exclusively owns first-attack permission" in prompt
-    assert "Ultimate Goal\ncap" in prompt
-    assert "final supply at or below 200" in prompt
-    assert "style, core win mechanism, critical timing/power spike" in prompt
-    assert "strategy_mechanism_assessment" not in prompt
-    assert "## SC2 Strategic Priority" not in prompt
-    assert "enemy_truth is diagnosis-only" in prompt
+    assert "Generate the entire replacement strategy.md" in prompt
+    assert '"strategy_md"' in prompt
+    assert '"patches"' not in prompt.split("Return one JSON object only:")[1]
+    assert "coherent intervention package" in prompt
+    assert "minimum_material_change" in prompt
+    assert "cosmetic" in prompt
+    assert "globally rewritten document must still make one causal change" in prompt
+    assert "all technology and unit prerequisites are feasible" in prompt
+    assert "complete relationship\namong strategy identity, development" in prompt
+    assert "Executor capability manifest" in prompt
+    assert "production_target_audit" not in prompt.split("Return one JSON object only:")[1]
+    assert "Every unit that the complete candidate says to continue or resume" in prompt
+    assert "numerical final count or cap" in prompt
+    assert "no more than 200 supply" in prompt
+    assert "workers plus every final combat/support unit" in prompt
+    assert "strategy_contract.style" in prompt
+    assert "contact" in prompt and "timing, fighting package" in prompt
+    assert "fighting package" in prompt
+    assert "fixed category ranking" in prompt
+    assert "official Champion and the only" in prompt
     assert "Independent factual match summaries" not in prompt
 
 
@@ -422,54 +434,37 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
     gate = next(item for item in document.details if item.id == "main_attack_gate")
     recovery = next(item for item in document.details if item.id == "recovery_and_cleanup")
     calls: list[str] = []
+    optimizer_calls = 0
 
     def fake_llm(prompt: str, **kwargs):
+        nonlocal optimizer_calls
         calls.append(prompt)
         if "You are validating a strategy patch" in prompt:
-            if "withdraw, rebuild, and reapply Main Attack Gate before attacking again" in prompt:
-                return _semantic_payload()
-            return _semantic_payload(
-                valid=False,
-                errors=[
-                    "Recovery and Cleanup still uses the old readiness threshold."
-                ],
+            return _semantic_payload()
+        optimizer_calls += 1
+        patches = [
+            _patch(
+                document,
+                "main_attack_gate",
+                "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
+                "This paragraph defines the readiness rule.",
             )
-        optimizer_prompts = [
-            item for item in calls if "You are validating a strategy patch" not in item
         ]
-        if len(optimizer_prompts) == 1:
-            return {
-                "action": "draft_candidate",
-                "patches": [
-                    _patch(
-                        document,
-                        "main_attack_gate",
-                        "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
-                        "This paragraph defines the readiness rule.",
-                    )
-                ],
-                "expected_effect": "earlier first attack",
-                "main_risk": "smaller force",
-            }
-        assert "Recovery and Cleanup still uses the old readiness threshold." in prompt
-        assert "missing prerequisite" in prompt
-        assert "second independent optimization objective" in prompt
-        return {
-            "action": "revise_candidate",
-            "patches": [
-                _patch(
-                    document,
-                    "main_attack_gate",
-                    "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
-                    "This paragraph defines the readiness rule.",
-                ),
+        if optimizer_calls == 1:
+            patches.append(
                 _patch(
                     document,
                     "recovery_and_cleanup",
-                    "If progress stalls, withdraw, rebuild, and reapply Main Attack Gate before attacking again.",
-                    "Recovery still used the old readiness threshold.",
-                ),
-            ],
+                    "If progress stalls, withdraw and rebuild to 36 Marines and 8 Siege Tanks.",
+                    "This incorrectly synchronizes recovery with the opening gate.",
+                )
+            )
+        else:
+            assert "post-engagement behavior may change only" in prompt
+            assert "Regenerate the whole strategy.md" in prompt
+        return {
+            "action": "draft_candidate" if optimizer_calls == 1 else "revise_candidate",
+            "patches": patches,
             "expected_effect": "earlier first attack",
             "main_risk": "smaller force",
         }
@@ -492,15 +487,15 @@ def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
     assert paragraph_hash(gate.value) != paragraph_hash(
         next(item for item in StrategyDocument.parse(improvement.files["strategy.md"]).details if item.id == "main_attack_gate").value
     )
-    assert "reapply Main Attack Gate" in next(
+    assert next(
         item.value
         for item in StrategyDocument.parse(improvement.files["strategy.md"]).details
         if item.id == "recovery_and_cleanup"
-    )
+    ) == recovery.value
     del recovery
 
 
-def test_blocking_semantic_retry_exhaustion_rejects_latest_candidate(
+def test_blocking_semantic_retry_exhaustion_uses_latest_candidate(
     monkeypatch,
 ) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
@@ -551,12 +546,10 @@ def test_blocking_semantic_retry_exhaustion_rejects_latest_candidate(
     assert improvement is None
     assert optimizer_calls == 5
     assert errors
-    assert events[-1]["action"] == (
-        "reject_latest_candidate_after_validation_retry_exhausted"
-    )
+    assert events[-1]["valid"] is False
 
 
-def test_underpowered_semantic_note_does_not_block_candidate(
+def test_underpowered_semantic_retry_exhaustion_uses_latest_candidate(
     monkeypatch,
 ) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
@@ -603,14 +596,14 @@ def test_underpowered_semantic_note_does_not_block_candidate(
         initial_tool_observations=[],
     )
 
-    assert result.ok is True
-    assert improvement is not None
-    assert optimizer_calls == 1
-    assert errors == []
-    assert events[-1]["action"] == "draft_candidate"
+    assert result.ok is False
+    assert improvement is None
+    assert optimizer_calls == 5
+    assert errors
+    assert events[-1]["valid"] is False
 
 
-def test_mixed_underpowered_and_blocking_semantic_errors_reject_latest_candidate(
+def test_mixed_underpowered_and_blocking_semantic_errors_use_latest_candidate(
     monkeypatch,
 ) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
@@ -666,14 +659,12 @@ def test_mixed_underpowered_and_blocking_semantic_errors_reject_latest_candidate
     assert result.ok is False
     assert improvement is None
     assert optimizer_calls == 5
-    assert not any("underpowered_implementation" in error for error in errors)
+    assert any("underpowered_implementation" in error for error in errors)
     assert any("missing_dependency" in error for error in errors)
-    assert events[-1]["action"] == (
-        "reject_latest_candidate_after_validation_retry_exhausted"
-    )
+    assert events[-1]["valid"] is False
 
 
-def test_basic_retry_exhaustion_rejects_latest_generated_candidate(
+def test_basic_retry_exhaustion_uses_latest_generated_candidate(
     monkeypatch,
 ) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
@@ -712,64 +703,7 @@ def test_basic_retry_exhaustion_rejects_latest_generated_candidate(
     assert improvement is None
     assert optimizer_calls == 5
     assert errors
-    assert events[-1]["action"] == (
-        "reject_latest_candidate_after_validation_retry_exhausted"
-    )
-
-
-def test_repeated_runtime_boundary_returns_to_analysis_after_two_attempts(
-    monkeypatch,
-) -> None:
-    document = StrategyDocument.parse(TANK_STRATEGY)
-    optimizer_calls = 0
-
-    def fake_llm(prompt: str, **kwargs):
-        nonlocal optimizer_calls
-        if "You are validating a strategy patch" in prompt:
-            return _semantic_payload(
-                valid=False,
-                errors=[
-                    {
-                        "type": "runtime_boundary",
-                        "location": "Main Attack Gate",
-                        "description": "the selected information gate is not executable",
-                        "severity": "blocking",
-                    }
-                ],
-            )
-        optimizer_calls += 1
-        return {
-            "action": "draft_candidate" if optimizer_calls == 1 else "revise_candidate",
-            "patches": [
-                _patch(
-                    document,
-                    "main_attack_gate",
-                    f"Begin the planned attack with {39 - optimizer_calls} Marines and 8 Siege Tanks.",
-                    "This implements the selected readiness hypothesis.",
-                )
-            ],
-            "expected_effect": "different first commitment",
-            "main_risk": "runtime information mismatch",
-        }
-
-    monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
-    monkeypatch.setattr(
-        "evol_agent.core.strategy_patch_validator.call_json_llm", fake_llm
-    )
-    result, improvement, _obs, errors, events = run_optimization_agent_loop(
-        strategy_name="tank",
-        race="terran",
-        battle_analysis=_decision_analysis(),
-        skill_texts={"strategy.md": TANK_STRATEGY},
-        initial_tool_observations=[],
-    )
-
-    assert result.ok is False
-    assert improvement is None
-    assert optimizer_calls == 2
-    assert errors
-    assert result.error.startswith("analysis_replan_required:")
-    assert events[-1]["action"] == "analysis_replan_required"
+    assert events[-1]["valid"] is False
 
 
 def test_optimizer_ignores_one_unchanged_patch_and_uses_other_generated_changes(
@@ -829,6 +763,67 @@ def test_optimizer_ignores_one_unchanged_patch_and_uses_other_generated_changes(
     )
     assert "36 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
     assert ultimate_goal.value in improvement.files["strategy.md"]
+
+
+def test_optimizer_accepts_complete_strategy_document_and_derives_changes(
+    monkeypatch,
+) -> None:
+    complete_candidate = TANK_STRATEGY.replace(
+        "45 completed and living Marines and 10 completed and living Siege Tanks",
+        "36 completed and living Marines and 8 completed and living Siege Tanks",
+    ).replace(
+        "rebuild to 45 Marines and 10 Siege Tanks",
+        "rebuild to 36 Marines and 8 Siege Tanks",
+    )
+
+    def fake_llm(prompt: str, **kwargs):
+        if "You are validating a strategy patch" in prompt:
+            return _semantic_payload()
+        return {
+            "action": "draft_candidate",
+            "strategy_md": complete_candidate,
+            "inheritance": {
+                "keep": [
+                    {
+                        "item": "Marine-Siege Tank gathered push",
+                        "reason": "combat style is preserved",
+                    }
+                ],
+                "revise": [
+                    {
+                        "item": "attack readiness",
+                        "reason": "the selected hypothesis requires earlier contact",
+                    }
+                ],
+                "remove": [],
+            },
+            "expected_effect": "earlier first attack",
+            "main_risk": "smaller first force",
+        }
+
+    monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm", fake_llm
+    )
+
+    result, improvement, _obs, errors, _events = run_optimization_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=_decision_analysis(),
+        skill_texts={"strategy.md": TANK_STRATEGY},
+        initial_tool_observations=[],
+    )
+
+    assert result.ok is True
+    assert errors == []
+    assert improvement is not None
+    assert improvement.raw["operations"] == []
+    assert "36 completed and living Marines" in improvement.files["strategy.md"]
+    changed_targets = {
+        item["target"] for item in improvement.raw["document_changes"]
+    }
+    assert "main_attack_gate" in changed_targets
+    assert "recovery_and_cleanup" not in changed_targets
 
 
 def test_unrelated_paragraphs_and_titles_remain() -> None:

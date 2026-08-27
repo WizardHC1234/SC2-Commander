@@ -4,15 +4,19 @@ from pathlib import Path
 
 from evol_agent.core.capabilities import build_executor_capability_manifest
 from evol_agent.core.optimization_agent_loop import (
+    _candidate_knowledge_run,
     _patches_to_operations,
     run_optimization_agent_loop,
 )
+from evol_agent.core.optimizer_prompt import build_candidate_prompt
 from evol_agent.core.strategy_patch_validator import (
+    _build_contact_timing_report,
     _blocking_semantic_errors,
     build_strategy_patch_validation_prompt,
     validate_strategy_patch_semantics,
     validate_strategy_patch_structure,
 )
+from evol_agent.sc2_data_agent.bridge import run_knowledge_query
 from evol_agent.core.types import BattleAnalysis
 from evol_agent.optimization.strategy_document import StrategyDocument, paragraph_hash
 
@@ -37,6 +41,23 @@ def _semantic_payload(*, valid: bool = True, errors: list | None = None) -> dict
             "total": 119,
             "calculation": "75 Marines plus 44 SCVs equals 119 supply",
             "verdict": "valid",
+        },
+        "style_and_window_audit": {
+            "parent_combat_style": "concentrated timing attack",
+            "candidate_combat_style": "concentrated timing attack",
+            "style_preserved": True,
+            "contact_window_effect": "earlier",
+            "window_change_justified": True,
+            "new_hard_prerequisites": [],
+            "shared_production_tradeoffs": [],
+            "hidden_attack_gate": False,
+            "verdict": "evidence_supported_shift",
+        },
+        "mechanism_history_audit": {
+            "semantic_relation": "no_prior",
+            "related_experiment_ids": [],
+            "repaired_dependencies": [],
+            "verdict": "allowed",
         },
         "errors": list(errors or []),
     }
@@ -68,6 +89,170 @@ def _decision(**overrides) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
+def test_optimizer_prompt_includes_replay_reasoning_without_authorizing_new_scope() -> None:
+    prompt = build_candidate_prompt(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=BattleAnalysis(
+            strategy_name="tank",
+            race="terran",
+            sample_size=2,
+            record_mix="1W/1L",
+            raw=_decision(),
+        ),
+        skill_texts={"strategy.md": TANK_STRATEGY},
+        tool_observations=[],
+        validation_errors=[],
+        candidate=None,
+        knowledge_mode="enabled",
+        decision=_decision(),
+    )
+
+    assert "Replay-grounded reasoning demonstrations" in prompt
+    assert "do not authorize changing its failure stage" in prompt
+    assert "Never copy their numbers into a candidate" in prompt
+
+
+def test_semantic_validation_requires_winning_mechanism_audit() -> None:
+    decision = _decision(
+        plan={
+            "direction": "repair the loss shortfall",
+            "preservation_checks": [
+                {"invariant": "early commitment", "effect": "preserve"}
+            ],
+        }
+    )
+
+    errors = _blocking_semantic_errors(_semantic_payload(), decision=decision)
+
+    assert any("winning_mechanism_audit" in error for error in errors)
+
+
+def test_failure_stage_scope_blocks_unselected_composition_change() -> None:
+    payload = _semantic_payload()
+    payload["failure_stage_scope_audit"] = {
+        "failure_stage": "before_core_mechanism",
+        "composition_changed": True,
+        "composition_change_allowed": False,
+        "retreat_policy_changed": False,
+        "retreat_change_allowed": False,
+        "stage_scope_aligned": True,
+        "reason": "The candidate adds a new unit before the selected failure is repaired.",
+    }
+
+    errors = _blocking_semantic_errors(
+        payload,
+        decision=_decision(
+            plan={
+                "direction": "repair production timing",
+                "composition_change_allowed": False,
+                "retreat_change_allowed": False,
+            }
+        ),
+    )
+
+    assert any("composition_change_allowed is false" in error for error in errors)
+
+
+def test_failure_stage_scope_audit_is_required_for_new_scoped_decisions() -> None:
+    errors = _blocking_semantic_errors(
+        _semantic_payload(),
+        decision=_decision(
+            failure_mode_analysis={
+                "failure_stage": "during_commitment_or_engagement"
+            },
+            plan={
+                "direction": "repair production timing",
+                "composition_change_allowed": False,
+                "retreat_change_allowed": False,
+                "stage_scope_reason": "The selected mechanism does not change either lever.",
+            },
+        ),
+    )
+
+    assert any("did not compare composition and retreat" in error for error in errors)
+
+
+def test_failure_stage_scope_blocks_unselected_retreat_change() -> None:
+    payload = _semantic_payload()
+    payload["failure_stage_scope_audit"] = {
+        "failure_stage": "during_commitment_or_engagement",
+        "composition_changed": False,
+        "composition_change_allowed": False,
+        "retreat_policy_changed": True,
+        "retreat_change_allowed": False,
+        "stage_scope_aligned": True,
+        "reason": "The selected mechanism concerns production, not force preservation.",
+    }
+
+    errors = _blocking_semantic_errors(
+        payload,
+        decision=_decision(
+            plan={
+                "direction": "repair production timing",
+                "composition_change_allowed": False,
+                "retreat_change_allowed": False,
+            }
+        ),
+    )
+
+    assert any("retreat_change_allowed is false" in error for error in errors)
+
+
+def test_failure_stage_scope_allows_evidence_selected_composition_and_retreat_change() -> None:
+    payload = _semantic_payload()
+    payload["failure_stage_scope_audit"] = {
+        "failure_stage": "during_commitment_or_engagement",
+        "composition_changed": True,
+        "composition_change_allowed": True,
+        "retreat_policy_changed": True,
+        "retreat_change_allowed": True,
+        "stage_scope_aligned": True,
+        "reason": "Repeated contact evidence selects both package and force-retention changes.",
+    }
+
+    errors = _blocking_semantic_errors(
+        payload,
+        decision=_decision(
+            plan={
+                "direction": "repair the decisive engagement package",
+                "composition_change_allowed": True,
+                "retreat_change_allowed": True,
+            }
+        ),
+    )
+
+    assert not any("composition scope" in error for error in errors)
+    assert not any("retreat scope" in error for error in errors)
+
+
+def test_semantic_validation_accepts_preserved_winning_chain() -> None:
+    decision = _decision(
+        plan={
+            "direction": "repair the loss shortfall",
+            "preservation_checks": [
+                {"invariant": "early commitment", "effect": "preserve"}
+            ],
+        }
+    )
+    payload = _semantic_payload()
+    payload["winning_mechanism_audit"] = {
+        "parent_winning_chain": "mass, commit, reinforce",
+        "candidate_winning_chain": "mass, commit, reinforce",
+        "reviewed_invariants": [
+            {
+                "invariant": "early commitment",
+                "candidate_effect": "preserved",
+                "reason": "the launch gate is unchanged",
+            }
+        ],
+        "earliest_broken_link": "",
+        "verdict": "preserved",
+    }
+
+    assert _blocking_semantic_errors(payload, decision=decision) == []
 
 
 def _analysis() -> BattleAnalysis:
@@ -103,26 +288,29 @@ def test_validator_prompt_checks_coherent_package_and_identity() -> None:
         capability_manifest=build_executor_capability_manifest("terran"),
     )
     assert "unrelated second" in prompt
-    assert "strategic objective" in prompt
-    assert "If this patch were removed" in prompt
-    assert "required prerequisite, resource/production dependency" in prompt
-    assert "global target changes" in prompt
-    assert "already satisfies" in prompt
-    assert "3. Selected-package coverage" in prompt
-    assert "Do not re-evaluate whether the selected hypothesis" in prompt
-    assert "4. Analysis-optimization alignment" in prompt
-    assert "Do not re-rank the" in prompt
-    assert "match evaluation tests that question" in prompt
-    assert "is non-blocking unless" in prompt
-    assert "strategy_contract as the binding interpretation" in prompt
-    assert "Main Attack Gate exclusively owns" in prompt
+    assert "direct contradiction" in prompt
+    assert "runtime contract" in prompt and "not provide" in prompt
+    assert "defining Champion mechanism" in prompt
+    assert "Do not re-rank the hypothesis" in prompt
+    assert "Test strength" in prompt
+    assert "minimum_material_change" in prompt
+    assert "never from patch count" in prompt
+    assert "production_target_audit" in prompt
+    assert "final_supply" in prompt
+    assert "Judge plan coverage and identity semantically" in prompt
+    assert "isolated keywords" in prompt
     assert "NOT judging whether another causal hypothesis would have been better" in prompt
 
 
 def test_empty_patches_are_rejected() -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
     errors = validate_strategy_patch_structure(
-        decision=_decision(),
+        decision=_decision(
+            plan={
+                "direction": "Test a coordinated retreat revision.",
+                "retreat_change_allowed": True,
+            }
+        ),
         patches=[],
         parent_document=document,
     )
@@ -228,18 +416,19 @@ def test_five_or_more_necessary_patches_are_allowed() -> None:
             document,
             item.id,
             f"Keep the Marine-Tank plan while updating {item.title} for the new readiness rule.",
-            (
-                "This consistency repair replaces an old readiness reference."
-                if item.id == "recovery_and_cleanup"
-                else "This paragraph repeats or defines the readiness rule being tested."
-            ),
+            "This paragraph repeats or defines the readiness rule being tested.",
         )
         for item in document.details
         if item.id in targets
     ]
     assert len(patches) >= 5
     errors = validate_strategy_patch_structure(
-        decision=_decision(),
+        decision=_decision(
+            plan={
+                "direction": "Test a coordinated retreat revision.",
+                "retreat_change_allowed": True,
+            }
+        ),
         patches=patches,
         parent_document=document,
     )
@@ -255,40 +444,22 @@ def test_unrelated_scouting_patch_is_rejected(monkeypatch) -> None:
             "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
             "This paragraph defines the readiness threshold being tested.",
         ),
-        _patch(
-            document,
-            "scouting",
-            "Send extra SCV scouts across the map before every attack.",
-            "Better scouting is useful.",
-        ),
+        {
+            "target": "scouting",
+            "expected_old_hash": "missing",
+            "replacement": "Send extra SCV scouts across the map before every attack.",
+            "why_required": "Better scouting is useful.",
+        },
     ]
-    patched, _changes = document.apply_patch(_patches_to_operations(patches))
-    structure_errors = validate_strategy_patch_structure(
+    errors = validate_strategy_patch_structure(
         decision=_decision(),
         patches=patches,
         parent_document=document,
     )
-    assert any("Commander-owned" in item for item in structure_errors)
-    monkeypatch.setattr(
-        "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: {
-            "valid": False,
-            "errors": [
-                "Scouting was modified but is not required by the supplied hypothesis."
-            ],
-        },
-    )
-    errors = validate_strategy_patch_semantics(
-        decision=_decision(),
-        parent_text=TANK_STRATEGY,
-        candidate_text=patched,
-        patches=patches,
-        capability_manifest=build_executor_capability_manifest("terran"),
-    )
-    assert any("Scouting" in item for item in errors)
+    assert any("scouting and scanning behavior is Commander-owned" in item for item in errors)
 
 
-def test_consistent_readiness_dependency_patches_pass(monkeypatch) -> None:
+def test_first_attack_change_cannot_synchronize_recovery_without_permission() -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
     patches = [
         _patch(
@@ -300,7 +471,7 @@ def test_consistent_readiness_dependency_patches_pass(monkeypatch) -> None:
         _patch(
             document,
             "recovery_and_cleanup",
-            "If progress stalls, withdraw, rebuild, and reapply Main Attack Gate before attacking again.",
+            "If progress stalls, withdraw and rebuild to 36 Marines and 8 Siege Tanks.",
             "This paragraph repeats the old readiness threshold and must stay consistent.",
         ),
         _patch(
@@ -310,29 +481,12 @@ def test_consistent_readiness_dependency_patches_pass(monkeypatch) -> None:
             "Production priority must support the new readiness rule.",
         ),
     ]
-    patched, _changes = document.apply_patch(_patches_to_operations(patches))
-    monkeypatch.setattr(
-        "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: _semantic_payload(),
+    errors = validate_strategy_patch_structure(
+        decision=_decision(),
+        patches=patches,
+        parent_document=document,
     )
-    assert (
-        validate_strategy_patch_structure(
-            decision=_decision(),
-            patches=patches,
-            parent_document=document,
-        )
-        == []
-    )
-    assert (
-        validate_strategy_patch_semantics(
-            decision=_decision(),
-            parent_text=TANK_STRATEGY,
-            candidate_text=patched,
-            patches=patches,
-            capability_manifest=build_executor_capability_manifest("terran"),
-        )
-        == []
-    )
+    assert any("post-engagement behavior may change only" in item for item in errors)
 
 
 def test_conflicting_readiness_thresholds_are_rejected(monkeypatch) -> None:
@@ -414,7 +568,15 @@ def test_runtime_micro_requirements_are_rejected(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: _semantic_payload(),
+        lambda prompt, **kwargs: _semantic_payload(
+            valid=False,
+            errors=[{
+                "type": "runtime_boundary",
+                "location": "engagement_and_reinforcement",
+                "description": "requires unavailable runtime behavior: per-unit micro",
+                "severity": "blocking",
+            }],
+        ),
     )
     errors = validate_strategy_patch_semantics(
         decision=_decision(),
@@ -439,7 +601,15 @@ def test_scan_safety_requirement_is_rejected(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: _semantic_payload(),
+        lambda prompt, **kwargs: _semantic_payload(
+            valid=False,
+            errors=[{
+                "type": "runtime_boundary",
+                "location": "main_attack_gate",
+                "description": "requires unavailable runtime behavior: scan safety",
+                "severity": "blocking",
+            }],
+        ),
     )
     errors = validate_strategy_patch_semantics(
         decision=_decision(),
@@ -467,7 +637,15 @@ def test_unsupported_wake_condition_is_rejected(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: _semantic_payload(),
+        lambda prompt, **kwargs: _semantic_payload(
+            valid=False,
+            errors=[{
+                "type": "runtime_boundary",
+                "location": "main_attack_gate",
+                "description": "unsupported wake condition: enemy_visible_in_target_zone",
+                "severity": "blocking",
+            }],
+        ),
     )
     errors = validate_strategy_patch_semantics(
         decision=_decision(),
@@ -476,7 +654,7 @@ def test_unsupported_wake_condition_is_rejected(monkeypatch) -> None:
         patches=patches,
         capability_manifest=build_executor_capability_manifest("terran"),
     )
-    assert "unsupported wake condition in strategy: enemy_visible_in_target_zone" in errors
+    assert any("unsupported wake condition: enemy_visible_in_target_zone" in item for item in errors)
 
 
 def test_macro_action_in_wake_clause_is_not_treated_as_wake_condition(
@@ -524,7 +702,15 @@ def test_precise_maximum_range_requirement_is_rejected(monkeypatch) -> None:
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
         "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: _semantic_payload(),
+        lambda prompt, **kwargs: _semantic_payload(
+            valid=False,
+            errors=[{
+                "type": "runtime_boundary",
+                "location": "engagement_and_reinforcement",
+                "description": "at maximum range requires unavailable exact positioning",
+                "severity": "blocking",
+            }],
+        ),
     )
     errors = validate_strategy_patch_semantics(
         decision=_decision(),
@@ -544,12 +730,6 @@ def test_non_blocking_semantic_notes_do_not_fail(monkeypatch) -> None:
             "main_attack_gate",
             "Begin the planned attack with 44 Marines and 10 Siege Tanks.",
             "This paragraph defines the readiness threshold being tested.",
-        ),
-        _patch(
-            document,
-            "recovery_and_cleanup",
-            "If progress stalls, withdraw, rebuild, and reapply Main Attack Gate before attacking again.",
-            "This paragraph repeats the same old threshold and must stay consistent.",
         ),
     ]
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
@@ -600,7 +780,7 @@ def test_resumed_unit_without_ultimate_goal_target_is_always_blocking() -> None:
 
     errors = _blocking_semantic_errors(payload)
 
-    assert any("Ultimate Goal for Marauder" in error for error in errors)
+    assert any("production bound for Marauder" in error for error in errors)
 
 
 def test_complete_resumed_unit_and_supply_audit_can_pass() -> None:
@@ -676,12 +856,6 @@ def test_validator_does_not_reject_a_legal_but_weak_patch(monkeypatch) -> None:
             "Begin the planned attack with 44 Marines and 10 Siege Tanks.",
             "This paragraph defines the readiness threshold being tested.",
         ),
-        _patch(
-            document,
-            "recovery_and_cleanup",
-            "If progress stalls, withdraw, rebuild, and reapply Main Attack Gate before attacking again.",
-            "This paragraph repeats the same old threshold and must stay consistent.",
-        ),
     ]
     patched, _changes = document.apply_patch(_patches_to_operations(patches))
     monkeypatch.setattr(
@@ -711,48 +885,36 @@ def test_validator_does_not_reject_a_legal_but_weak_patch(monkeypatch) -> None:
 def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
     calls: list[str] = []
+    optimizer_calls = 0
 
     def fake_llm(prompt: str, **kwargs):
+        nonlocal optimizer_calls
         calls.append(prompt)
         if "You are validating a strategy patch" in prompt:
-            if "withdraw, rebuild, and reapply Main Attack Gate before attacking again" in prompt:
-                return _semantic_payload()
-            return {
-                "valid": False,
-                "errors": [
-                    "Recovery and Cleanup still uses the old readiness threshold."
-                ],
-            }
-        if "Recovery and Cleanup still uses the old readiness threshold." in prompt:
-            return {
-                "action": "revise_candidate",
-                "patches": [
-                    _patch(
-                        document,
-                        "main_attack_gate",
-                        "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
-                        "This paragraph defines the readiness threshold being tested.",
-                    ),
-                    _patch(
-                        document,
-                        "recovery_and_cleanup",
-                        "If progress stalls, withdraw, rebuild, and reapply Main Attack Gate before attacking again.",
-                        "This paragraph repeats the old readiness threshold and must stay consistent.",
-                    ),
-                ],
-                "expected_effect": "earlier first attack",
-                "main_risk": "smaller force",
-            }
-        return {
-            "action": "draft_candidate",
-            "patches": [
+            return _semantic_payload()
+        optimizer_calls += 1
+        patches = [
+            _patch(
+                document,
+                "main_attack_gate",
+                "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
+                "This paragraph defines the readiness threshold being tested.",
+            )
+        ]
+        if optimizer_calls == 1:
+            patches.append(
                 _patch(
                     document,
-                    "main_attack_gate",
-                    "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
-                    "This paragraph defines the readiness threshold being tested.",
+                    "recovery_and_cleanup",
+                    "If progress stalls, withdraw and rebuild to 36 Marines and 8 Siege Tanks.",
+                    "This incorrectly synchronizes recovery with the opening gate.",
                 )
-            ],
+            )
+        else:
+            assert "post-engagement behavior may change only" in prompt
+        return {
+            "action": "draft_candidate" if optimizer_calls == 1 else "revise_candidate",
+            "patches": patches,
             "expected_effect": "earlier first attack",
             "main_risk": "smaller force",
         }
@@ -769,129 +931,352 @@ def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
     )
     assert result.ok
     assert improvement is not None
-    assert any(item.get("action") == "strategy_patch_semantics" for item in events)
-    assert "reapply Main Attack Gate" in next(
+    assert any(item.get("action") == "strategy_patch_structure" for item in events)
+    assert "36 Marines and 8 Siege Tanks" in next(
+        item.value
+        for item in StrategyDocument.parse(improvement.files["strategy.md"]).details
+        if item.id == "main_attack_gate"
+    )
+    assert next(
         item.value
         for item in StrategyDocument.parse(improvement.files["strategy.md"]).details
         if item.id == "recovery_and_cleanup"
+    ) == next(
+        item.value for item in document.details if item.id == "recovery_and_cleanup"
     )
-    assert any(
-        "Fix only the reported patch validation errors" in prompt for prompt in calls
-    )
+    assert any("Regenerate the whole strategy.md" in prompt for prompt in calls)
 
 
-def test_cross_cycle_scan_protocol_is_rejected_deterministically(monkeypatch) -> None:
-    document = StrategyDocument.parse(TANK_STRATEGY)
-    patches = [
-        _patch(
-            document,
-            "main_attack_gate",
-            "Cycle 1 requests a scan; Cycle 2 attacks after scan_ready fires.",
-            "The candidate tries to sequence scouting and commitment.",
-        )
-    ]
-    patched, _changes = document.apply_patch(_patches_to_operations(patches))
-    monkeypatch.setattr(
-        "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: _semantic_payload(),
-    )
-
-    errors = validate_strategy_patch_semantics(
-        decision=_decision(),
-        parent_text=TANK_STRATEGY,
-        candidate_text=patched,
-        patches=patches,
-        capability_manifest=build_executor_capability_manifest("terran"),
-    )
-
-    assert any("multi-cycle state machine" in error for error in errors)
-    assert any("scan_ready fired" in error for error in errors)
-
-
-def test_scans_cannot_own_attack_permission(monkeypatch) -> None:
-    document = StrategyDocument.parse(TANK_STRATEGY)
-    patches = [
-        _patch(
-            document,
-            "scans",
-            "Request Scanner Sweep and hold the attack until vision is available.",
-            "The candidate makes vision mandatory.",
-        )
-    ]
-    patched, _changes = document.apply_patch(_patches_to_operations(patches))
-    monkeypatch.setattr(
-        "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: _semantic_payload(),
-    )
-
-    errors = validate_strategy_patch_semantics(
-        decision=_decision(),
-        parent_text=TANK_STRATEGY,
-        candidate_text=patched,
-        patches=patches,
-        capability_manifest=build_executor_capability_manifest("terran"),
-    )
-
-    assert any("Scans may request information" in error for error in errors)
-
-
-def test_recovery_must_reference_main_gate_instead_of_copying_counts(monkeypatch) -> None:
-    document = StrategyDocument.parse(TANK_STRATEGY)
-    patches = [
-        _patch(
-            document,
-            "recovery_and_cleanup",
-            "Rebuild to 50 Marines and 12 Siege Tanks, then attack again.",
-            "The candidate duplicates a launch condition in recovery.",
-        )
-    ]
-    patched, _changes = document.apply_patch(_patches_to_operations(patches))
-    monkeypatch.setattr(
-        "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: _semantic_payload(),
-    )
-
-    errors = validate_strategy_patch_semantics(
-        decision=_decision(),
-        parent_text=TANK_STRATEGY,
-        candidate_text=patched,
-        patches=patches,
-        capability_manifest=build_executor_capability_manifest("terran"),
-    )
-
-    assert any("reapply Main Attack Gate" in error for error in errors)
-
-
-def test_diagnostic_core_guard_does_not_override_authoritative_plan(monkeypatch) -> None:
-    document = StrategyDocument.parse(TANK_STRATEGY)
-    patches = [
-        _patch(
-            document,
-            "main_attack_gate",
-            "Begin the planned attack with 55 completed and living Marines and 12 completed and living Siege Tanks.",
-            "The candidate raises the threshold.",
-        )
-    ]
-    patched, _changes = document.apply_patch(_patches_to_operations(patches))
-    monkeypatch.setattr(
-        "evol_agent.core.strategy_patch_validator.call_json_llm",
-        lambda prompt, **kwargs: _semantic_payload(),
-    )
-    decision = _decision(
-        core_mechanism_guard={
-            "identity_effect": "preserve",
-            "first_commitment_effect": "same",
-            "relative_power_effect": "preserve",
-            "evidence": ["Game 2 @ 430s"],
+def test_style_audit_allows_unit_change_when_combat_style_is_preserved() -> None:
+    payload = _semantic_payload()
+    payload["style_and_window_audit"].update(
+        {
+            "parent_combat_style": "early one-base pressure",
+            "candidate_combat_style": "early one-base pressure with optional support",
+            "contact_window_effect": "similar",
+            "new_hard_prerequisites": [],
+            "shared_production_tradeoffs": ["one Tech Lab reduces one Marine queue"],
+            "verdict": "preserved",
         }
     )
 
+    assert _blocking_semantic_errors(payload) == []
+
+
+def test_style_audit_blocks_support_unit_as_hidden_attack_gate() -> None:
+    payload = _semantic_payload()
+    payload["style_and_window_audit"].update(
+        {
+            "contact_window_effect": "later",
+            "window_change_justified": False,
+            "new_hard_prerequisites": ["4 Marauders before first attack"],
+            "hidden_attack_gate": True,
+        }
+    )
+
+    errors = _blocking_semantic_errors(payload)
+
+    assert any("hidden attack gate" in item for item in errors)
+    assert any("critical power window" in item for item in errors)
+
+
+def _marine_timing_knowledge() -> dict:
+    return run_knowledge_query(
+        {
+            "id": "QTIMING",
+            "question": "Verify the Marine-Marauder first-contact package.",
+            "actions": [
+                "train_marine",
+                "train_marauder",
+                "build_barracks",
+                "build_barracks_techlab",
+                "build_gas",
+            ],
+            "needs": ["requirements"],
+        },
+        race="terran",
+    )
+
+
+def test_contact_timing_report_calculates_candidate_delay_and_cost() -> None:
+    timing_model = {
+        "parent": {
+            "economy": {
+                "worker_target_before_commitment": 20,
+                "base_target_before_commitment": 1,
+                "gas_workers_before_commitment": 0,
+            },
+            "gate_components": [
+                {"action": "train_marine", "quantity": 20, "production_slots": 6}
+            ],
+            "setup_actions": [
+                {"action": "build_barracks", "quantity": 6, "parallel_slots": 6}
+            ],
+        },
+        "candidate": {
+            "economy": {
+                "worker_target_before_commitment": 20,
+                "base_target_before_commitment": 1,
+                "gas_workers_before_commitment": 6,
+            },
+            "gate_components": [
+                {"action": "train_marine", "quantity": 20, "production_slots": 4},
+                {"action": "train_marauder", "quantity": 4, "production_slots": 2},
+            ],
+            "setup_actions": [
+                {"action": "build_barracks", "quantity": 6, "parallel_slots": 6},
+                {
+                    "action": "build_barracks_techlab",
+                    "quantity": 2,
+                    "parallel_slots": 2,
+                },
+                {"action": "build_gas", "quantity": 2, "parallel_slots": 2},
+            ],
+        },
+        "new_hard_gate_components": ["4 Marauders"],
+        "fallback_preserves_parent_window": False,
+    }
+
+    report = _build_contact_timing_report(
+        timing_model,
+        [_marine_timing_knowledge()],
+    )
+
+    assert report["complete"] is True
+    assert report["parent_earliest_feasible_time_seconds"] == 239.591
+    assert report["candidate_earliest_feasible_time_seconds"] == 374.122
+    assert report["earliest_feasible_timing_delta_seconds"] == 134.531
+    assert report["gate_cost_delta"] == {
+        "minerals": 750.0,
+        "gas": 150.0,
+        "supply": 8.0,
+    }
+
+
+def test_semantic_validation_exports_deterministic_feasibility_audit(monkeypatch) -> None:
+    timing_model = {
+        "parent": {
+            "economy": {
+                "worker_target_before_commitment": 20,
+                "base_target_before_commitment": 1,
+                "gas_workers_before_commitment": 0,
+            },
+            "gate_components": [
+                {"action": "train_marine", "quantity": 20, "production_slots": 6}
+            ],
+            "setup_actions": [
+                {"action": "build_barracks", "quantity": 6, "parallel_slots": 3}
+            ],
+        },
+        "candidate": {
+            "economy": {
+                "worker_target_before_commitment": 20,
+                "base_target_before_commitment": 1,
+                "gas_workers_before_commitment": 0,
+            },
+            "gate_components": [
+                {"action": "train_marine", "quantity": 18, "production_slots": 6}
+            ],
+            "setup_actions": [
+                {"action": "build_barracks", "quantity": 6, "parallel_slots": 3}
+            ],
+        },
+        "new_hard_gate_components": [],
+        "fallback_preserves_parent_window": True,
+    }
+
+    def fake_llm(prompt: str, **kwargs):
+        if prompt.startswith("Extract the production package"):
+            return {"timing_model": timing_model}
+        payload = _semantic_payload()
+        payload["contact_window_audit"] = {
+            "parent_earliest_feasible_time_seconds": 205.101,
+            "candidate_earliest_feasible_time_seconds": 198.0,
+            "own_package_at_candidate_contact": "18 Marines",
+            "opponent_package_at_candidate_contact": "recorded early defense",
+            "opponent_growth_during_wait": "none; candidate is earlier",
+            "matchup_and_counter_assessment": "same matchup at an earlier window",
+            "reinforcement_and_continuity": "six Barracks remain available",
+            "relative_advantage": "preserves",
+            "evidence": ["Game 1 @ 205s"],
+            "verdict": "favorable",
+        }
+        return payload
+
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        fake_llm,
+    )
+    audit: dict = {}
     errors = validate_strategy_patch_semantics(
-        decision=decision,
-        parent_text=TANK_STRATEGY,
-        candidate_text=patched,
-        patches=patches,
-        capability_manifest=build_executor_capability_manifest("terran"),
+        decision=_decision(
+            plan={
+                "direction": "test an earlier Marine commitment",
+                "contact_window_effect": "earlier",
+            }
+        ),
+        parent_text="parent",
+        candidate_text="candidate",
+        patches=[],
+        knowledge_runs=[_marine_timing_knowledge()],
+        audit_output=audit,
     )
 
     assert errors == []
+    report = audit["contact_timing_report"]
+    assert report["complete"] is True
+    assert report["candidate_earliest_feasible_time_seconds"] < report["parent_earliest_feasible_time_seconds"]
+
+
+def test_candidate_knowledge_resolves_irregular_plurals_aliases_and_dependencies() -> None:
+    strategy = (
+        "Build two Factories with Factory Tech Labs. Research Combat Shield, "
+        "then produce Marines and Siege Tanks."
+    )
+
+    run = _candidate_knowledge_run(
+        candidate_text=strategy,
+        parent_text=strategy,
+        race="terran",
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+
+    assert run is not None and run["ok"] is True
+    packet = run["dataset_evidence"][0]["result"]
+    actions = {row["action"] for row in packet["action_facts"]}
+    assert "build_factory" in actions
+    assert "build_factory_techlab" in actions
+    assert "research_shieldwall" in actions
+    assert "train_siege_tank" in actions
+
+
+def test_contact_timing_missing_worker_target_is_reported_without_invalidating() -> None:
+    knowledge = _candidate_knowledge_run(
+        candidate_text=(
+            "Build two Factories with Factory Tech Labs. Research Combat Shield, "
+            "then gather ten Siege Tanks."
+        ),
+        parent_text="Build two Factories with Factory Tech Labs and gather ten Siege Tanks.",
+        race="terran",
+        capability_manifest=build_executor_capability_manifest("terran"),
+    )
+    timing_model = {
+        "parent": {
+            "gate_components": [
+                {"action": "train_siege_tank", "quantity": 10, "production_slots": 2}
+            ],
+            "setup_actions": [
+                {"action": "build_factory", "quantity": 2, "parallel_slots": 2},
+                {"action": "build_factory_techlab", "quantity": 2, "parallel_slots": 2},
+            ],
+        },
+        "candidate": {
+            "gate_components": [
+                {"action": "train_siege_tank", "quantity": 10, "production_slots": 2}
+            ],
+            "setup_actions": [
+                {"action": "build_factory", "quantity": 2, "parallel_slots": 2},
+                {"action": "build_factory_techlab", "quantity": 2, "parallel_slots": 2},
+                {"action": "research_combat_shield", "quantity": 1, "parallel_slots": 1},
+            ],
+        },
+    }
+
+    report = _build_contact_timing_report(timing_model, [knowledge])
+
+    assert report["complete"] is True
+    assert "worker target missing; simulation keeps the initial 8 SCVs" in report["evidence_warnings"]
+
+
+def test_contact_window_audit_blocks_later_package_with_worse_relative_position() -> None:
+    decision = _decision(
+        plan={
+            "direction": "add a support package",
+            "contact_window_effect": "later",
+            "new_hard_prerequisites": ["4 support units"],
+            "production_tradeoffs": ["two core production slots become support slots"],
+        }
+    )
+    payload = _semantic_payload()
+    payload["contact_window_audit"] = {
+        "parent_earliest_feasible_time_seconds": 205.1,
+        "candidate_earliest_feasible_time_seconds": 327.0,
+        "own_package_at_candidate_contact": "20 Marines and 4 Marauders",
+        "opponent_package_at_candidate_contact": "enemy tech and army have grown",
+        "opponent_growth_during_wait": "Factory and support tech complete",
+        "matchup_and_counter_assessment": "the added package does not offset growth",
+        "reinforcement_and_continuity": "core production falls from six to four slots",
+        "relative_advantage": "worsens",
+        "evidence": ["Game 10 @ 323s: opponent technology and army increase"],
+        "verdict": "unfavorable",
+    }
+    report = {
+        "complete": True,
+        "parent_earliest_feasible_time_seconds": 205.1,
+        "candidate_earliest_feasible_time_seconds": 327.0,
+        "earliest_feasible_timing_delta_seconds": 121.9,
+        "gate_cost_delta": {"minerals": 750.0, "gas": 150.0, "supply": 8.0},
+    }
+
+    errors = _blocking_semantic_errors(
+        payload,
+        decision=decision,
+        contact_timing_report=report,
+    )
+
+    assert any("relative power at contact" in item for item in errors)
+    assert any("contact-window verdict" in item for item in errors)
+
+
+def test_contact_window_uncertainty_does_not_reject_an_executable_candidate() -> None:
+    decision = _decision(
+        plan={
+            "direction": "change the fighting package",
+            "contact_window_effect": "unknown",
+            "new_hard_prerequisites": [],
+            "production_tradeoffs": ["resource allocation changes"],
+        }
+    )
+    payload = _semantic_payload()
+    payload["contact_window_audit"] = {
+        "parent_earliest_feasible_time_seconds": 205.1,
+        "candidate_earliest_feasible_time_seconds": 213.1,
+        "own_package_at_candidate_contact": "calculated package",
+        "opponent_package_at_candidate_contact": "not recorded near this time",
+        "opponent_growth_during_wait": "unknown",
+        "matchup_and_counter_assessment": "insufficient trajectory coverage",
+        "reinforcement_and_continuity": "must be measured in candidate matches",
+        "relative_advantage": "unknown",
+        "evidence": [],
+        "verdict": "unsupported",
+    }
+    report = {
+        "complete": True,
+        "parent_earliest_feasible_time_seconds": 205.1,
+        "candidate_earliest_feasible_time_seconds": 213.1,
+        "earliest_feasible_timing_delta_seconds": 8.0,
+        "evidence_warnings": [],
+    }
+
+    errors = _blocking_semantic_errors(
+        payload,
+        decision=decision,
+        contact_timing_report=report,
+    )
+
+    assert not any("contact-window" in item for item in errors)
+    assert not any("relative power at contact" in item for item in errors)
+
+
+def test_mechanism_history_audit_blocks_semantic_rename() -> None:
+    payload = _semantic_payload()
+    payload["mechanism_history_audit"] = {
+        "semantic_relation": "equivalent_to_prior",
+        "related_experiment_ids": ["battlecruiser:g001:harder:battlecruiser_opt2"],
+        "repaired_dependencies": [],
+        "verdict": "blocked",
+    }
+
+    errors = _blocking_semantic_errors(payload)
+
+    assert any("mechanism history" in item for item in errors)

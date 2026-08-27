@@ -159,6 +159,11 @@ def run_knowledge_query(
         if str(value).strip()
     ]
     hypothesis_scope = str(item.get("hypothesis_scope") or "").strip()
+    competing_explanations = [
+        str(value).strip()
+        for value in item.get("competing_explanations") or []
+        if str(value).strip()
+    ][:4]
     try:
         packet = build_strategy_knowledge(
             item,
@@ -177,6 +182,7 @@ def run_knowledge_query(
             "query_reason": query_reason,
             "evidence_refs": evidence_refs,
             "hypothesis_scope": hypothesis_scope,
+            "competing_explanations": competing_explanations,
             "answer": "",
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -209,6 +215,7 @@ def run_knowledge_query(
         "query_reason": query_reason,
         "evidence_refs": evidence_refs,
         "hypothesis_scope": hypothesis_scope,
+        "competing_explanations": competing_explanations,
         "answer": answer,
         "error": error,
         "verification_schema": KNOWLEDGE_VERIFICATION_SCHEMA,

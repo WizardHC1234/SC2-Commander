@@ -11,6 +11,7 @@ from .context import (
     render_skill_context,
 )
 from .optimizer_prompt import build_candidate_prompt
+from .replay_reasoning_examples import REPLAY_GROUNDED_REASONING_EXAMPLES
 from .strategy_patch_validator import build_strategy_patch_validation_prompt
 from .types import BattleAnalysis, ToolObservation
 
@@ -26,6 +27,8 @@ STRATEGY_MARKDOWN_FORMAT = """strategy.md format:
 
 RUNTIME_CONTRACT = """Current runtime contract:
 - strategy.md is the only evolvable strategic-intent source. Runtime code under commander/ is fixed.
+- Summary describes the strategy identity and win mechanism; Details contains its executable strategic instructions. The first-attack gate is not a reusable recovery threshold.
+- Every match has a hard 1800-second (30-minute) game limit. Victory requires destroying all enemy structures before that limit; winning one engagement or clearing known bases is not sufficient.
 - One Commander receives the full structured observation and strategy, then emits absolute macro targets, group-level army commands, optional scan/scout requests, and one wake event.
 - Macro targets execute concurrently and replace the previous target list. Every still-needed unmet target must be emitted again; ordering expresses resource priority.
 - The runtime expands structure prerequisites and automatically adds build_gas when selected actions require gas. Action descriptions are authoritative for costs, supply, duration, producers, research locations, and prerequisites.
@@ -34,29 +37,15 @@ RUNTIME_CONTRACT = """Current runtime contract:
 - At most one SCV scout is active. Scanner Sweep costs Orbital energy. Every decision has one observable wake condition plus a runtime fallback deadline.
 - Observable enemy information includes currently visible contents and last_seen_enemy_contents with seconds_since_last_seen. Scan readiness is observable. Each Commander cycle is one decision; later wakes re-evaluate the same strategy after a scan or scout request.
 - Do not require judging whether a Scanner Sweep is "safe", hidden opponent truth, or finishing a scan-then-commit sequence inside one decision frame.
-- A scan request and scan_ready may trigger a later decision, but strategy.md cannot remember that a scan completed, test whether scan_ready previously fired, or use raw observation-field names such as last_seen_enemy_contents as stateful conditions. Do not use runtime transformation identifiers (for example SiegeTankSieged or VikingFighter) as strategy conditions; transformations and their states are runtime-owned evidence only.
 - Python/Sharpy handles worker distribution, mining micro, repairs, pathfinding, formations, abilities, targeting, transport handling, transformations, and other unit-level micro.
 """
 
 
 CONTROLLABLE_OPTIMIZATION_SCOPE = """Controllable strategy scope:
 - Objective: improve expected match win rate across repeated games while preserving the strategy's defining style where it remains viable. Completeness, variety, and use of every available action are not objectives.
-- The only primary optimization domains are: economy and expansion targets;
-  production-building and unit-count targets; technology and upgrade paths; army
-  composition; and attack-readiness conditions and strategic objectives.
-- Scouting, scanning, wake events, decision-cycle protocols, reinforcement routing,
-  retreat, recovery, and cleanup are not optimization domains. Preserve their
-  existing behavior. A related paragraph may change only to remove a stale reference
-  created by an allowed modification, and that repair must not introduce a new rule.
-- Strategy identity defines what must be preserved; it is not an extra optimization category.
-- Before ranking failures, infer the strategy's style, core win mechanism, critical
-  timing or power spike, core commitments, and flexible components directly from
-  the complete strategy.md. Do not infer identity from the strategy filename or a
-  hard-coded strategy-family profile. Separate the defining mechanism from its
-  current numerical implementation: a worker count, producer count, unit target,
-  timing, or readiness threshold is adjustable unless the strategy explicitly
-  makes that exact value indispensable to the win mechanism. Merely appearing in
-  strategy.md does not make a number a core commitment.
+- Infer the strategy identity and win mechanism from Summary and the complete Details rather than from a hard-coded strategy profile.
+- Evolvable strategy content includes economy and expansion, production and unit targets, technology and upgrades, composition, attack readiness and objective, and evidence-supported recovery behavior.
+- Scouting and scans may support a named strategic decision or locate remaining enemy structures, but must not become an independent objective or a hidden attack gate. Wake events, route waypoints, unit-level micro, and runtime state machines remain executor concerns.
 - Select the highest-priority evidence-supported failure mode using the shared SC2
   Strategic Priority below. Once selected, change every coherent dependency needed
   to produce a material combat-outcome difference; do not shrink the intervention
@@ -68,58 +57,46 @@ Strategic search guidance (not an exhaustive enum; one generation tests one prim
 - Production capacity and resource priority: producer counts, when to scale or stop, and shared mineral/gas/producer/tech-lab ordering.
 - Technology and upgrades: timing and whether an upgrade is required before a push; use verified SC2 facts for cost, duration, and prerequisites.
 - Unit composition and support-unit balance: ratios and stage targets while keeping the defining army concept.
-- Attack readiness and strategic objective: living-force, upgrade, or other currently
-  observable readiness conditions, plus the semantic attack objective. Do not design
-  an information-acquisition workflow or a wake-event implementation.
+- Attack readiness, commitment threshold, and timing: observable living-force, upgrade, regroup, and intel gates rather than a clock as the only commit rule.
+- Reinforcement and post-engagement behavior: preserve pressure or rebuild coherently according to the strategy style. The Main Attack Gate applies only to the first attack and must not be copied into Recovery and Cleanup.
 """
 
 
 SC2_STRATEGIC_PRIORITY = """## SC2 Strategic Priority
 
-The external objective is match victory through a favorable decisive engagement or
-survival with enough combat power to continue the strategy's win plan. Timing,
-production, economy, upgrades, scouting, and compliance are mechanisms, not goals.
+The final objective is match victory. Diagnose strategy changes through the combat
+chain that produces it, without using a fixed category ranking.
 
-Use one ordered analysis:
-1. Infer the strategy's core win mechanism and critical relative power window from
-   the complete strategy.md.
-2. Compare wins and losses to locate the first failure: before the mechanism forms,
-   while it is executed, or after it has succeeded. Optimize that first failed stage;
-   do not replace it with a later symptom.
-3. Within that stage, test army-package viability, survival to the intended window,
-   commitment timing, production/resource feasibility, technology, and composition,
-   using the strongest repeated evidence rather than category labels.
-4. Select one strategy-fixable causal hypothesis and include every dependency needed
-   to create a material combat-outcome difference.
+1. Infer the strategy's style, core win mechanism, and intended relative power
+   window from strategy.md rather than its filename.
+2. For each repeated decisive outcome, compare commitment and first-contact timing,
+   the own and opponent packages at contact, force retained and reinforced after
+   contact, and any observed production/resource/supply bottleneck.
+3. Compare the opponent package at earlier observed states, actual contact, and a
+   later state when available. A larger own force is not automatically better if
+   waiting lets the opponent reach a stronger counter package.
+4. Select the earliest shared strategy-fixable break in this chain. Composition,
+   support, upgrades, timing, production, economy, recovery, and information are
+possible causes only when match evidence connects them to a better or more
+survivable engagement.
 
-This is not a fixed ranking enum or an exhaustive enum; evidence determines which
-explanation survives within the first failed stage. It is not a deterministic category selector.
+Keep the stages distinct during diagnosis. Main Attack Gate controls only the first
+planned commitment. Once that commitment occurs, evaluate Engagement and
+Reinforcement and Recovery and Cleanup from post-contact evidence; never treat
+changing the opening gate as automatic permission to rewrite recovery behavior.
 
-For timing strategies, a nominally stronger but later army is not an improvement
-unless evidence shows that own gains exceed opponent growth. For scaling strategies,
-preserve survival and progression to the intended power spike. If losing games
-already reached the planned gate, do not blame gate attainment without explaining
-why the reached package or relative window was still inadequate.
+If the planned package is reached but repeatedly collapses, do not merely produce
+more of the same package. Check matchup, support, upgrades, engagement timing and
+execution. Conversely, losing at the current or a later contact does not rule out
+an earlier pressure window; compare the opponent's growth and successful earlier
+counterexamples. If the first fight is viable but the army cannot continue, examine
+reinforcement, production continuity, economy and recovery.
 
-Information is useful only when a decision-time observable fact changes an
-executable composition, production, timing, commitment, or recovery choice.
-Replay-only enemy_truth is diagnosis-only. Scouting or scanning that leaves the
-army, target, and commitment unchanged must remain optional and non-blocking.
-Scouting, scanning, and wake behavior may explain what the Commander knew or when it
-redecided, but EvolAgent must not optimize those mechanisms or add new scan/scout/
-wake instructions to strategy.md.
-
-An observed opponent feature is diagnostic evidence by default, not a strategy
-condition. Promote it to a live control condition only when cross-match evidence
-shows that the condition discriminates between situations requiring different
-actions, the alternative action is concrete and executable, and a simpler
-unconditional change cannot test the same hypothesis. A counter, technology, or
-structure appearing in both successful and failed matches is not discriminative by
-itself. Refine the condition or keep it diagnosis-only. Prefer a sufficient plan
-with fewer new branches, information requests, and cross-cycle dependencies.
-
-Do not use static defensive construction as the primary mechanism, and do not hide
-Commander/runtime execution defects inside a more verbose strategy rule.
+Scouting or scanning is useful only when the information changes a named strategic
+decision or locates surviving enemy structures needed to finish the match. The
+30-minute limit makes timely cleanup part of victory: analyze whether the strategy
+leaves enough time to find and destroy all enemy bases and structures. Do not use
+static defensive structures as the primary evolution mechanism.
 """
 
 
@@ -171,7 +148,7 @@ implementation from strategy text or final match result.
 
 Read the complete match timeline from beginning to end. Compress it into a factual interaction timeline.
 
-Select a small number of important recorded interactions, typically 8 to 15 when the match contains that much change. Prefer opening formation, clear economy or technology changes, the last recorded state before the first commitment, the first attack command, first important enemy contact, major fights, the first appearance of a materially stronger enemy package, retreat or regroup, base losses, and the end state. Preserve enough timestamped rows to compare how both armies changed before, at, and after first contact. Do not copy every row.
+Select a small number of important recorded interactions, typically 8 to 15 when the match contains that much change. Prefer opening formation, clear economy or technology changes, first important enemy contact, main attack, major fights, retreat or regroup, base losses, and the end state. Do not copy every row.
 
 Record only information explicitly present in the timeline. If a snapshot has army and economy but no buildings or technology, omit those fields. Do not invent, guess, or fill missing state.
 
@@ -191,9 +168,11 @@ record supports them:
 - major_engagements: major army contacts, including both forces before/after the
   contact and whether the force held, broke through, withdrew, or was destroyed.
   When a runtime auto-retreat appears, record the force at the last pre-contact row,
-  at the retreat trigger, and after retreat when available. State whether most losses
-  happened before or after the trigger. Never describe auto-retreat as the cause of
-  the collapse when the recorded force had already collapsed before it fired.
+  the configured retreat_ratio and local own/enemy power ratio at the trigger, and
+  the force after retreat when available. State whether most losses happened before
+  or after the trigger and whether the surviving force later regrouped or re-engaged.
+  Never describe auto-retreat as the cause of the collapse when the recorded force
+  had already collapsed before it fired.
 
 Do not infer an attack merely because the opponent owned an army. If the record
 does not establish pressure or a major engagement, return an empty list.
@@ -231,7 +210,10 @@ Return one JSON object with exactly these top-level fields:
       "enemy_observed": "what Commander knew",
       "enemy_truth": "Replay-only force when available",
       "own_force_after": "next recorded post-contact force",
+      "own_reinforcement_after": "new combat units or regrouping recorded after contact",
+      "production_context_before": "recorded producers, resources, supply block, or empty",
       "runtime_override": "auto-retreat trigger and force at trigger, or empty",
+      "retreat_policy": "configured retreat_ratio, local power ratio at trigger, and later regroup/re-engagement, or empty",
       "loss_timing": "losses_before_override|override_before_losses|not_observed",
       "outcome": "breakthrough|held|withdrawal|army_broken|unclear"
     }}
@@ -263,7 +245,6 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
                     for key in (
                         "record_mix",
                         "strategy_contract",
-                        "strategy_mechanism_assessment",
                         "repeated_failures",
                         "wins_to_preserve",
                         "cross_outcome_comparison",
@@ -328,8 +309,6 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
                 "mutation_parent",
                 "comparison_champion",
                 "candidate",
-                "strategy_contract",
-                "strategy_mechanism_assessment",
                 "mechanism_family",
                 "hypothesis",
                 "implementation_verdict",
@@ -341,11 +320,13 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
                 "posterior_probability_better",
                 "score_delta",
                 "primary_change",
-                "selected_changes",
                 "primary_lever",
                 "lesson",
                 "reason",
                 "inheritance",
+                "salvageable_changes",
+                "failed_dependencies",
+                "combat_evidence",
             )
             compact_item = {key: item.get(key) for key in keep if key in item}
             for key in ("hypothesis", "primary_change", "lesson"):
@@ -354,17 +335,32 @@ def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
             runtime_findings = compact_item.get("runtime_findings")
             if isinstance(runtime_findings, list):
                 compact_item["runtime_findings"] = runtime_findings[:3]
-            selected_changes = compact_item.get("selected_changes")
-            if isinstance(selected_changes, list):
-                compact_item["selected_changes"] = [
-                    {
-                        key: change.get(key)
-                        for key in ("target", "change", "why")
-                        if key in change
-                    }
-                    for change in selected_changes[:4]
-                    if isinstance(change, dict)
-                ]
+            for list_key in (
+                "salvageable_changes",
+                "failed_dependencies",
+                "combat_evidence",
+            ):
+                if isinstance(compact_item.get(list_key), list):
+                    compact_item[list_key] = compact_item[list_key][:4]
+            tested_changes: list[dict[str, str]] = []
+            for patch in item.get("patches") or []:
+                if not isinstance(patch, dict):
+                    continue
+                target = str(patch.get("target") or "").strip()
+                replacement = str(
+                    patch.get("replacement") or patch.get("value") or ""
+                ).strip()
+                if target or replacement:
+                    tested_changes.append(
+                        {
+                            "target": target,
+                            "replacement": replacement[:500],
+                        }
+                    )
+                if len(tested_changes) >= 8:
+                    break
+            if tested_changes:
+                compact_item["tested_changes"] = tested_changes
             evidence = item.get("experiment_evidence")
             if isinstance(evidence, dict):
                 compact_evidence = {
@@ -431,13 +427,15 @@ Experiment-history rules:
 - Rejected: candidate score was strictly lower.
 - Inconclusive: the two scores were equal; not proof for or against.
 - Same paragraph target is not the same experiment.
-- Compare the actual selected_changes and score deltas in chronological order.
-  Treat repeated changes to the same target in the same direction as one explored
-  trajectory even when mechanism_family is renamed or the numerical dose changes.
-  A stronger dose after a contradicted implementation requires new trajectory
-  evidence for a threshold effect; "the previous value was not large enough" is
-  not new evidence. When successive doses worsen both the mechanism observation
-  and match score, change causal direction instead of escalating again.
+- Compare the concrete tested_changes and score_delta across generations. If a
+  quantity, gate, technology commitment, or composition share repeatedly moves in
+  one direction while results decline, treat that directional trend as evidence
+  against blindly increasing the same dose. It is not a permanent ban: continuing
+  the direction requires a new causal explanation and evidence that distinguishes
+  it from the failed sequence.
+- Every new candidate starts from the official Champion. Non-accepted candidates
+  contribute only experiment evidence; do not carry their text into the next
+  strategy or describe their changes as inherited strengths.
 - A parent_analysis_seed is the previous synthesis of a subset of the current
   records. Preserve findings still supported by the full batch, revise findings
   contradicted by newly added matches, and do not count the seed as another match.
@@ -501,16 +499,21 @@ Executor capability manifest:
 
 Identify:
 
-1. Strategy identity and core mechanism
-Read the complete strategy.md before interpreting any match. Infer its gameplay
-style, the mechanism by which it is intended to create a winning engagement, its
-critical timing window or power spike, the commitments that define the strategy,
-and the components that can change without replacing it. Use strategy content, not
-the strategy filename or a hard-coded family profile. This contract must be formed
-before weaknesses are ranked. Preserve the causal idea rather than automatically
-preserving its current numerical settings. Put current quantities and readiness
-thresholds in flexible_components unless the text and match evidence show that the
-exact value itself defines the strategy.
+1. Strategy contract
+Before ranking problems, infer the current strategy's gameplay style, core win
+mechanism, critical relative-power window, commitments that define its identity,
+and components that may be adjusted. This contract must come from the supplied
+strategy text, not from a fixed profile or the strategy filename. Then ground that
+intent in successful trajectories: identify the repeated sequence that actually
+created advantage in wins and protect the parts of that sequence that the losses do
+not disprove.
+
+Before listing independent strengths and weaknesses, perform one direct outcome
+contrast. Ask whether losses failed because the winning mechanism was not reproduced
+or because the same mechanism was reproduced and still proved insufficient. Do not
+replace a validated winning mechanism merely to patch the final enemy composition in
+a small number of losses. Preserve the earliest causal difference between wins and
+losses, not only their final states.
 
 2. Strengths
 Repeated behaviors or strategy mechanisms that appear to contribute to successful games
@@ -536,15 +539,6 @@ Separate upgrade differences from unit counters, support balance, defender advan
 engagement conditions, and execution. If a counter, synergy, or upgrade effect is
 needed to distinguish explanations, request a bounded knowledge query.
 
-Treat composition as a time-varying relationship, not a final-state label. For each
-repeated decisive pattern, reconstruct when the own intended package became usable,
-when the attack was ordered, when first contact occurred, and how the opponent's
-army or counter package changed across that interval. Compare at least one earlier
-recorded opportunity, actual contact, and a later state when the summaries contain
-them. State whether moving contact earlier, keeping it unchanged, or delaying it
-would plausibly improve the relative power window. Do not assume that waiting for a
-larger own army is beneficial when the opponent is growing or completing counters.
-
 7. Retrieval plan
 Create a bounded, evidence-linked query plan before diagnosis:
 - First aggregate opponent pressure across the whole batch: first pressure/contact
@@ -561,12 +555,6 @@ Use concrete evidence such as:
 "Game 3 @ 420s: ..."
 
 Rules:
-- First compare whether the core win mechanism and critical timing were realized
-  in wins and losses. Do not let a later unit counter or final-state composition
-  overwrite an earlier failure to realize the strategy's intended advantage.
-- Separate army readiness time, attack-command time, travel or staging delay, and
-  first-contact time. A strategy may have enough units on time yet miss its window
-  because commitment or arrival is late.
 - Compare wins and losses whenever possible.
 - Every opponent_pressure_pattern and matchup_pattern must state how many matches
   support it and include at least one counterexample when one exists.
@@ -582,6 +570,16 @@ Rules:
 - Keep army-fight evidence primary. Earlier attacks, lower resource banks, more
   production, or more scouting are not strengths by themselves unless they create
   a more favorable or more survivable decisive engagement.
+- For every repeated decisive failure, compare the evidence available for four
+  linked facts: contact timing relative to both sides' power growth, own and enemy
+  combat packages at contact, force retained and reinforced after contact, and any
+  observed producer/resource/supply bottleneck. These are evidence checks, not a
+  fixed optimization-category selector. Do not infer missing values.
+- Treat retreat_ratio as part of the engagement policy, not as a standalone score.
+  Compare its configured value with the local power ratio at the trigger, losses
+  before and after the trigger, surviving main-force power, and time to regroup or
+  re-engage. A higher or lower ratio is useful only when that complete sequence
+  improves the strategy's intended pressure, survival, or repeated fighting.
 - Use rejected-experiment evidence to avoid treating an already-failed lever as a fresh unexplained weakness.
 - {knowledge_rule}
 - Never ask the knowledge database for optimal strategy, match diagnosis, Commander behavior, movement behavior, or micro.
@@ -594,13 +592,26 @@ Return one JSON object only:
   "action": "discover_batch",
   "analysis": {{
     "strategy_contract":{{
-      "style":"gameplay style inferred from strategy.md",
-      "core_win_mechanism":"how this strategy is intended to create a winning engagement",
-      "critical_timing_or_power_spike":"relative timing window or power state that makes the mechanism work",
-      "core_commitments":["behavior whose removal would replace the strategy"],
-      "flexible_components":["component that may change without replacing the strategy"],
-      "optimization_boundary":"what evolution must preserve unless repeated evidence disproves it",
+      "identity":"short description of the current strategy",
+      "style":"gameplay style inferred from the strategy text",
+      "core_win_mechanism":"how this strategy is intended to create a winning advantage",
+      "critical_power_window":"the relative timing or completed package on which that mechanism depends",
+      "observed_winning_signature":"repeated causal sequence observed in successful games",
+      "winning_evidence":["Game 1 @ 420s: evidence for that sequence"],
+      "core_commitments":["defining commitment that should normally be preserved"],
+      "protected_invariants":["winning condition that a candidate must retain unless directly disproved"],
+      "flexible_components":["component that evidence may justify changing"],
+      "optimization_boundary":"what must not be changed into another strategy family",
       "direction":"preserve|adjust|replace"
+    }},
+    "outcome_contrast":{{
+      "winning_pattern":"what repeatedly works in wins",
+      "winning_evidence":["Game 1 @ 420s: ..."],
+      "loss_shortfall":"earliest important deviation or insufficiency in losses",
+      "loss_evidence":["Game 2 @ 390s: ..."],
+      "loss_relationship_to_wins":"winning_mechanism_not_reproduced|winning_mechanism_reproduced_but_failed|mixed|uncertain",
+      "causal_difference":"why the compared trajectories diverge",
+      "preservation_rule":"what later optimization must retain while fixing the loss shortfall"
     }},
     "strengths":[
       {{"pattern":"repeated successful behavior","evidence":["Game 1 @ 420s: ..."]}}
@@ -708,42 +719,11 @@ Retrieval rules:
 - Treat recorded timeline rows as the authority for command, observation, zone, and engagement-attribution claims. If a discovery sentence conflicts with the queried rows, revise or reject the discovery sentence.
 - Historical experiments provide positive and negative intervention evidence. A similar rejected candidate is evidence against repeating the same concrete package, not automatic proof that every stronger or corrected version of the hypothesis is false.
 - Static game knowledge can support costs, prerequisites, effects, counters, and synergies. It cannot diagnose a match by itself and cannot override contrary trajectory evidence.
-- A database result is a factual premise, not a policy proposal. It must not promote
-  a counter, technology, unit, or structure into a scouting condition, attack gate,
-  target branch, or delay rule unless match evidence independently passes the
-  information-control promotion test below.
 - Any numerical production-time, throughput, or continuous resource-demand claim must quote a deterministic calculation returned by the knowledge query. If the required calculation is absent, keep the claim qualitative or request more evidence; do not calculate it mentally.
 - A production-demand calculation does not establish resource income. Never compare demand against a claimed mineral or gas income unless that income was returned by a deterministic query or measured from match records.
 - Every retrieved item used in the final diagnosis must be named in retrieval_assessment. Record conflicting evidence instead of silently dropping it.
 
-First, re-evaluate the strategy contract inferred in discovery. Confirm or revise
-the style, core win mechanism, critical timing or power spike, core commitments,
-and flexible components using the complete strategy.md. Do this before ranking
-weaknesses. Never substitute a unit name for the strategy's causal mechanism, and
-do not treat the current numerical attack gate as immutable merely because it is
-written in the parent strategy. Preserve the intended engagement mechanism; allow
-the gate value to move when evidence supports an earlier or later realization.
-
-Next, compare wins and losses to determine whether the core mechanism was actually
-realized. State whether the repeated failure occurs before the mechanism is formed,
-during its intended execution, after it has succeeded, or in mixed stages. In
-particular, distinguish "the planned army eventually fought" from "the strategy
-reached the relative power window that makes that army effective."
-
-Then re-evaluate the remaining discovery findings.
-
-Before choosing an optimization direction, reconstruct the relative power window
-across time. Compare the own package and opponent package at the last usable state
-before commitment, at actual first contact, and after the opponent's next material
-power increase when those rows exist. Explicitly compare three alternatives:
-earlier contact with a smaller own force, current contact, and later contact with a
-larger own force but a more developed opponent. The conclusion may favor earlier,
-unchanged, or later commitment; never assume one direction from strategy name.
-When earlier contact is selected, compare at least a lower readiness threshold and
-faster attainment of the current threshold as alternative implementations. Choose
-between them from observed force viability, travel time, production timing, and the
-opponent package expected at contact; do not preserve the current threshold by
-default.
+First, re-evaluate the discovery findings.
 
 For every important weakness:
 - confirm it,
@@ -755,7 +735,17 @@ Do not defend a discovery finding merely because it appeared in Round 1.
 
 Preserve strengths that remain supported by evidence.
 
+Confirm or revise discovery.outcome_contrast before selecting an intervention. The
+winning pattern and its preservation rule are causal constraints, not decorative
+summary text. If losses usually fail to reproduce the winning mechanism, repair the
+earliest missing link and do not add a later power spike. A later commitment is
+eligible only when repeated losses reproduce the Champion's winning mechanism and
+still fail, and the evidence explains why the delayed package should meet a more
+favorable opponent despite enemy growth.
+
 {SC2_STRATEGIC_PRIORITY}
+
+{REPLAY_GROUNDED_REASONING_EXAMPLES}
 
 Before selecting the final intervention, identify the 2-4 strongest plausible
 explanations for the priority failure pattern that the current evidence actually
@@ -784,17 +774,6 @@ include the necessary survival prerequisites or choose the earlier survival fail
 as the priority failure mode. Do not spend more resources on a power spike that the
 strategy usually dies before reaching.
 
-Use next_action=stop only after the evidence rules out every remaining
-strategy-fixable direction that preserves the strategy contract. Testing several
-numerical doses of one direction does not exhaust the strategy. Before stopping,
-explicitly assess whether earlier realization or contact, production acceleration,
-composition/support, technology, economy, and strategic objective contain an
-untested evidence-supported alternative within the flexible components. In
-particular, when later or larger commitment repeatedly worsens the relative power
-window, evaluate an earlier-window intervention before concluding that no action is
-available. Stop is appropriate when these alternatives are contradicted, infeasible,
-outside strategy control, or would replace an identity whose direction is preserve.
-
 Treat unit counters and support relationships as hypotheses to ground, not generic
 StarCraft intuition. Exact numerical combat claims must appear in verified knowledge
 results or recorded evidence. If the knowledge only establishes a qualitative
@@ -807,6 +786,66 @@ higher-priority explanation is unsupported, already viable, or outside strategy
 control. Information, economy, production, timing, or an isolated upgrade cannot
 be selected merely because it is easier to patch than the supported combat,
 survival, matchup, or power-window problem.
+
+Use discovery.strategy_contract as the interpretation boundary. First classify the
+repeated failure as occurring before the core win mechanism becomes available,
+during its intended commitment or decisive engagement, or after an initially
+successful engagement. Then select the change that repairs that stage without
+silently replacing the strategy's gameplay style. The same observed unit counter
+can imply an earlier commitment for a pressure strategy, a composition/support
+change for a gathered push, or a survival/production change for a scaling strategy;
+do not apply one generic response to all three.
+
+Treat failure to destroy all enemy structures by 1800 seconds as an endgame
+completion failure even when the strategy won earlier fights. Use trajectory
+evidence to distinguish insufficient fighting power from delayed commitment,
+stalled reinforcement, stale objectives, and failure to scout or scan for surviving
+structures. Any information change must remain non-blocking for an already-ready
+attack and must directly support target selection or timely cleanup.
+
+Use that failure stage to declare two narrow permissions in plan. They are false
+by default and are not general recommendations:
+- composition_change_allowed may be true only when repeated match evidence shows
+  that the completed fighting package is itself inadequate at the relevant contact,
+  or that a composition change is the necessary survival dependency before the
+  core mechanism. A final enemy roster alone is insufficient.
+- retreat_change_allowed may be true only when repeated main-force evidence links
+  the configured retreat threshold or recovery behavior to the decisive outcome.
+  Use loss_timing, retained force, regroup delay, and re-engagement evidence.
+  Runtime auto-retreat fires when the local own/enemy power ratio falls below
+  retreat_ratio (default 0.6): a higher value retreats earlier, while a lower
+  value stays committed longer. Neither direction is inherently an improvement.
+- Main Attack Gate and Recovery and Cleanup belong to different stages. A change to
+  first-attack timing never requires a numerical or semantic recovery change for
+  "consistency." When retreat_change_allowed is false, Recovery and Cleanup must be
+  copied unchanged into the candidate.
+If failure occurs before the core mechanism and neither condition is supported,
+preserve both the unit concept and retreat policy and repair the earlier enabling
+link. If the first engagement is viable but continuation fails, composition or
+retreat may change only when the post-contact evidence supports that exact lever.
+Do not enable both merely to give the Optimizer more freedom.
+
+Strategy identity is primarily the intended combat style and advantage-creation
+window, not an immutable unit roster. Units, upgrades, production structures,
+economy, and exact thresholds may change when the new package still realizes the
+same pressure, gathered-push, defensive-scaling, reinforcement, and recovery style.
+Do not reject a useful support unit merely because it was absent from the Champion.
+Conversely, do not claim that style is preserved when a new support unit, upgrade,
+or production target becomes a hard prerequisite that delays or prevents the
+Champion's critical attack window.
+
+For every proposed composition or technology change, explicitly compare:
+1. the parent and proposed first-commitment prerequisites;
+2. whether expected contact becomes earlier, similar, or later;
+3. whether support and core units compete for the same production capacity or
+   limiting resource;
+4. whether the new unit is optional support, a maintained component, or a hard
+   attack gate; and
+5. why that timing and package should face a more favorable opponent than the
+   Champion does.
+An added counter unit is not a complete causal argument. The intervention must
+improve the own-versus-enemy package at contact after accounting for the time and
+core production sacrificed to obtain it.
 
 ## Prior Experiment Interpretation
 
@@ -832,16 +871,6 @@ Use prior experiment fields as follows:
 - an accepted candidate may support a hypothesis, but mechanism evidence remains
   distinct from the score outcome.
 
-Interpret successive numerical edits as a directional trajectory, not unrelated
-candidates. State whether each edit made actual commitment or first contact earlier,
-unchanged, or later, then compare the score and opponent package at contact. When
-progressively later commitment produces progressively worse outcomes and earlier
-contacts provide positive counterexamples, do not conclude that the original gate
-is immutable. Evaluate the opposite timing direction, including a lower readiness
-threshold when the smaller force remains viable, alongside faster attainment of the
-current threshold. A failed increase disproves further waiting more directly than it
-disproves an earlier commitment.
-
 A retry of an underpowered or unaudited hypothesis must describe a materially
 stronger intervention, explain how it differs from the previous package, and name
 the observable mechanism change it should now produce. Do not repeat a materially
@@ -849,13 +878,18 @@ equivalent patch. If repeated attempts remain unauditable, request more evidence
 inspect execution, or choose another evidence-supported hypothesis instead of
 indefinitely relabeling the same change.
 
+When history marks underpowered_retry_exhausted, the same causal package is no
+longer a repair candidate at that difficulty. Select another mechanism. When an
+experiment is implemented and contradicted, changing its family name, adding
+"upgraded", "stronger", or "v2", or merely increasing the same support count is
+still the same mechanism unless the causal chain and contact-time effect are
+materially different.
+
 Assign every proposed experiment a concise mechanism_family identifier describing
-the causal mechanism, not a unit name or paragraph name. Use prior experiments as
-a hard search policy: after two non-accepted attempts in one mechanism_family,
-select a different family; after an implemented experiment is contradicted, block
-that family; after execution_invalid, block every retry that depends on the same
-unsupported Commander/runtime capability. Do not evade the policy by renaming a
-materially equivalent mechanism.
+the causal mechanism, not a unit name or paragraph name. After two equal-score
+tests of the same mechanism, select a different causal direction. After an
+adequately implemented experiment is contradicted, do not repeat that mechanism.
+Judge semantically equivalent names from the concrete history rather than spelling.
 
 Use structured engagement timing as a hard causal constraint. When an engagement
 has loss_timing=losses_before_override, an auto-retreat or other runtime override
@@ -874,6 +908,13 @@ failure_mode_analysis.covered_failures. If group attribution or causal ordering 
 missing, request more evidence or choose a supported strategy-fixable contributor;
 do not escalate a runtime defect.
 
+Treat retreat_ratio as a tunable engagement threshold, not as a universally good
+direction. A higher value preserves units but can abandon a favorable breakthrough;
+a lower value accepts more losses but can destroy the force needed for continued
+pressure. Select a retreat-policy change only when repeated main-force evidence
+links the current threshold to the decisive outcome. Evaluate it through losses
+before/after the trigger, force retained, regroup delay, and the next engagement.
+
 Before selecting one primary mechanism, enumerate the failed matches it explains,
 the failed matches it does not explain, and concrete counterexamples. A proposed
 primary mechanism must cover at least two distinct failed matches. If losses belong
@@ -882,19 +923,11 @@ request more matches or select an earlier shared prerequisite instead of forcing
 them into one unit-counter explanation.
 
 When repeated decisive fights fail after the current attack gate is met or
-exceeded, explicitly consider unit composition / support balance, matchup-dependent
-readiness, technology / upgrades, Commander execution, and runtime execution.
-Considering them is required; changing composition is not required. Information
-quality may explain uncertainty but is not itself an EvolAgent modification domain.
-
-Do not dismiss attack timing merely because the assembled army loses at current or
-later contact. If earlier contacts succeed before an opponent power increase while
-later contacts fail after it, that is evidence for a timing intervention rather
-than proof that the own package is categorically nonviable. Attack timing,
-production throughput, resource banking, or gate attainment is valid only when it
-reaches such a supported relative power-spike window; the mechanism_prediction must
-name the expected change in first-contact time, opponent package at contact, and
-combat outcome.
+exceeded, compare composition/support, upgrades, engagement execution, and the
+relative timing window. Explicitly ask whether an earlier smaller force would meet
+a weaker opponent, whether the current contact is best, or whether waiting creates
+a genuinely stronger relative package. Timing, production or economy is valid only
+when this comparison explains the expected combat-outcome change.
 
 If a strategy rule was already satisfied but execution or retreat still looks
 abnormal, compare commander_execution and runtime_execution. Do not raise a
@@ -943,23 +976,6 @@ Never repeat a materially equivalent candidate; a same-hypothesis retry must sta
 the substantive increase or correction in intervention strength.
 
 If next_action is propose_strategy_patch:
-- preserve the strategy contract unless repeated evidence explicitly supports an
-  identity-level change;
-- use strategy_mechanism_assessment to ensure the optimization addresses the stage
-  where the core mechanism first fails;
-- complete information_grounding whenever an allowed plan branches on currently
-  visible or observed enemy state. Replay-only enemy_truth may support diagnosis but
-  may never be used as a strategy condition. The plan must use information already
-  present in the current observation and may not add scouting, scanning, or wake
-  behavior to obtain it;
-- for every new information-dependent branch, complete
-  information_grounding.control_necessity. Name the exact live condition and action
-  difference, compare it with the simplest unconditional alternative, cite at least
-  two matches showing discriminative value, and assess successful counterexamples.
-  Mere correlation with losses, static counter knowledge, or observability is not
-  sufficient. If the cue also occurs in successful matches and no narrower
-  decision-relevant condition separates them, keep it diagnosis-only and choose a
-  non-information-dependent plan;
 - select exactly one priority problem as an object, not a list;
 - choose one primary failure mode and one causal account for this generation;
 - pre-register one mechanism_prediction with an observable expected change, a
@@ -968,29 +984,18 @@ If next_action is propose_strategy_patch:
 - describe a materially different coherent intervention package in plan;
 - preserve relevant strengths;
 - do not rewrite unrelated strategy areas;
-- choose the primary change only from economy/expansion, production targets,
-  technology/upgrades, army composition, or attack readiness/objective. Do not
-  propose new scouting, scanning, wake-event, decision-cycle, reinforcement,
-  retreat, recovery, or cleanup behavior. Those paragraphs may receive only a
-  consistency repair caused by an allowed primary change;
 - do not provide final paragraph text, target_paragraph_id, baseline_rule, or candidate_rule.
 
 Optimization-direction rules:
 - A causal hypothesis may be chosen only when repeated match evidence supports a plausible connection between the current rule and the observed problem. Do not optimize from StarCraft common sense alone.
 - The unit of evolution is one primary failure mode addressed by one coherent intervention package, not one small lever, paragraph, unit, or upgrade. The package must be large enough to produce a clear behavioral difference from the Champion.
 - Implement the package with every dependent change required for it to be executable, internally consistent, resource-feasible, prerequisite-complete, survivable until active, and testable.
-- The package may coordinate economy/expansion, production/resource priority,
-  technology/upgrades, unit composition/support balance, and attack
-  readiness/objective when they are necessary parts of the same hypothesis.
+- The package may coordinate Goal-preserving changes across Macro economy/expansion, production/resource priority, technology/upgrades, unit composition/support balance, and Combat attack readiness, decision-relevant information, reinforcement, recovery, or timely cleanup when they are necessary dependencies of the same hypothesis. Scouting and scans must serve one of those Combat decisions and cannot become a hidden gate; wake events, route waypoints, and runtime state machines are not strategy fields.
 - For every proposed change ask: "If this change were removed, would the selected hypothesis become incomplete, internally inconsistent, non-executable, or materially different?" If yes, include it. If no, leave that part of the Champion unchanged.
 - Do not combine unrelated improvements merely because all of them appear beneficial. A change that survives the removal test as a separate optimization objective belongs to a later generation.
 - A candidate should mutate the Champion, not redesign it from scratch. Preserve successful mechanisms unless current evidence directly contradicts them.
 - The optimization may adjust quantities, priorities, timings, prerequisites, support units, and readiness conditions, but must not replace the strategy's defining army concept or win plan unless the current strategy itself explicitly allows that flexibility. If the identity is no longer viable, choose stop rather than swapping strategy family.
-- plan.direction states the primary failure mode and causal idea.
-  plan.material_behavior_change states the clearly observable difference from the
-  Champion. plan.coordinated_changes contains only changes in the five allowed
-  domains; the Optimizer handles mechanical stale-reference repairs without turning
-  them into additional mechanisms.
+- plan.direction states the primary failure mode and causal idea. plan.material_behavior_change states the clearly observable difference from the Champion. plan.coordinated_changes lists the core intervention and every necessary prerequisite or consistency change without writing final paragraph text. Do not limit package size by paragraph count; reject only unrelated changes.
 
 The hypothesis must explain why changing strategy.md could plausibly change
 external match outcomes.
@@ -1006,54 +1011,18 @@ Return one JSON object only:
 {{
   "action": "decide_batch",
   "analysis": {{
-    "strategy_contract":{{
-      "style":"gameplay style inferred from the complete strategy",
-      "core_win_mechanism":"how the strategy creates its intended winning engagement",
-      "critical_timing_or_power_spike":"relative timing window or power state",
-      "core_commitments":["must-preserve behavior"],
-      "flexible_components":["adjustable behavior"],
-      "optimization_boundary":"identity boundary for this evolution",
-      "direction":"preserve|adjust|replace"
-    }},
-    "strategy_mechanism_assessment":{{
-      "core_mechanism_realization":"comparison of realization across wins and losses",
-      "critical_timing_comparison":"timestamped comparison of own readiness, attack command, first contact, and opponent growth; contrast earlier/current/later contact",
-      "failure_stage":"before_core_mechanism|during_core_mechanism|after_core_mechanism|mixed|unknown",
-      "optimization_implication":"what kind of change follows from the first failed stage"
-    }},
-    "core_mechanism_guard":{{
-      "identity_effect":"preserve|adjust|replace",
-      "first_commitment_effect":"earlier|same|later|conditional",
-      "relative_power_effect":"improve|preserve|weaken|unknown",
-      "evidence":["Game 2 @ 390s: timestamped comparison supporting the claimed effect"],
-      "delayed_first_commitment_success_evidence":["Game 1 @ 620s: delayed contact succeeded under the same failure context"],
-      "justification":"why the selected timing effect preserves or improves the strategy's relative power window"
-    }},
-    "information_grounding":{{
-      "uses_runtime_enemy_information":false,
-      "facts":[
-        {{
-          "claim":"fact used by the proposed strategy branch",
-          "source":"enemy_observed|own_observation|static_knowledge|enemy_truth",
-          "use":"diagnosis_only|strategy_condition",
-          "available_before_decision":true,
-          "runtime_supported":true,
-          "evidence":["Game 2 @ 390s: ..."]
-        }}
-      ],
-      "execution_rule":"current-observation rule, or no enemy information is used as a strategy condition",
-      "control_necessity":{{
-        "condition":"exact decision-time observable condition; empty for a non-information plan",
-        "action_change":"concrete action when true versus false",
-        "simpler_alternative":"simplest unconditional strategy change considered",
-        "why_information_is_required":"why that simpler change cannot test the same hypothesis",
-        "discriminative_evidence":["Game 2 @ 390s: cue and outcome","Game 5 @ 410s: contrasting cue/action/outcome"],
-        "counterexample_assessment":"successful matches containing the cue and whether they invalidate or require refinement of the condition"
-      }}
-    }},
     "strengths_to_preserve":[
       {{"pattern":"...","evidence":["Game 1 @ 420s: ..."]}}
     ],
+    "outcome_contrast":{{
+      "winning_pattern":"repeated mechanism supported by wins",
+      "winning_evidence":["Game 1 @ 420s: ..."],
+      "loss_shortfall":"earliest repeated shortfall in losses",
+      "loss_evidence":["Game 2 @ 390s: ..."],
+      "loss_relationship_to_wins":"winning_mechanism_not_reproduced|winning_mechanism_reproduced_but_failed|mixed|uncertain",
+      "causal_difference":"most important causal difference between outcomes",
+      "preservation_rule":"winning mechanism that the candidate must retain"
+    }},
     "priority_problem":{{
       "problem":"one strategy-fixable problem",
       "evidence":["Game 2 @ 390s: ..."],
@@ -1061,6 +1030,13 @@ Return one JSON object only:
     }},
     "failure_mode_analysis":{{
       "failure_mode":"repeated match-level failure the package will address",
+      "failure_stage":"before_core_mechanism|during_commitment_or_engagement|after_successful_engagement|mixed",
+      "commitment_and_contact_timing":"relative timing of own commitment, actual contact, and opponent power growth",
+      "own_package_at_contact":"own composition, support, upgrades, and readiness at decisive contact",
+      "opponent_package_and_growth":"opponent composition at contact and material changes caused by waiting",
+      "post_contact_continuity":"configured retreat threshold, trigger quality, force retention, reinforcement, regroup delay, and ability to re-engage",
+      "production_feasibility":"observed producer, resource-priority, and supply bottlenecks relevant to the package",
+      "optimization_implication":"which link in the combat chain should change and why",
       "survival_prerequisite":"whether the strategy survives until its intended power spike and supporting evidence",
       "opponent_pressure_pattern":"cross-match pressure pattern or why it is not decisive",
       "matchup_assessment":"composition, counters, support, upgrades, and engagement conditions across outcomes",
@@ -1108,7 +1084,19 @@ Return one JSON object only:
       "coordinated_changes":[
         {{"change":"core or dependent strategic change","why_required":"why removing it would make the package incomplete or ineffective"}}
       ],
-      "preserve":["successful mechanism to keep"]
+      "preserve":["successful mechanism to keep"],
+      "contact_window_effect":"earlier|similar|later|unknown",
+      "new_hard_prerequisites":["new condition that can block the first commitment, or empty"],
+      "production_tradeoffs":["resource or production capacity taken from the Champion's winning chain, or empty"],
+      "window_tradeoff_evidence":["Game N @ Ts evidence justifying a later window, or empty"],
+      "why_window_remains_favorable":"why the proposed package preserves or improves relative power at contact",
+      "composition_change_allowed":false,
+      "retreat_change_allowed":false,
+      "stage_scope_evidence":["Game N @ Ts evidence supporting every true permission, or empty"],
+      "stage_scope_reason":"why these permissions match failure_stage and the selected hypothesis",
+      "preservation_checks":[
+        {{"invariant":"protected winning mechanism","effect":"preserve|improve|evidence_supported_tradeoff","reason":"candidate-level requirement","evidence":["Game 1 @ 420s: ..."]}}
+      ]
     }},
     "evidence_limits":[]
   }}

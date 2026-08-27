@@ -11,12 +11,15 @@ EvolAgent 是 SC2-Commander 的离线候选策略生成器。它读取一批完�
   -> 确定性 SC2 知识查询（按需）
   -> Cross-match Decision：从决定性交战倒推、比较 2–4 个竞争解释（支持/反证）后选出一个 priority_problem、一个因果 hypothesis、一个 plan.direction
   -> Optimizer：为实现同一假设修改所有必要依赖段落
+  -> First-commitment Feasibility Audit：程序模拟采矿、采气、前置、补给和生产队列，计算门槛编成最早可行时间
   -> StrategyPatchValidator：同一假设、无第二优化目标、保持策略身份、内部一致
   -> 基础格式、可执行边界和 200 人口检查
   -> 保存不可覆盖的新候选目录
 ```
 
-跨局 Decision 在选定最终 hypothesis 前比较当前证据真正支持的竞争解释，并检查“瓶颈已解决后是否仍失败”。当多个问题都有证据时，它采用 SC2-aware reasoning preference：先检查组建完成的 army package 面对已观察敌军是否可战，再检查相对 power-spike timing、production/resource synchronization、economy/recovery、upgrade multiplier，以及信息是否真正改变战略决策。该顺序不是固定 enum 或确定性 selector，证据可以改变优先级。达到或超过 attack gate 后仍反复惨败时，不把更快达到同一门槛当作充分解释；首战基本合理但无法重建时，才优先考虑经济与恢复。
+跨局 Decision 先从策略文本识别打法风格、核心取胜机制和相对强势窗口，再沿“承诺与接敌时机—双方接敌兵力—首战保留—增援与恢复—生产瓶颈”重建胜负链条。它同时比较等待前、实际接敌和等待后的敌军变化：更大的己方军队不一定更强，因为等待也可能让敌方克制兵种成型。该过程不是固定类别排序，最终只选择证据最充分且能通过策略文本修复的一个断点。
+
+Optimizer 先生成完整候选，再从 Parent 与 Candidate 中抽取首次有效进攻所需的经济目标、单位门槛、生产槽和科技前置。确定性 Terran 模拟器从项目实际采用的 8 SCV、13 补给开局状态出发，使用 Commander 动作元数据与 Sharpy 相同的矿气收入近似，逐事件处理 SCV 分配与饱和、建造占用、扩张、Refinery、补给、附属建筑和生产队列，分别计算两个策略的 `earliest_feasible_time`。该时间只表示目标编成最早可以完成，不叠加模型决策、集结、移动或经验延迟。校验器再依据最小时间增量和对局中同期敌方成长判断修改是否破坏策略的关键窗口；不合理的候选会返回 Optimizer 重新生成。报告保存在候选的 `deterministic_feasibility_audit` 中。
 
 每代只验证一个由对局证据支持的主要因果假设，并把它实现为一个 coherent strategy package：为了让假设可执行、资源可行、前置完整且内部一致，可以同步修改多个 paragraph 和战略维度；但不能夹带与该假设无关的第二优化目标。`plan.direction` 描述这个完整策略包，而不是 single lever 或 paragraph 名称。不增加固定优化类别 enum。知识库只在静态事实能区分解释时查询；对局时机、策略选择和 Commander 行为由对局证据与运行时边界决定。`considered_explanations` 留在 `analysis.json`，不写入长期 experiment_history。
 
@@ -26,7 +29,7 @@ EvolAgent 是 SC2-Commander 的离线候选策略生成器。它读取一批完�
 
 ## 职责边界
 
-EvolAgent 负责提出候选，不负责判断候选是否更强。候选必须由外层实验流程实际进行 10 局评测：胜率高于当前 Champion 才能接受，否则保留 Champion，并把失败原因作为后续优化经验。
+EvolAgent 负责提出候选，不负责判断候选是否更强。每轮始终以唯一的官方 Champion 作为候选生成和评分基线。候选必须由外层实验流程实际进行 10 局评测：得分严格高于当前 Champion 才能接受；其他候选只作为后续分析经验，不会成为下一轮的文本父策略。
 
 策略目录是不可变版本。进化跑次把候选写到
 `evolution_runs/<strategy>/<timestamp>/strategies/<base>_optN/`，并在
@@ -41,16 +44,25 @@ EvolAgent 负责提出候选，不负责判断候选是否更强。候选必须�
 ```markdown
 # Summary
 
-一段简短的策略概述。
+A short description of the strategy's economy, army style, power stage, and win plan.
 
 # Details
 
 * Opening and Economy: ...
+* Expansion: ...
 * Production: ...
+* Technology: ...
+* Scouting: ...
+* Scans: ...
+* Pre-Attack Army Posture: ...
 * Main Attack Gate: ...
+* Attack Objective: ...
+* Engagement and Reinforcement: ...
+* Recovery and Cleanup: ...
+* Ultimate Goal: ...
 ```
 
-不要添加 `Resource Costs` 或 `Required Tools`。资源、人口、建造时间、生产者和前置条件来自 Commander 动作目录元数据。
+`Main Attack Gate` 只定义首次进攻，不能作为恢复阶段反复使用的门槛。`Scouting` 和 `Scans` 服务于目标选择与残局清理，不能成为隐藏进攻门槛。每局上限为 30 分钟，Evol Agent 会把及时取得胜利作为全局分析条件。不要添加 `Resource Costs` 或 `Required Tools`。资源、人口、建造时间、生产者和前置条件来自 Commander 动作目录元数据。
 
 ## 运行
 

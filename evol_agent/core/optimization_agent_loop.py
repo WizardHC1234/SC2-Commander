@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import re
 from typing import Any
 
@@ -15,7 +16,7 @@ from .strategy_patch_validator import (
     validate_strategy_patch_structure,
 )
 from .types import BattleAnalysis, EvolImprovement, ToolObservation, ValidationResult
-from ..optimization.strategy_document import StrategyDocument
+from ..optimization.strategy_document import StrategyDocument, paragraph_hash
 from ..sc2_data_agent.bridge import find_knowledge_run_error, run_knowledge_query
 from ..validation import validate_improvement
 
@@ -25,6 +26,77 @@ def _unwrap_candidate(result: Any) -> dict[str, Any] | None:
         return None
     raw = result.get("candidate") if isinstance(result.get("candidate"), dict) else result
     return raw if isinstance(raw, dict) else None
+
+
+def _compact_contact_evidence(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep only trajectory rows needed to compare alternative contact windows."""
+    packet = raw.get("retrieval_evidence")
+    match_packet = packet.get("match_record_evidence") if isinstance(packet, dict) else {}
+    rows: list[dict[str, Any]] = []
+    for query in (match_packet or {}).get("queries") or []:
+        if not isinstance(query, dict):
+            continue
+        for result in query.get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            game_index = result.get("game_index")
+            interaction = result.get("interaction_check") or {}
+            for timeline_row in result.get("timeline_rows") or []:
+                if not isinstance(timeline_row, dict):
+                    continue
+                army = timeline_row.get("army") or []
+                enemy = timeline_row.get("enemy") or []
+                truth = timeline_row.get("opponent_truth_after_match") or []
+                groups = []
+                for group in timeline_row.get("groups") or []:
+                    if not isinstance(group, list):
+                        continue
+                    groups.append(
+                        {
+                            "role": group[1] if len(group) > 1 else None,
+                            "count": group[2] if len(group) > 2 else None,
+                            "power": group[3] if len(group) > 3 else None,
+                            "zone": group[4] if len(group) > 4 else None,
+                            "composition": group[5] if len(group) > 5 else None,
+                            "near_enemy_count": group[6] if len(group) > 6 else None,
+                            "near_enemy_power": group[7] if len(group) > 7 else None,
+                            "near_enemy_composition": group[8] if len(group) > 8 else None,
+                            "mode": group[11] if len(group) > 11 else None,
+                            "retreat_ratio": group[12] if len(group) > 12 else None,
+                            "command_age": group[13] if len(group) > 13 else None,
+                            "command_source": group[14] if len(group) > 14 else None,
+                            "objective_status": group[16] if len(group) > 16 else None,
+                        }
+                    )
+                rows.append(
+                    {
+                        "game_index": game_index,
+                        "time_s": timeline_row.get("time_s"),
+                        "trigger": timeline_row.get("trigger"),
+                        "own": {
+                            "army_supply": army[0] if len(army) > 0 else None,
+                            "army_power": army[1] if len(army) > 1 else None,
+                            "composition": army[2] if len(army) > 2 else None,
+                            "training": army[3] if len(army) > 3 else None,
+                        },
+                        "known_enemy": {
+                            "combat_composition": enemy[3] if len(enemy) > 3 else None,
+                            "known_types": enemy[8] if len(enemy) > 8 else None,
+                        },
+                        "enemy_truth": {
+                            "supply": truth[2] if len(truth) > 2 else None,
+                            "army_units": truth[4] if len(truth) > 4 else None,
+                            "structures": truth[5] if len(truth) > 5 else None,
+                            "upgrades": truth[7] if len(truth) > 7 else None,
+                        },
+                        "combat": timeline_row.get("combat"),
+                        "groups": groups,
+                        "interaction": interaction.get("classification"),
+                    }
+                )
+                if len(rows) >= 16:
+                    return rows
+    return rows
 
 
 def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[str, Any]:
@@ -58,22 +130,17 @@ def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[
             if isinstance(raw.get("strategy_contract"), dict)
             else {}
         ),
-        "strategy_mechanism_assessment": (
-            dict(raw.get("strategy_mechanism_assessment"))
-            if isinstance(raw.get("strategy_mechanism_assessment"), dict)
-            else {}
-        ),
-        "core_mechanism_guard": (
-            dict(raw.get("core_mechanism_guard"))
-            if isinstance(raw.get("core_mechanism_guard"), dict)
-            else {}
-        ),
-        "information_grounding": (
-            dict(raw.get("information_grounding"))
-            if isinstance(raw.get("information_grounding"), dict)
-            else {}
-        ),
         "strengths_to_preserve": strengths,
+        "wins_to_preserve": list(raw.get("wins_to_preserve") or strengths),
+        "winning_mechanism": str(raw.get("winning_mechanism") or "").strip(),
+        "cross_outcome_comparison": list(
+            raw.get("cross_outcome_comparison") or []
+        ),
+        "outcome_contrast": (
+            dict(raw.get("outcome_contrast"))
+            if isinstance(raw.get("outcome_contrast"), dict)
+            else {}
+        ),
         "priority_problem": priority,
         "hypothesis": hypothesis,
         "mechanism_family": str(raw.get("mechanism_family") or "").strip(),
@@ -100,6 +167,7 @@ def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[
         "plan": plan,
         "next_action": str(raw.get("next_action") or ""),
         "knowledge_used": knowledge_used,
+        "contact_evidence": _compact_contact_evidence(raw),
     }
 
 
@@ -158,26 +226,96 @@ def _knowledge_runs_for_optimizer(
 def _candidate_knowledge_run(
     *,
     candidate_text: str,
+    parent_text: str = "",
     race: str,
     capability_manifest: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Build deterministic facts for every executable action named by a candidate."""
+    comparison_text = f"{parent_text}\n{candidate_text}"
     macro_contract = capability_manifest.get("macro_contract")
     available = (
         macro_contract.get("available_actions")
         if isinstance(macro_contract, dict)
         else []
     )
-    actions = [
-        str(action)
-        for action in (available or [])
-        if str(action).strip()
-        and re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(str(action))}(?![A-Za-z0-9_])",
-            candidate_text,
+    try:
+        action_module = importlib.import_module(f"commander.races.{race.casefold()}.actions")
+        action_specs = dict(getattr(action_module, "ACTION_SPECS", {}) or {})
+    except (ImportError, AttributeError, TypeError, ValueError):
+        action_specs = {}
+
+    def normalized_words(value: str) -> list[str]:
+        words = re.findall(r"[a-z0-9]+", str(value or "").casefold())
+        normalized: list[str] = []
+        for word in words:
+            if len(word) > 4 and word.endswith("ies"):
+                word = word[:-3] + "y"
+            elif len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+                word = word[:-1]
+            normalized.append(word)
+        return normalized
+
+    normalized_text = " ".join(normalized_words(comparison_text))
+
+    def phrase_is_named(value: str) -> bool:
+        phrase = " ".join(normalized_words(value))
+        return bool(phrase and re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", normalized_text))
+
+    def description_aliases(action: str) -> list[str]:
+        spec = action_specs.get(action)
+        description = str(getattr(spec, "description", "") or "")
+        if not description:
+            return []
+        first_sentence = description.split(".", 1)[0]
+        aliases = re.findall(r"\(([^)]+)\)", first_sentence)
+        head = re.sub(r"\([^)]*\)", " ", first_sentence)
+        head = re.sub(r"^(?:absolute|train|build|research|morph)\s+", "", head, flags=re.I)
+        head = re.split(
+            r"\b(?:count|from|for|to|at|with|requires|using|into)\b",
+            head,
+            maxsplit=1,
+            flags=re.I,
+        )[0].strip(" :-")
+        if head:
+            aliases.append(head)
+        return aliases
+
+    def action_is_named(action: str) -> bool:
+        raw = str(action or "").strip()
+        if not raw:
+            return False
+        if re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(raw)}(?![A-Za-z0-9_])",
+            comparison_text,
             re.IGNORECASE,
+        ):
+            return True
+        target = re.sub(r"^(train|build|research|morph)_?", "", raw).replace(
+            "techlab", "tech_lab"
         )
-    ]
+        # Strategy files use natural names and irregular plurals, while some
+        # executor ids use internal SC2 names (Combat Shield -> shieldwall).
+        if phrase_is_named(target.replace("_", " ")):
+            return True
+        if any(phrase_is_named(alias) for alias in description_aliases(raw)):
+            return True
+        if raw == "build_gas" and re.search(r"\b(?:gas|refiner(?:y|ies))\b", comparison_text, re.I):
+            return True
+        return False
+
+    selected = {str(action) for action in (available or []) if action_is_named(str(action))}
+    # Timing a named unit also needs verified facts for its complete structural
+    # dependency chain. Do not require every dependency to be repeated in prose.
+    pending = list(selected)
+    while pending:
+        action = pending.pop()
+        spec = action_specs.get(action)
+        for dependency in getattr(spec, "dependencies", ()) or ():
+            dependency = str(dependency)
+            if dependency in available and dependency not in selected:
+                selected.add(dependency)
+                pending.append(dependency)
+    actions = [str(action) for action in (available or []) if str(action) in selected]
     if not actions:
         return None
     question = "Verify requirements for every executable action named by the complete candidate."
@@ -195,6 +333,64 @@ def _candidate_knowledge_run(
     return run
 
 
+def _document_changes(
+    parent: StrategyDocument,
+    candidate: StrategyDocument,
+) -> list[dict[str, str]]:
+    changes: list[dict[str, str]] = []
+    if parent.summary != candidate.summary:
+        changes.append(
+            {
+                "op": "replace_summary",
+                "target": "summary",
+                "old": parent.summary,
+                "new": candidate.summary,
+            }
+        )
+    parent_by_id = {item.id: item for item in parent.details}
+    candidate_by_id = {item.id: item for item in candidate.details}
+    for item in parent.details:
+        revised = candidate_by_id.get(item.id)
+        if revised is None:
+            changes.append(
+                {
+                    "op": "remove_detail",
+                    "target": item.id,
+                    "old": item.value,
+                    "new": "",
+                }
+            )
+        elif revised.title != item.title or revised.value != item.value:
+            changes.append(
+                {
+                    "op": "replace_detail",
+                    "target": item.id,
+                    "old": item.value,
+                    "new": revised.value,
+                }
+            )
+    for item in candidate.details:
+        if item.id not in parent_by_id:
+            changes.append(
+                {
+                    "op": "add_detail",
+                    "target": item.id,
+                    "old": "",
+                    "new": item.value,
+                }
+            )
+    if [item.id for item in parent.details] != [item.id for item in candidate.details]:
+        changes.append(
+            {
+                "op": "reorder_details",
+                "target": "details",
+                "old": ",".join(item.id for item in parent.details),
+                "new": ",".join(item.id for item in candidate.details),
+            }
+        )
+    return changes
+
+
 def _normalize_optimizer_candidate(
     raw: dict[str, Any],
     *,
@@ -206,46 +402,72 @@ def _normalize_optimizer_candidate(
     if action not in {"draft_candidate", "revise_candidate"}:
         return None, "action must be draft_candidate or revise_candidate"
 
-    patches = raw.get("patches")
-    if not isinstance(patches, list) or not patches:
-        return None, "optimizer patches must be a non-empty list"
-
-    detail_ids = {item.id for item in parent_document.details}
-    seen: set[str] = set()
     normalized_patches: list[dict[str, str]] = []
-    for item in patches:
-        if not isinstance(item, dict):
-            return None, "each patch must be an object"
-        target = str(item.get("target") or "").strip()
-        replacement = str(item.get("replacement") or item.get("value") or "").strip()
-        why_required = str(item.get("why_required") or "").strip()
-        expected_old_hash = str(item.get("expected_old_hash") or "").strip()
-        if target in {"", "summary"} or str(item.get("op") or "") == "replace_summary":
-            return None, "Optimizer may not modify # Summary"
-        if not target:
-            return None, "each patch requires target"
-        if target in seen:
-            return None, f"candidate modifies paragraph {target!r} more than once"
-        seen.add(target)
-        if target not in detail_ids:
-            allowed = ", ".join(sorted(detail_ids))
-            return None, f"unknown strategy detail {target!r}; allowed targets: {allowed}"
-        if not expected_old_hash:
-            return None, f"patch {target!r} requires expected_old_hash"
-        if not replacement:
-            return None, f"patch {target!r} replacement must be a non-empty line"
-        if "\n" in replacement:
-            return None, f"candidate paragraph {target!r} must be one non-empty line"
-        if not why_required:
-            return None, f"patch {target!r} requires why_required"
-        normalized_patches.append(
-            {
-                "target": target,
-                "expected_old_hash": expected_old_hash,
-                "replacement": replacement,
-                "why_required": why_required,
-            }
-        )
+    strategy_md = str(raw.get("strategy_md") or "").strip()
+    document_changes: list[dict[str, str]] = []
+    if strategy_md:
+        try:
+            candidate_document = StrategyDocument.parse(strategy_md)
+        except ValueError as exc:
+            return None, f"generated strategy.md is invalid: {exc}"
+        strategy_md = candidate_document.render()
+        document_changes = _document_changes(parent_document, candidate_document)
+        if not document_changes:
+            return None, "generated strategy.md is unchanged from the Champion"
+        parent_by_id = {item.id: item for item in parent_document.details}
+        for item in candidate_document.details:
+            current = parent_by_id.get(item.id)
+            if current is None or current.value == item.value:
+                continue
+            normalized_patches.append(
+                {
+                    "target": item.id,
+                    "expected_old_hash": paragraph_hash(current.value),
+                    "replacement": item.value,
+                    "why_required": "changed by full-document strategy generation",
+                }
+            )
+    else:
+        # Legacy checkpoint compatibility. Live prompts request strategy_md, but
+        # previously saved optimizer responses may still contain paragraph patches.
+        patches = raw.get("patches")
+        if not isinstance(patches, list) or not patches:
+            return None, "optimizer must return a complete strategy_md document"
+        detail_ids = {item.id for item in parent_document.details}
+        seen: set[str] = set()
+        for item in patches:
+            if not isinstance(item, dict):
+                return None, "each patch must be an object"
+            target = str(item.get("target") or "").strip()
+            replacement = str(item.get("replacement") or item.get("value") or "").strip()
+            why_required = str(item.get("why_required") or "").strip()
+            expected_old_hash = str(item.get("expected_old_hash") or "").strip()
+            if target in {"", "summary"} or str(item.get("op") or "") == "replace_summary":
+                return None, "legacy patch may not modify # Summary"
+            if not target:
+                return None, "each patch requires target"
+            if target in seen:
+                return None, f"candidate modifies paragraph {target!r} more than once"
+            seen.add(target)
+            if target not in detail_ids:
+                allowed = ", ".join(sorted(detail_ids))
+                return None, f"unknown strategy detail {target!r}; allowed targets: {allowed}"
+            if not expected_old_hash:
+                return None, f"patch {target!r} requires expected_old_hash"
+            if not replacement:
+                return None, f"patch {target!r} replacement must be a non-empty line"
+            if "\n" in replacement:
+                return None, f"candidate paragraph {target!r} must be one non-empty line"
+            if not why_required:
+                return None, f"patch {target!r} requires why_required"
+            normalized_patches.append(
+                {
+                    "target": target,
+                    "expected_old_hash": expected_old_hash,
+                    "replacement": replacement,
+                    "why_required": why_required,
+                }
+            )
 
     preserved = [
         str(item).strip()
@@ -294,21 +516,48 @@ def _normalize_optimizer_candidate(
             "keep": [{"item": item, "reason": "preserved strength"} for item in preserved],
             "revise": [
                 {
-                    "item": item["target"],
-                    "reason": item["why_required"],
+                    "item": item.get("target", "strategy document"),
+                    "reason": item.get("why_required")
+                    or "changed by full-document strategy generation",
                 }
-                for item in normalized_patches
+                for item in (normalized_patches or document_changes)
             ],
             "remove": [],
         }
+    preservation_audit: list[dict[str, str]] = []
+    for item in raw.get("preservation_audit") or []:
+        if not isinstance(item, dict):
+            continue
+        invariant = str(item.get("invariant") or "").strip()
+        effect = str(item.get("effect") or "").strip().lower()
+        if not invariant or effect not in {
+            "preserved",
+            "improved",
+            "evidence_supported_revision",
+            "broken",
+        }:
+            continue
+        preservation_audit.append(
+            {
+                "invariant": invariant,
+                "effect": effect,
+                "candidate_rule": str(item.get("candidate_rule") or "").strip(),
+                "reason": str(item.get("reason") or "").strip(),
+            }
+        )
+        if len(preservation_audit) >= 8:
+            break
     return (
         {
             "action": action,
+            "strategy_md": strategy_md,
+            "document_changes": document_changes,
             "patches": normalized_patches,
             "expected_effect": str(raw.get("expected_effect") or "").strip(),
             "main_risk": str(raw.get("main_risk") or "").strip(),
             "preserved_strengths": preserved,
             "inheritance": normalized_inheritance,
+            "preservation_audit": preservation_audit,
         },
         "",
     )
@@ -346,60 +595,18 @@ def _drop_unchanged_patches(
 
 
 def _fallback_is_safe(*, failure_stage: str, errors: list[str]) -> bool:
-    """Allow fallback only for explicitly non-blocking semantic notes.
+    """Evaluate a retry-exhausted candidate only for non-blocking review notes.
 
-    Structure, basic execution, knowledge, and blocking semantic failures are
-    compile errors. Sending such a candidate into matches makes the experiment
-    measure validator noise instead of the selected strategy hypothesis.
+    Structural, executable, knowledge, and blocking semantic errors mean that the
+    generated document is not a valid test of the selected hypothesis.  The outer
+    evolution loop can retain the Champion and continue the configured generation
+    budget instead of spending matches on that invalid candidate.
     """
     if failure_stage != "semantic" or not errors:
         return False
-    return all(str(error).strip().lower().startswith("non-blocking") for error in errors)
-
-
-_IMMEDIATE_ANALYSIS_REPLAN_TYPES = frozenset(
-    {"strategy_identity"}
-)
-
-_REPEATED_ANALYSIS_REPLAN_TYPES = frozenset(
-    {"decision_grounding", "runtime_boundary"}
-)
-
-
-def _semantic_error_types(errors: list[str]) -> set[str]:
-    types: set[str] = set()
-    for error in errors:
-        for match in re.finditer(
-            r"(?:^|;\s*)([a-z][a-z0-9_]*)\s+—",
-            str(error).strip().lower(),
-        ):
-            types.add(match.group(1))
-    return types
-
-
-def _analysis_replan_reason(
-    errors: list[str],
-    *,
-    type_attempts: dict[str, int],
-) -> str:
-    error_types = _semantic_error_types(errors)
-    immediate = sorted(error_types & _IMMEDIATE_ANALYSIS_REPLAN_TYPES)
-    if immediate:
-        return (
-            "semantic validation found an analysis-level error: "
-            + ", ".join(immediate)
-        )
-    repeated = sorted(
-        error_type
-        for error_type in error_types & _REPEATED_ANALYSIS_REPLAN_TYPES
-        if type_attempts.get(error_type, 0) >= 2
+    return all(
+        str(error).strip().lower().startswith("non-blocking") for error in errors
     )
-    if repeated:
-        return (
-            "the selected plan produced repeated analysis-level implementation "
-            "failures: " + ", ".join(repeated)
-        )
-    return ""
 
 
 def _candidate_rationale(
@@ -429,28 +636,10 @@ def _candidate_rationale(
             strengths.append(str(item.get("pattern") or "").strip())
         elif str(item).strip():
             strengths.append(str(item).strip())
-    patches = list(candidate.get("patches") or [])
+    changes = list(candidate.get("document_changes") or candidate.get("patches") or [])
     return {
-        "strategy_contract": (
-            dict(decision.get("strategy_contract"))
-            if isinstance(decision.get("strategy_contract"), dict)
-            else {}
-        ),
-        "strategy_mechanism_assessment": (
-            dict(decision.get("strategy_mechanism_assessment"))
-            if isinstance(decision.get("strategy_mechanism_assessment"), dict)
-            else {}
-        ),
-        "core_mechanism_guard": (
-            dict(decision.get("core_mechanism_guard"))
-            if isinstance(decision.get("core_mechanism_guard"), dict)
-            else {}
-        ),
-        "information_grounding": (
-            dict(decision.get("information_grounding"))
-            if isinstance(decision.get("information_grounding"), dict)
-            else {}
-        ),
+        "strategy_contract": dict(decision.get("strategy_contract") or {}),
+        "outcome_contrast": dict(decision.get("outcome_contrast") or {}),
         "hypothesis": hypothesis,
         "mechanism_family": str(decision.get("mechanism_family") or "").strip(),
         "failure_mode_analysis": (
@@ -492,6 +681,7 @@ def _candidate_rationale(
         "preserved_strength": strengths[0] if strengths else "",
         "strengths_to_preserve": list(decision.get("strengths_to_preserve") or []),
         "preserved_strengths": list(candidate.get("preserved_strengths") or strengths),
+        "preservation_audit": list(candidate.get("preservation_audit") or []),
         "inheritance": dict(candidate.get("inheritance") or {}),
         "selected_plan_ids": ["D1"],
         "overall_assessment": direction,
@@ -500,18 +690,23 @@ def _candidate_rationale(
                 "source_plan_id": "D1",
                 "problem_id": "P1",
                 "target": item.get("target"),
-                "change": item.get("replacement"),
-                "why": item.get("why_required"),
+                "change": item.get("new") or item.get("replacement"),
+                "why": item.get("why_required")
+                or "required by the generated complete strategy",
             }
-            for item in patches
+            for item in changes
             if isinstance(item, dict)
         ],
         "primary_change": direction,
         "expected_effect": expected_effect,
         "main_risk": main_risk,
         "patches": [
-            {"target": item.get("target"), "why_required": item.get("why_required")}
-            for item in patches
+            {
+                "target": item.get("target"),
+                "why_required": item.get("why_required")
+                or "changed in the generated complete strategy",
+            }
+            for item in changes
             if isinstance(item, dict)
         ],
     }
@@ -529,6 +724,7 @@ def run_optimization_agent_loop(
     prefix: str = "  ",
     capability_manifest: dict[str, Any] | None = None,
     retry_feedback: list[str] | None = None,
+    prior_experiences: list[Any] | None = None,
 ) -> tuple[
     ValidationResult,
     EvolImprovement | None,
@@ -536,7 +732,7 @@ def run_optimization_agent_loop(
     list[str],
     list[dict[str, Any]],
 ]:
-    """Implement one Cross-match hypothesis as strategy.md paragraph patches."""
+    """Implement one Cross-match hypothesis as a complete strategy.md document."""
     model = str(model or "").strip() or DEFAULT_OPTIMIZATION_MODEL
     capability_manifest = capability_manifest or {}
     observations = list(initial_tool_observations)
@@ -547,7 +743,6 @@ def run_optimization_agent_loop(
     last_improvement: EvolImprovement | None = None
     latest_applied_improvement: EvolImprovement | None = None
     latest_applied_failure_stage = ""
-    semantic_type_attempts: dict[str, int] = {}
     parent_text = str(skill_texts.get("strategy.md") or "")
     try:
         parent_document = StrategyDocument.parse(parent_text)
@@ -563,7 +758,7 @@ def run_optimization_agent_loop(
     base_knowledge_runs = _knowledge_runs_for_optimizer(decision, observations)
     knowledge_runs = list(base_knowledge_runs)
     print(
-        f"{prefix}OptimizationAgent: generating paragraph patches for "
+        f"{prefix}OptimizationAgent: generating complete strategy.md for "
         f"{race}/{strategy_name}",
         flush=True,
     )
@@ -613,10 +808,53 @@ def run_optimization_agent_loop(
             )
             continue
 
-        normalized, ignored_unchanged = _drop_unchanged_patches(
-            normalized,
-            parent_document=parent_document,
+        required_preservation_checks = list(
+            (decision.get("plan") or {}).get("preservation_checks") or []
         )
+        preservation_audit = list(normalized.get("preservation_audit") or [])
+        if required_preservation_checks and not preservation_audit:
+            error = (
+                "optimizer must audit how the complete candidate preserves the "
+                "Champion's validated winning mechanisms"
+            )
+            candidate = normalized
+            validation_errors.append(error)
+            prompt_errors = [error]
+            events.append(
+                {
+                    "attempt": attempt,
+                    "action": "candidate_preservation_audit",
+                    "valid": False,
+                    "error": error,
+                    "llm_calls": llm_calls,
+                }
+            )
+            continue
+        if any(item.get("effect") == "broken" for item in preservation_audit):
+            error = (
+                "candidate preservation audit marks a validated winning mechanism "
+                "as broken"
+            )
+            candidate = normalized
+            validation_errors.append(error)
+            prompt_errors = [error]
+            events.append(
+                {
+                    "attempt": attempt,
+                    "action": "candidate_preservation_audit",
+                    "valid": False,
+                    "error": error,
+                    "llm_calls": llm_calls,
+                }
+            )
+            continue
+
+        ignored_unchanged: list[str] = []
+        if not normalized.get("strategy_md"):
+            normalized, ignored_unchanged = _drop_unchanged_patches(
+                normalized,
+                parent_document=parent_document,
+            )
         if ignored_unchanged:
             events.append(
                 {
@@ -632,7 +870,7 @@ def run_optimization_agent_loop(
                 f"patches: {', '.join(ignored_unchanged)}",
                 flush=True,
             )
-        if not normalized["patches"]:
+        if not normalized.get("strategy_md") and not normalized["patches"]:
             error = "optimizer candidate contains only unchanged paragraph replacements"
             candidate = normalized
             validation_errors.append(error)
@@ -648,31 +886,36 @@ def run_optimization_agent_loop(
             )
             continue
 
-        operations = _patches_to_operations(normalized["patches"])
         rationale = _candidate_rationale(decision=decision, candidate=normalized)
-        try:
-            patched_text, paragraph_changes = parent_document.apply_patch(operations)
-        except ValueError as exc:
-            error = str(exc)
-            candidate = normalized
-            validation_errors.append(error)
-            prompt_errors = [error]
-            events.append(
-                {
-                    "attempt": attempt,
-                    "action": "apply_strategy_patch",
-                    "valid": False,
-                    "error": error,
-                    "llm_calls": llm_calls,
-                }
-            )
-            if attempt <= MAX_VALIDATION_RETRIES:
-                print(
-                    f"{prefix}OptimizationAgent: apply patch failed; "
-                    f"retrying ({attempt}/{MAX_VALIDATION_RETRIES}): {error}",
-                    flush=True,
+        operations: list[dict[str, str]] = []
+        if normalized.get("strategy_md"):
+            patched_text = str(normalized["strategy_md"])
+            paragraph_changes = list(normalized.get("document_changes") or [])
+        else:
+            operations = _patches_to_operations(normalized["patches"])
+            try:
+                patched_text, paragraph_changes = parent_document.apply_patch(operations)
+            except ValueError as exc:
+                error = str(exc)
+                candidate = normalized
+                validation_errors.append(error)
+                prompt_errors = [error]
+                events.append(
+                    {
+                        "attempt": attempt,
+                        "action": "apply_strategy_patch",
+                        "valid": False,
+                        "error": error,
+                        "llm_calls": llm_calls,
+                    }
                 )
-            continue
+                if attempt <= MAX_VALIDATION_RETRIES:
+                    print(
+                        f"{prefix}OptimizationAgent: apply patch failed; "
+                        f"retrying ({attempt}/{MAX_VALIDATION_RETRIES}): {error}",
+                        flush=True,
+                    )
+                continue
 
         payload = {
             **normalized,
@@ -691,11 +934,13 @@ def run_optimization_agent_loop(
         # weak-but-executable semantic result can still be evaluated.
         latest_applied_improvement = draft_improvement
 
-        structure_errors = validate_strategy_patch_structure(
-            decision=decision,
-            patches=normalized["patches"],
-            parent_document=parent_document,
-        )
+        structure_errors = []
+        if not normalized.get("strategy_md"):
+            structure_errors = validate_strategy_patch_structure(
+                decision=decision,
+                patches=normalized["patches"],
+                parent_document=parent_document,
+            )
         if structure_errors:
             error = "; ".join(structure_errors)
             latest_applied_failure_stage = "structure"
@@ -751,6 +996,7 @@ def run_optimization_agent_loop(
         last_improvement = draft_improvement
         candidate_knowledge = _candidate_knowledge_run(
             candidate_text=patched_text,
+            parent_text=parent_text,
             race=race,
             capability_manifest=capability_manifest,
         )
@@ -789,25 +1035,29 @@ def run_optimization_agent_loop(
                         flush=True,
                     )
                 continue
+        semantic_audit: dict[str, Any] = {}
         semantic_errors = validate_strategy_patch_semantics(
             decision=decision,
             parent_text=parent_text,
             candidate_text=patched_text,
             patches=normalized["patches"],
             inheritance=normalized.get("inheritance"),
+            preservation_audit=normalized.get("preservation_audit"),
             capability_manifest=capability_manifest,
             knowledge_runs=knowledge_runs,
+            prior_experiences=prior_experiences,
+            audit_output=semantic_audit,
+            race=race,
             model=model,
         )
+        if semantic_audit:
+            draft_improvement.raw["deterministic_feasibility_audit"] = semantic_audit
+            draft_improvement.analysis["deterministic_feasibility_audit"] = semantic_audit
         if semantic_errors:
             error = "; ".join(semantic_errors)
             latest_applied_failure_stage = "semantic"
             validation_errors.append(error)
             prompt_errors = [error]
-            for error_type in _semantic_error_types(semantic_errors):
-                semantic_type_attempts[error_type] = (
-                    semantic_type_attempts.get(error_type, 0) + 1
-                )
             events.append(
                 {
                     "attempt": attempt,
@@ -818,40 +1068,9 @@ def run_optimization_agent_loop(
                     "paragraph_changes": paragraph_changes,
                 }
             )
-            replan_reason = _analysis_replan_reason(
-                semantic_errors,
-                type_attempts=semantic_type_attempts,
-            )
-            if replan_reason:
-                # Keep the detailed candidate errors in the optimization event,
-                # but return only the abstract reason to Cross-Match Analysis.
-                # Concrete suggestions such as a particular scan, structure, or
-                # target otherwise anchor the next analysis to the failed plan.
-                replan_error = f"analysis_replan_required: {replan_reason}"
-                events.append(
-                    {
-                        "attempt": attempt,
-                        "action": "analysis_replan_required",
-                        "valid": False,
-                        "error": replan_error,
-                        "llm_calls": llm_calls,
-                    }
-                )
-                print(
-                    f"{prefix}OptimizationAgent: {replan_reason}; "
-                    "returning to cross-match analysis",
-                    flush=True,
-                )
-                return (
-                    ValidationResult(ok=False, error=replan_error),
-                    None,
-                    observations,
-                    validation_errors,
-                    events,
-                )
             if attempt <= MAX_VALIDATION_RETRIES:
                 print(
-                    f"{prefix}OptimizationAgent: patch semantics failed; "
+                    f"{prefix}OptimizationAgent: candidate semantics failed; "
                     f"retrying ({attempt}/{MAX_VALIDATION_RETRIES}): {error}",
                     flush=True,
                 )
@@ -919,20 +1138,6 @@ def run_optimization_agent_loop(
             validation_errors,
             events,
         )
-    events.append(
-        {
-            "action": "reject_latest_candidate_after_validation_retry_exhausted",
-            "valid": False,
-            "error": error,
-            "failure_stage": latest_applied_failure_stage,
-            "llm_calls": llm_calls,
-        }
-    )
-    print(
-        f"{prefix}OptimizationAgent: validation retries exhausted; "
-        "candidate rejected and no match evaluation will start",
-        flush=True,
-    )
     return (
         ValidationResult(ok=False, error=error),
         None,

@@ -1,34 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from .config import SKILL_FILES
 from .types import BattleAnalysis, ToolObservation
-
-
-_RUNTIME_STATE_IDENTIFIERS = re.compile(
-    r"\b(?:SiegeTankSieged|VikingAssault|VikingFighter|LiberatorAG)\b",
-    re.IGNORECASE,
-)
-
-
-def _strategy_safe_knowledge(value: Any) -> Any:
-    """Remove runtime-only state identifiers from LLM strategy context.
-
-    The raw deterministic packet remains intact in logs for factual audit.  A
-    strategy planner only needs the explanatory fact that a transformation
-    exists; exposing the internal output-unit name invites it to write a
-    condition the Commander cannot express.
-    """
-    if isinstance(value, str):
-        return _RUNTIME_STATE_IDENTIFIERS.sub("runtime transformation state", value)
-    if isinstance(value, list):
-        return [_strategy_safe_knowledge(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _strategy_safe_knowledge(item) for key, item in value.items()}
-    return value
 
 
 def json_block(data: Any) -> str:
@@ -87,9 +63,7 @@ def render_knowledge_results(runs: list[dict[str, Any]]) -> str:
             "ok": bool(run.get("ok")),
         }
         if row["ok"]:
-            row["answer"] = str(
-                _strategy_safe_knowledge(str(run.get("answer") or "").strip())
-            )
+            row["answer"] = str(run.get("answer") or "").strip()
             packets: list[dict[str, Any]] = []
             for evidence in run.get("dataset_evidence") or []:
                 if not isinstance(evidence, dict):
@@ -98,23 +72,21 @@ def render_knowledge_results(runs: list[dict[str, Any]]) -> str:
                 if not isinstance(packet, dict):
                     continue
                 packets.append(
-                    _strategy_safe_knowledge(
-                        {
-                            key: packet.get(key)
-                            for key in (
-                                "schema",
-                                "coverage",
-                                "action_facts",
-                                "entity_facts",
-                                "production",
-                                "control_effects",
-                                "relations",
-                                "calculations",
-                                "missing",
-                            )
-                            if packet.get(key) not in (None, [], {})
-                        }
-                    )
+                    {
+                        key: packet.get(key)
+                        for key in (
+                            "schema",
+                            "coverage",
+                            "action_facts",
+                            "entity_facts",
+                            "production",
+                            "control_effects",
+                            "relations",
+                            "calculations",
+                            "missing",
+                        )
+                        if packet.get(key) not in (None, [], {})
+                    }
                 )
             if packets:
                 row["verified_packets"] = packets
@@ -134,12 +106,7 @@ def render_retrieval_evidence(packet: dict[str, Any]) -> str:
 
 
 def render_optimizer_decision(decision: dict[str, Any]) -> str:
-    """Render only the decision fields that own candidate generation.
-
-    Diagnostic fields remain in checkpoints for reporting, but are intentionally
-    omitted here so the Optimizer does not have to reconcile several overlapping
-    descriptions of strategy identity, failure stage, and expected effect.
-    """
+    """Compact Cross-match Decision for the Optimizer; no match summaries."""
     priority = decision.get("priority_problem") or {}
     if not isinstance(priority, dict):
         priority = {"problem": str(priority)}
@@ -150,9 +117,10 @@ def render_optimizer_decision(decision: dict[str, Any]) -> str:
             if isinstance(decision.get("strategy_contract"), dict)
             else {}
         ),
-        "information_grounding": (
-            dict(decision.get("information_grounding"))
-            if isinstance(decision.get("information_grounding"), dict)
+        "strengths_to_preserve": decision.get("strengths_to_preserve") or [],
+        "outcome_contrast": (
+            dict(decision.get("outcome_contrast"))
+            if isinstance(decision.get("outcome_contrast"), dict)
             else {}
         ),
         "priority_problem": {
@@ -161,6 +129,27 @@ def render_optimizer_decision(decision: dict[str, Any]) -> str:
             "control_class": str(priority.get("control_class") or "").strip(),
         },
         "hypothesis": str(decision.get("hypothesis") or "").strip(),
+        "failure_mode_analysis": (
+            dict(decision.get("failure_mode_analysis"))
+            if isinstance(decision.get("failure_mode_analysis"), dict)
+            else {}
+        ),
+        "priority_alignment": (
+            dict(decision.get("priority_alignment"))
+            if isinstance(decision.get("priority_alignment"), dict)
+            else {}
+        ),
+        "mechanism_prediction": (
+            dict(decision.get("mechanism_prediction"))
+            if isinstance(decision.get("mechanism_prediction"), dict)
+            else {}
+        ),
+        "retrieval_assessment": (
+            dict(decision.get("retrieval_assessment"))
+            if isinstance(decision.get("retrieval_assessment"), dict)
+            else {}
+        ),
+        "contact_evidence": list(decision.get("contact_evidence") or [])[:16],
         "plan": {
             "direction": str(plan.get("direction") or "").strip(),
             "material_behavior_change": str(
@@ -168,6 +157,30 @@ def render_optimizer_decision(decision: dict[str, Any]) -> str:
             ).strip(),
             "coordinated_changes": list(plan.get("coordinated_changes") or []),
             "preserve": list(plan.get("preserve") or []),
+            "contact_window_effect": str(
+                plan.get("contact_window_effect") or "unknown"
+            ).strip(),
+            "new_hard_prerequisites": list(
+                plan.get("new_hard_prerequisites") or []
+            ),
+            "production_tradeoffs": list(plan.get("production_tradeoffs") or []),
+            "window_tradeoff_evidence": list(
+                plan.get("window_tradeoff_evidence") or []
+            ),
+            "why_window_remains_favorable": str(
+                plan.get("why_window_remains_favorable") or ""
+            ).strip(),
+            "preservation_checks": list(plan.get("preservation_checks") or []),
+            "composition_change_allowed": bool(
+                plan.get("composition_change_allowed")
+            ),
+            "retreat_change_allowed": bool(plan.get("retreat_change_allowed")),
+            "stage_scope_evidence": list(
+                plan.get("stage_scope_evidence") or []
+            ),
+            "stage_scope_reason": str(
+                plan.get("stage_scope_reason") or ""
+            ).strip(),
         },
     }
     return json_compact_block(payload)
@@ -177,6 +190,7 @@ def render_discovery_findings(discovery: dict[str, Any]) -> str:
     """Pass Round 1 findings to Round 2 as compact JSON, not scattered prose."""
     payload = {
         "strategy_contract": discovery.get("strategy_contract") or {},
+        "outcome_contrast": discovery.get("outcome_contrast") or {},
         "strengths": discovery.get("strengths") or [],
         "weaknesses": discovery.get("weaknesses") or [],
         "unknowns": discovery.get("unknowns") or [],
@@ -210,9 +224,7 @@ def render_sc2_knowledge(observations: list[ToolObservation]) -> str:
         if plan_ids:
             header += f" plans={plan_ids}"
         if observation.ok:
-            body = _strategy_safe_knowledge(
-                observation.summary or json_block(observation.result)
-            )
+            body = observation.summary or json_block(observation.result)
         else:
             body = str(observation.result.get("error") or observation.summary or "failed")
         blocks.append(f"{header}\nQuery args: {json_block(observation.args)}\nAnswer:\n{body}")

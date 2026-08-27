@@ -15,31 +15,29 @@ def normalize_strategy_contract(value: Any, *, strategy_name: str) -> dict[str, 
             return []
         return [text for item in raw if (text := str(item).strip())]
 
+    identity = str(
+        contract.get("identity") or contract.get("intended_plan") or ""
+    ).strip() or f"Current {strategy_name} strategy"
     style = str(contract.get("style") or "").strip()
     core_win_mechanism = str(
-        contract.get("core_win_mechanism")
-        or contract.get("identity")
-        or contract.get("intended_plan")
+        contract.get("core_win_mechanism") or identity
+    ).strip()
+    critical_power_window = str(
+        contract.get("critical_power_window")
+        or contract.get("critical_timing_or_power_spike")
         or ""
     ).strip()
-    identity = str(
-        contract.get("identity")
-        or contract.get("intended_plan")
-        or core_win_mechanism
-        or ""
-    ).strip() or f"Current {strategy_name} strategy"
-    if not core_win_mechanism:
-        core_win_mechanism = identity
-    critical_timing = str(
-        contract.get("critical_timing_or_power_spike")
-        or contract.get("critical_timing")
-        or contract.get("power_spike")
+    observed_winning_signature = str(
+        contract.get("observed_winning_signature")
+        or contract.get("winning_signature")
         or ""
     ).strip()
     commitments = clean_list(contract.get("core_commitments"))
     if not commitments:
         commitments = clean_list(contract.get("must_preserve"))
-    flexible_components = clean_list(contract.get("flexible_components"))
+    protected_invariants = clean_list(contract.get("protected_invariants"))
+    if not protected_invariants:
+        protected_invariants = list(commitments)
     boundary = str(contract.get("optimization_boundary") or "").strip()
     if not boundary:
         legacy_boundary = clean_list(contract.get("must_not_break"))
@@ -54,9 +52,12 @@ def normalize_strategy_contract(value: Any, *, strategy_name: str) -> dict[str, 
         "identity": identity,
         "style": style,
         "core_win_mechanism": core_win_mechanism,
-        "critical_timing_or_power_spike": critical_timing,
+        "critical_power_window": critical_power_window,
+        "observed_winning_signature": observed_winning_signature,
+        "winning_evidence": clean_list(contract.get("winning_evidence")),
         "core_commitments": commitments,
-        "flexible_components": flexible_components,
+        "protected_invariants": protected_invariants,
+        "flexible_components": clean_list(contract.get("flexible_components")),
         "optimization_boundary": boundary,
         "direction": direction,
     }
