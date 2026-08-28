@@ -36,7 +36,12 @@ def normalize_strategy_contract(value: Any, *, strategy_name: str) -> dict[str, 
     if not commitments:
         commitments = clean_list(contract.get("must_preserve"))
     protected_invariants = clean_list(contract.get("protected_invariants"))
-    if not protected_invariants:
+    if not protected_invariants and (
+        "intended_plan" in contract or "must_preserve" in contract
+    ):
+        # Legacy discovery schemas treated every listed commitment as protected.
+        # Modern discovery separates defining invariants from adjustable strategy
+        # implementation, so an omitted protected list must stay empty.
         protected_invariants = list(commitments)
     boundary = str(contract.get("optimization_boundary") or "").strip()
     if not boundary:

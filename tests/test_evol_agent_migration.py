@@ -429,6 +429,28 @@ def test_strategy_contract_normalizes_legacy_checkpoints() -> None:
     }
 
 
+def test_modern_strategy_contract_does_not_protect_every_implementation_detail() -> None:
+    contract = normalize_strategy_contract(
+        {
+            "style": "concentrated ground push",
+            "core_win_mechanism": "Siege Tanks anchor one decisive attack",
+            "core_commitments": [
+                "use three Barracks and two Factories",
+                "reinforce with the same composition",
+            ],
+            "flexible_components": ["support-unit balance"],
+        },
+        strategy_name="tank",
+    )
+
+    assert contract["core_commitments"] == [
+        "use three Barracks and two Factories",
+        "reinforce with the same composition",
+    ]
+    assert contract["protected_invariants"] == []
+    assert contract["flexible_components"] == ["support-unit balance"]
+
+
 def test_optimizer_decision_keeps_strategy_intent_and_outcome_contrast() -> None:
     contract = {
         "style": "early pressure",

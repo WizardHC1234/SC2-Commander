@@ -545,6 +545,8 @@ def test_cross_match_prompt_keeps_complete_events() -> None:
     assert "Do not return next_action, candidate_plans, candidate_rule, or target_paragraph_id" in prompt
     assert "depends on costs, prerequisites, production time" in prompt
     assert "query_knowledge" not in prompt
+    assert "Protect the strategy's defining combat style and core win mechanism" in prompt
+    assert "the instruction to reinforce with the same composition are flexible" in prompt
     assert '"time_s":431' in prompt
     assert '"enemy_observed":"visible marines"' in prompt
     assert '"enemy_truth":"hidden tanks"' in prompt
@@ -1282,12 +1284,18 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
     assert "target_latest_first_commitment_seconds" in proposal_prompt
     assert "tank production cap" in proposal_prompt
     assert "fixed-composition reserve or defensive squad" in proposal_prompt
+    assert "the absence of support units" in proposal_prompt
+    assert "post-contact continuation" in proposal_prompt
+    assert "do not make all new packages further versions of the same timing lever" in proposal_prompt
     assert "Optimization-Package Selector" in prompt
     assert "Program-calculated package budgets" in prompt
     assert "candidate_earliest_feasible_time_seconds" in prompt
     assert "selected_package_id" in prompt
     assert "Do not select a package" in prompt
     assert "custom fixed-composition army detachment" in prompt
+    assert "post-contact reinforcement and continuation" in prompt
+    assert "implemented timing intervention improved commitment timing but not outcomes" in prompt
+    assert "support-unit absence" in prompt
 
 
 def test_package_preflight_marks_a_missed_time_budget() -> None:
