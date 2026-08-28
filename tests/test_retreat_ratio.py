@@ -6,6 +6,8 @@ from commander.retreat_policy import (
     RETREAT_MAX,
     RETREAT_MIN,
     clamp_retreat_ratio,
+    effective_retreat_ratio,
+    retreat_confirmation_ready,
 )
 from commander.tools import apply_tool_calls, _parse_retreat_ratio
 
@@ -111,3 +113,51 @@ def test_recover_margin_hysteresis():
     """Recovery threshold stays meaningfully above the trigger."""
     assert DEFAULT_RETREAT_RATIO + RECOVER_MARGIN >= 1.0
     assert RECOVER_MARGIN >= 0.3
+
+
+def test_nearby_support_prevents_a_false_local_retreat():
+    ratio = effective_retreat_ratio(
+        group_ratio=0.4,
+        support_ratio=1.2,
+        mission_ratio=1.3,
+        group_power_share=0.5,
+    )
+    assert ratio == 1.2
+
+
+def test_tiny_vanguard_uses_mission_ratio_but_main_force_does_not():
+    fragment_ratio = effective_retreat_ratio(
+        group_ratio=0.2,
+        support_ratio=0.2,
+        mission_ratio=2.0,
+        group_power_share=0.05,
+    )
+    main_ratio = effective_retreat_ratio(
+        group_ratio=0.2,
+        support_ratio=0.2,
+        mission_ratio=2.0,
+        group_power_share=0.8,
+    )
+    assert fragment_ratio == 2.0
+    assert main_ratio == 0.2
+
+
+def test_non_catastrophic_low_ratio_requires_persistence():
+    assert retreat_confirmation_ready(
+        now=101.0,
+        below_threshold_since=100.0,
+        effective_ratio_value=0.5,
+    ) is False
+    assert retreat_confirmation_ready(
+        now=102.1,
+        below_threshold_since=100.0,
+        effective_ratio_value=0.5,
+    ) is True
+
+
+def test_catastrophic_ratio_retreats_immediately():
+    assert retreat_confirmation_ready(
+        now=100.0,
+        below_threshold_since=100.0,
+        effective_ratio_value=0.1,
+    ) is True

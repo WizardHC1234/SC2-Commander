@@ -182,3 +182,87 @@ def test_experiment_audit_summarizes_only_parent_records_added_after_analysis(
     experiment_audit.audit_experiment(**kwargs)
 
     assert summarized == [str(new_parent), str(candidate)]
+
+
+def test_gate_execution_audit_detects_repeated_gate_met_without_attack(
+    tmp_path: Path,
+) -> None:
+    records: list[GameEvidence] = []
+    for game in range(2):
+        path = tmp_path / f"candidate_{game}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "records": [
+                        {
+                            "game_time_seconds": 100.0,
+                            "observation_full": {
+                                "economy": {"workers": 20, "own_base_count": 1},
+                                "own_forces": {"completed_counts": {"MARINE": 20}},
+                                "production": {"completed": {"MARINE": 20}},
+                                "technology": {"completed_upgrades": []},
+                                "army_control": {"current_commands": []},
+                            },
+                        },
+                        {
+                            "game_time_seconds": 160.0,
+                            "observation_full": {
+                                "economy": {"workers": 20, "own_base_count": 1},
+                                "own_forces": {"completed_counts": {"MARINE": 24}},
+                                "production": {"completed": {"MARINE": 24}},
+                                "technology": {"completed_upgrades": []},
+                                "army_control": {"current_commands": []},
+                            },
+                        },
+                    ],
+                    "interactions": [
+                        {"agent": "commander", "accepted": True, "game_time": 100.0, "army_policy": {"commands": [{"movement_mode": "hold"}]}},
+                        {"agent": "commander", "accepted": True, "game_time": 160.0, "army_policy": {"commands": [{"movement_mode": "hold"}]}},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        records.append(
+            GameEvidence(
+                file=str(path),
+                result="Defeat",
+                duration="05:00",
+                timeline="",
+                meta={},
+            )
+        )
+    audit = experiment_audit._audit_gate_execution(
+        records,
+        experiment_spec={
+            "first_commitment_timing": {
+                "candidate_earliest_feasible_time_seconds": 90.0,
+                "declared_packages": {
+                    "candidate": {
+                        "economy": {
+                            "worker_target_before_commitment": 20,
+                            "base_target_before_commitment": 1,
+                        },
+                        "gate_components": [
+                            {"action": "train_marine", "quantity": 20}
+                        ],
+                    }
+                },
+            }
+        },
+    )
+
+    assert audit["status"] == "execution_issue"
+    assert audit["execution_issue_matches"] == 2
+    assert all(
+        item["verdict"] == "gate_met_no_commitment" for item in audit["matches"]
+    )
+    normalized = experiment_audit._normalize_audit(
+        {
+            "implementation_verdict": "implemented",
+            "hypothesis_verdict": "supported",
+        },
+        gate_execution_audit=audit,
+    )
+    assert normalized["implementation_verdict"] == "execution_invalid"
+    assert normalized["hypothesis_verdict"] == "not_tested"

@@ -59,6 +59,27 @@ from evol_agent.validation import (
 )
 
 
+def _strategy_area_audit(*revised: str) -> list[dict[str, object]]:
+    revised_areas = set(revised)
+    return [
+        {
+            "area": area,
+            "decision": "revise" if area in revised_areas else "preserve",
+            "finding": "this strategy area was reviewed against the selected mechanism",
+            "required_change": "apply the coordinated package in this area" if area in revised_areas else "",
+            "evidence": ["Game 2 @ 430s: supporting trajectory evidence"],
+        }
+        for area in (
+            "goal_identity",
+            "economy_expansion",
+            "production_order_capacity",
+            "technology_composition",
+            "attack_timing_objective",
+            "reinforcement_retreat_cleanup",
+        )
+    ]
+
+
 VALID_STRATEGY = """# Summary
 A compact Terran plan built around a gathered Marine and Tank force.
 
@@ -334,7 +355,6 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
     assert "MATCH_RAW_WIN_MARKER" in batch_prompt
     assert "MATCH_RAW_LOSS_MARKER" in batch_prompt
     assert "Cross-Match Discovery Agent" in batch_prompt
-    assert '"action": "discover_batch"' in batch_prompt
     assert '"strengths"' in batch_prompt
     assert '"weaknesses"' in batch_prompt
     assert '"unknowns"' in batch_prompt
@@ -344,18 +364,18 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
     assert "target_paragraph_id" not in schema
     assert "candidate_rule" not in schema
     assert "query_knowledge" not in batch_prompt
-    assert "It is valid to return no knowledge questions" in batch_prompt or "empty list is valid" in batch_prompt
+    assert "Return one to three static SC2 knowledge questions" in batch_prompt
+    assert '"entities"' in schema and '"needs"' in schema
     assert "Stimpack" not in batch_prompt
-    assert '"action": "draft_candidate"' in candidate_prompt
+    assert '"action":"draft_candidate"' in candidate_prompt
     assert "gathered push" in candidate_prompt
     assert "improve regroup timing" in candidate_prompt
     assert "Select exactly one self-contained candidate plan" not in candidate_prompt
     assert "selected_plan_ids" not in candidate_prompt
     assert "Generate the entire replacement strategy.md" in candidate_prompt
     assert '"strategy_md"' in candidate_prompt
-    assert "globally rewritten document must still make one causal change" in candidate_prompt
-    assert "coherent intervention package" in candidate_prompt
-    assert "two required sections" in candidate_prompt
+    assert "one coherent strategy" in candidate_prompt
+    assert "Learn from both outcomes" in candidate_prompt
     assert "# Summary" in candidate_prompt and "# Details" in candidate_prompt
     assert "why_required" not in candidate_prompt.split("Return one JSON object only:")[1]
     assert "Independent factual match summaries" not in candidate_prompt
@@ -575,7 +595,7 @@ def test_discovery_does_not_require_a_plan() -> None:
     assert len(payload["matchup_patterns"][0]["evidence"]) == 2
 
 
-def test_decision_rejects_an_incomplete_intervention_package() -> None:
+def test_decision_fills_a_concise_intervention_package() -> None:
     payload, error = _normalize_cross_match_decision(
         {
             "next_action": "propose_strategy_patch",
@@ -617,8 +637,9 @@ def test_decision_rejects_an_incomplete_intervention_package() -> None:
         strategy_name="generic",
     )
 
-    assert payload is None
-    assert "plan.coordinated_changes" in error
+    assert error == ""
+    assert payload is not None
+    assert payload["plan"]["coordinated_changes"]
 
 
 def test_discovery_allows_empty_knowledge_questions() -> None:
@@ -635,6 +656,45 @@ def test_discovery_allows_empty_knowledge_questions() -> None:
     assert error == ""
     assert payload is not None
     assert payload["knowledge_questions"] == []
+
+
+def test_discovery_adds_data_query_for_unverified_production_claim() -> None:
+    payload, error = _normalize_cross_match_discovery(
+        {
+            "strategy_contract": {
+                "style": "one-base Marine pressure",
+                "core_win_mechanism": "reach 20 Marines before enemy Siege Tanks",
+                "critical_power_window": "early contact",
+                "core_commitments": ["Barracks production", "avoid Supply Depot blocks"],
+            },
+            "outcome_contrast": {
+                "winning_pattern": "early Marine contact",
+                "winning_evidence": ["Game 2: 20 Marines at 251.8s"],
+                "loss_shortfall": "Barracks production and supply blocks delay contact",
+                "loss_evidence": ["Game 1: first attack at 316.1s"],
+            },
+            "weaknesses": [
+                {
+                    "pattern": "Barracks production is delayed",
+                    "evidence": ["Game 1: first attack at 316.1s"],
+                }
+            ],
+            "knowledge_questions": [],
+        },
+        knowledge_mode="enabled",
+        strategy_name="marine",
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert len(payload["knowledge_questions"]) == 1
+    question = payload["knowledge_questions"][0]
+    assert question["source"] == "deterministic_fallback_from_discovery"
+    assert question["needs"] == ["requirements"]
+    assert "Marine" in question["entities"]
+    assert "Barracks" in question["entities"]
+    match_queries = payload["query_plan"]["match_evidence_queries"]
+    assert any("Game 1 @ 316.1s" in ref for item in match_queries for ref in item["evidence_refs"])
 
 
 def test_decision_propose_requires_hypothesis_and_plan_direction() -> None:
@@ -691,6 +751,10 @@ def test_decision_propose_requires_hypothesis_and_plan_direction() -> None:
                         "why_required": "the strategy must survive until added capacity matters",
                     },
                 ],
+                "strategy_area_audit": _strategy_area_audit(
+                    "production_order_capacity",
+                    "attack_timing_objective",
+                ),
             },
         },
         strategy_name="tank",
@@ -702,9 +766,9 @@ def test_decision_propose_requires_hypothesis_and_plan_direction() -> None:
     assert payload["hypothesis"].startswith("an earlier factory")
     assert payload["mechanism_prediction"]["expected_change"].startswith("more of")
     assert payload["plan"]["direction"].startswith("Prioritize a second Factory")
-    assert payload["candidate_plans"][0]["id"] == "D1"
-    assert len(payload["candidate_plans"][0]["changes"]) == 2
-    assert payload["knowledge_questions"] == []
+    assert len(payload["plan"]["coordinated_changes"]) == 2
+    assert "candidate_plans" not in payload
+    assert "knowledge_questions" not in payload
     assert payload["considered_explanations"] == []
 
 
@@ -786,6 +850,11 @@ def test_decision_keeps_considered_explanations_without_patch_fields() -> None:
                         "why_required": "the matchup response must persist after first contact",
                     },
                 ],
+                "strategy_area_audit": _strategy_area_audit(
+                    "technology_composition",
+                    "attack_timing_objective",
+                    "reinforcement_retreat_cleanup",
+                ),
             },
             "considered_explanations": [
                 {
@@ -840,7 +909,7 @@ def test_decision_keeps_considered_explanations_without_patch_fields() -> None:
     assert payload["plan"]["direction"].startswith("Raise matchup-dependent")
 
 
-def test_decision_propose_requires_complete_mechanism_prediction() -> None:
+def test_decision_synthesizes_missing_mechanism_prediction_details() -> None:
     payload, error = _normalize_cross_match_decision(
         {
             "next_action": "propose_strategy_patch",
@@ -862,8 +931,9 @@ def test_decision_propose_requires_complete_mechanism_prediction() -> None:
         strategy_name="tank",
     )
 
-    assert payload is None
-    assert "minimum_material_change" in error
+    assert error == ""
+    assert payload is not None
+    assert payload["mechanism_prediction"]["minimum_material_change"]
 
 
 def test_decision_rejects_query_knowledge() -> None:
@@ -916,7 +986,7 @@ def test_propose_runtime_problem_is_coerced_to_inspect_runtime() -> None:
     assert payload is not None
     assert payload["next_action"] == "inspect_runtime"
     assert payload["plan"] is None
-    assert payload["candidate_plans"] == []
+    assert "candidate_plans" not in payload
 
 
 def _auto_retreat_runtime_decision(evidence: list[str]) -> dict:
@@ -1004,7 +1074,7 @@ def test_request_more_matches_does_not_need_hypothesis() -> None:
     assert payload["next_action"] == "request_more_matches"
     assert payload["hypothesis"] == ""
     assert payload["plan"] is None
-    assert payload["candidate_plans"] == []
+    assert "candidate_plans" not in payload
 
 
 def test_candidate_semantics_are_not_hard_coded_in_basic_validation() -> None:
@@ -1091,7 +1161,7 @@ def test_batch_analysis_can_route_runtime_work_without_a_candidate() -> None:
     assert error == ""
     assert payload is not None
     assert payload["next_action"] == "inspect_runtime"
-    assert payload["candidate_plans"] == []
+    assert "candidate_plans" not in payload
 
 
 def test_optimizer_always_calls_llm_for_paragraph_patches(monkeypatch) -> None:
@@ -1134,6 +1204,7 @@ def test_optimizer_always_calls_llm_for_paragraph_patches(monkeypatch) -> None:
                         "verdict": "bounded",
                     }
                 ],
+                    "new_dependency_audit": [],
                     "final_supply": {
                         "total": 119,
                         "calculation": "75 Marines plus 44 SCVs equals 119 supply",
@@ -1193,7 +1264,8 @@ def test_optimizer_always_calls_llm_for_paragraph_patches(monkeypatch) -> None:
     assert events[0]["llm_calls"] == 1
     assert "Gather 40 Marines and 8 Siege Tanks" in improvement.files["strategy.md"]
     assert improvement.analysis["hypothesis"] == "an earlier gathered force converts before scaling"
-    assert improvement.analysis["selected_plan_ids"] == ["D1"]
+    assert "selected_plan_ids" not in improvement.analysis
+    assert improvement.analysis["plan_direction"] == "lower the gathered attack threshold"
 
 def test_executor_manifest_lists_runtime_owned_boundaries() -> None:
     manifest = build_executor_capability_manifest("terran")

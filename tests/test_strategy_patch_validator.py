@@ -12,6 +12,7 @@ from evol_agent.core.optimizer_prompt import build_candidate_prompt
 from evol_agent.core.strategy_patch_validator import (
     _build_contact_timing_report,
     _blocking_semantic_errors,
+    _normalize_mechanism_equivalence_audit,
     build_strategy_patch_validation_prompt,
     validate_strategy_patch_semantics,
     validate_strategy_patch_structure,
@@ -37,6 +38,7 @@ def _semantic_payload(*, valid: bool = True, errors: list | None = None) -> dict
                 "verdict": "bounded",
             }
         ],
+        "new_dependency_audit": [],
         "final_supply": {
             "total": 119,
             "calculation": "75 Marines plus 44 SCVs equals 119 supply",
@@ -91,7 +93,7 @@ def _decision(**overrides) -> dict:
     return payload
 
 
-def test_optimizer_prompt_includes_replay_reasoning_without_authorizing_new_scope() -> None:
+def test_optimizer_prompt_uses_compact_evidence_driven_policy() -> None:
     prompt = build_candidate_prompt(
         strategy_name="tank",
         race="terran",
@@ -110,12 +112,13 @@ def test_optimizer_prompt_includes_replay_reasoning_without_authorizing_new_scop
         decision=_decision(),
     )
 
-    assert "Replay-grounded reasoning demonstrations" in prompt
-    assert "do not authorize changing its failure stage" in prompt
-    assert "Never copy their numbers into a candidate" in prompt
+    assert "Learn from both outcomes" in prompt
+    assert "Separate strategy defects from execution defects" in prompt
+    assert "History is evidence, not a ban list" in prompt
+    assert "do not fill audit forms" in prompt
 
 
-def test_semantic_validation_requires_winning_mechanism_audit() -> None:
+def test_semantic_validation_allows_missing_winning_mechanism_audit() -> None:
     decision = _decision(
         plan={
             "direction": "repair the loss shortfall",
@@ -127,7 +130,7 @@ def test_semantic_validation_requires_winning_mechanism_audit() -> None:
 
     errors = _blocking_semantic_errors(_semantic_payload(), decision=decision)
 
-    assert any("winning_mechanism_audit" in error for error in errors)
+    assert errors == []
 
 
 def test_failure_stage_scope_blocks_unselected_composition_change() -> None:
@@ -156,7 +159,7 @@ def test_failure_stage_scope_blocks_unselected_composition_change() -> None:
     assert any("composition_change_allowed is false" in error for error in errors)
 
 
-def test_failure_stage_scope_audit_is_required_for_new_scoped_decisions() -> None:
+def test_failure_stage_scope_audit_is_advisory_for_new_scoped_decisions() -> None:
     errors = _blocking_semantic_errors(
         _semantic_payload(),
         decision=_decision(
@@ -172,7 +175,7 @@ def test_failure_stage_scope_audit_is_required_for_new_scoped_decisions() -> Non
         ),
     )
 
-    assert any("did not compare composition and retreat" in error for error in errors)
+    assert errors == []
 
 
 def test_failure_stage_scope_blocks_unselected_retreat_change() -> None:
@@ -279,7 +282,7 @@ def test_candidate_critic_module_is_removed() -> None:
     assert not Path("evol_agent/core/candidate_critic.py").exists()
 
 
-def test_validator_prompt_checks_coherent_package_and_identity() -> None:
+def test_validator_prompt_is_limited_to_hard_execution_errors() -> None:
     prompt = build_strategy_patch_validation_prompt(
         decision=_decision(),
         parent_text=TANK_STRATEGY,
@@ -287,19 +290,12 @@ def test_validator_prompt_checks_coherent_package_and_identity() -> None:
         patches=[],
         capability_manifest=build_executor_capability_manifest("terran"),
     )
-    assert "unrelated second" in prompt
-    assert "direct contradiction" in prompt
-    assert "runtime contract" in prompt and "not provide" in prompt
-    assert "defining Champion mechanism" in prompt
-    assert "Do not re-rank the hypothesis" in prompt
-    assert "Test strength" in prompt
-    assert "minimum_material_change" in prompt
-    assert "never from patch count" in prompt
-    assert "production_target_audit" in prompt
-    assert "final_supply" in prompt
-    assert "Judge plan coverage and identity semantically" in prompt
-    assert "isolated keywords" in prompt
-    assert "NOT judging whether another causal hypothesis would have been better" in prompt
+    assert "direct internal contradiction" in prompt
+    assert "unsupported runtime action" in prompt
+    assert "missing mandatory" in prompt
+    assert "above 200 supply" in prompt
+    assert "similarity to history is non-blocking" in prompt
+    assert "production_target_audit" not in prompt
 
 
 def test_empty_patches_are_rejected() -> None:
@@ -765,7 +761,7 @@ def test_non_blocking_semantic_notes_do_not_fail(monkeypatch) -> None:
     )
 
 
-def test_resumed_unit_without_ultimate_goal_target_is_always_blocking() -> None:
+def test_resumed_unit_with_stage_target_does_not_require_duplicate_final_target() -> None:
     payload = _semantic_payload()
     payload["production_target_audit"] = [
         {
@@ -780,7 +776,7 @@ def test_resumed_unit_without_ultimate_goal_target_is_always_blocking() -> None:
 
     errors = _blocking_semantic_errors(payload)
 
-    assert any("production bound for Marauder" in error for error in errors)
+    assert errors == []
 
 
 def test_complete_resumed_unit_and_supply_audit_can_pass() -> None:
@@ -804,11 +800,10 @@ def test_complete_resumed_unit_and_supply_audit_can_pass() -> None:
     assert _blocking_semantic_errors(payload) == []
 
 
-def test_missing_production_and_supply_audits_are_blocking() -> None:
+def test_missing_production_and_supply_audits_are_advisory() -> None:
     errors = _blocking_semantic_errors({"valid": True, "errors": []})
 
-    assert any("production_target_audit" in error for error in errors)
-    assert any("final_supply" in error for error in errors)
+    assert errors == []
 
 
 def test_blocking_dict_errors_are_formatted(monkeypatch) -> None:
@@ -961,6 +956,28 @@ def test_style_audit_allows_unit_change_when_combat_style_is_preserved() -> None
     )
 
     assert _blocking_semantic_errors(payload) == []
+
+
+def test_new_gas_unit_requires_compatible_gas_plan() -> None:
+    payload = _semantic_payload()
+    payload["new_dependency_audit"] = [
+        {
+            "target": "Marauder after the first attack",
+            "stage": "post-contact reinforcement",
+            "gas_required": True,
+            "gas_plan": "none",
+            "required_prerequisites": ["Barracks Tech Lab", "Refinery"],
+            "declared_prerequisites": ["Barracks Tech Lab"],
+            "missing_dependencies": ["compatible gas economy"],
+            "shared_production_tradeoff": "uses a Barracks that produced Marines",
+            "verdict": "resource_conflict",
+        }
+    ]
+
+    errors = _blocking_semantic_errors(payload)
+
+    assert any("gas economy" in error for error in errors)
+    assert any("compatible gas economy" in error for error in errors)
 
 
 def test_style_audit_blocks_support_unit_as_hidden_attack_gate() -> None:
@@ -1269,14 +1286,115 @@ def test_contact_window_uncertainty_does_not_reject_an_executable_candidate() ->
 
 
 def test_mechanism_history_audit_blocks_semantic_rename() -> None:
-    payload = _semantic_payload()
-    payload["mechanism_history_audit"] = {
-        "semantic_relation": "equivalent_to_prior",
-        "related_experiment_ids": ["battlecruiser:g001:harder:battlecruiser_opt2"],
-        "repaired_dependencies": [],
-        "verdict": "blocked",
-    }
-
-    errors = _blocking_semantic_errors(payload)
+    experiment_id = "battlecruiser:g001:harder:battlecruiser_opt2"
+    audit, errors = _normalize_mechanism_equivalence_audit(
+        {
+            "mechanism_equivalence_audit": {
+                "semantic_relation": "equivalent_to_prior",
+                "related_experiment_ids": [experiment_id],
+                "repaired_dependencies": [],
+                "reason": "both changes hard-gate the same upgrade package",
+                "confidence": "high",
+            }
+        },
+        prior_experiences=[
+            {
+                "experiment_id": experiment_id,
+                "implementation_verdict": "implemented",
+                "hypothesis_verdict": "contradicted",
+                "decision": "rejected",
+            }
+        ],
+    )
 
     assert any("mechanism history" in item for item in errors)
+    assert audit["verdict"] == "blocked"
+
+
+def test_semantic_validation_does_not_block_semantically_similar_history(monkeypatch) -> None:
+    experiment_id = "marine:g001:harder:marine_opt1"
+    prompts: list[str] = []
+
+    def fake_llm(prompt: str, **kwargs):
+        prompts.append(prompt)
+        if prompt.startswith("You are an independent semantic experiment-history judge"):
+            return {
+                "mechanism_equivalence_audit": {
+                    "semantic_relation": "equivalent_to_prior",
+                    "related_experiment_ids": [experiment_id],
+                    "repaired_dependencies": [],
+                    "reason": "both interventions raise the same first-attack gate",
+                    "confidence": "high",
+                }
+            }
+        return _semantic_payload()
+
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        fake_llm,
+    )
+    audit: dict = {}
+    errors = validate_strategy_patch_semantics(
+        decision=_decision(),
+        parent_text="Attack with 20 Marines.",
+        candidate_text="Attack with 50 Marines.",
+        patches=[{"target": "main_attack_gate", "replacement": "Attack with 50 Marines."}],
+        prior_experiences=[
+            {
+                "experiment_id": experiment_id,
+                "mechanism_prediction": {
+                    "minimum_material_change": "Raise the gate from 20 to 30 Marines."
+                },
+                "implementation_verdict": "implemented",
+                "hypothesis_verdict": "contradicted",
+                "decision": "rejected",
+            }
+        ],
+        audit_output=audit,
+    )
+
+    assert errors == []
+    assert "mechanism_equivalence_audit" not in audit
+    assert not any("independent semantic experiment-history judge" in prompt for prompt in prompts)
+
+
+def test_prior_gate_execution_issue_blocks_another_attack_gate_edit(monkeypatch) -> None:
+    def fake_llm(prompt: str, **kwargs):
+        if prompt.startswith("You are an independent semantic experiment-history judge"):
+            return {
+                "mechanism_equivalence_audit": {
+                    "semantic_relation": "new",
+                    "related_experiment_ids": [],
+                    "repaired_dependencies": [],
+                    "reason": "the proposed label is different",
+                    "confidence": "medium",
+                }
+            }
+        return _semantic_payload()
+
+    monkeypatch.setattr(
+        "evol_agent.core.strategy_patch_validator.call_json_llm",
+        fake_llm,
+    )
+    errors = validate_strategy_patch_semantics(
+        decision=_decision(),
+        parent_text="Attack with 20 Marines.",
+        candidate_text="Attack with 18 Marines.",
+        patches=[{"target": "main_attack_gate", "replacement": "Attack with 18 Marines."}],
+        prior_experiences=[
+            {
+                "experiment_id": "marine:g002:harder:marine_opt2",
+                "gate_execution_audit": {
+                    "status": "execution_issue",
+                    "execution_issue_matches": 3,
+                },
+                "implementation_verdict": "execution_invalid",
+                "hypothesis_verdict": "not_tested",
+            }
+        ],
+    )
+
+    assert any(
+        "keep the strategy gate unchanged until runtime execution is repaired" in error
+        for error in errors
+    )

@@ -23,12 +23,16 @@ from commander.retreat_policy import (
     DEFAULT_RETREAT_RATIO,
     LOCAL_BATTLE_RADIUS,
     RECOVER_MARGIN,
+    RETREAT_CONFIRM_SECONDS,
+    RETREAT_SUPPORT_RADIUS,
     RETREAT_TIME_CAP_SECONDS,
     RETREAT_WATCHED_MODES,
     STATE_ACTIVE,
     STATE_HOLDING,
     STATE_RETREATING,
     GroupRetreatState,
+    effective_retreat_ratio,
+    retreat_confirmation_ready,
 )
 
 
@@ -452,6 +456,13 @@ class CombatControlAct(ActBase):
 
         state = self._retreat_states.setdefault(group_id, GroupRetreatState())
         now = float(getattr(self.ai, "time", 0.0))
+        command_signature = (
+            f"{command.movement_mode}:{command.destination_zone_id}:"
+            f"{command.retreat_ratio}"
+        )
+        if state.observed_command_signature != command_signature:
+            state.observed_command_signature = command_signature
+            state.below_threshold_since = None
 
         # The model issued a different command than the one we interrupted:
         # respect the new intent and re-evaluate from scratch.
@@ -466,6 +477,7 @@ class CombatControlAct(ActBase):
         ):
             state.state = STATE_ACTIVE
             state.original_command = None
+            state.below_threshold_since = None
 
         retreat_ratio = (
             command.retreat_ratio
@@ -474,7 +486,20 @@ class CombatControlAct(ActBase):
         )
         recover_ratio = retreat_ratio + RECOVER_MARGIN
         center = self._group_center(units)
-        local_ratio = self._local_battle_ratio(units, center)
+        assessment = self._battle_power_assessment(units, center)
+        local_ratio = effective_retreat_ratio(
+            group_ratio=assessment["group_ratio"],
+            support_ratio=assessment["support_ratio"],
+            mission_ratio=assessment["mission_ratio"],
+            group_power_share=assessment["group_power_share"],
+        )
+        state.group_ratio = assessment["group_ratio"]
+        state.support_ratio = assessment["support_ratio"]
+        state.mission_ratio = assessment["mission_ratio"]
+        state.effective_ratio = local_ratio
+        state.group_power_share = assessment["group_power_share"]
+        state.support_power = assessment["support_power"]
+        state.enemy_power = assessment["enemy_power"]
 
         if state.state in (STATE_RETREATING, STATE_HOLDING):
             timed_out = now - state.since >= RETREAT_TIME_CAP_SECONDS
@@ -482,6 +507,7 @@ class CombatControlAct(ActBase):
                 state.state = STATE_ACTIVE
                 state.original_command = None
                 state.detail = ""
+                state.below_threshold_since = None
             else:
                 if state.state == STATE_RETREATING and self._arrived_at(
                     center, state.retreat_zone_id
@@ -495,6 +521,18 @@ class CombatControlAct(ActBase):
                 return self._rewritten_command(command, state)
 
         if local_ratio < retreat_ratio:
+            if state.below_threshold_since is None:
+                state.below_threshold_since = now
+            if not retreat_confirmation_ready(
+                now=now,
+                below_threshold_since=state.below_threshold_since,
+                effective_ratio_value=local_ratio,
+            ):
+                state.detail = (
+                    f"monitoring low effective_ratio {local_ratio:.2f} < retreat "
+                    f"{retreat_ratio:.2f} for {RETREAT_CONFIRM_SECONDS:.1f}s"
+                )
+                return command
             if state.state != STATE_RETREATING:
                 retreat_zone_id = (
                     state.retreat_zone_id
@@ -508,12 +546,18 @@ class CombatControlAct(ActBase):
                     now,
                     retreat_zone_id=retreat_zone_id,
                     detail=(
-                        f"local_ratio {local_ratio:.2f} < retreat "
-                        f"{retreat_ratio:.2f}; retreating to {retreat_zone_id}"
+                        f"effective_ratio {local_ratio:.2f} < retreat "
+                        f"{retreat_ratio:.2f}; group={assessment['group_ratio']:.2f}, "
+                        f"support={assessment['support_ratio']:.2f}, "
+                        f"mission={assessment['mission_ratio']:.2f}, "
+                        f"share={assessment['group_power_share']:.2f}; "
+                        f"retreating to {retreat_zone_id}"
                     ),
                 )
             return self._rewritten_command(command, state)
 
+        state.below_threshold_since = None
+        state.detail = ""
         return command
 
     def _enter_state(
@@ -574,22 +618,78 @@ class CombatControlAct(ActBase):
         except (AttributeError, ValueError):
             return center
 
-    def _local_battle_ratio(self, units: Units, center: Point2) -> float:
+    def _battle_power_assessment(self, units: Units, center: Point2) -> dict:
         enemies = getattr(self.ai, "all_enemy_units", None)
         if not enemies:
-            return float("inf")
+            group_power = _total_power(self, units)
+            return {
+                "group_ratio": float("inf"),
+                "support_ratio": float("inf"),
+                "mission_ratio": float("inf"),
+                "group_power_share": 1.0,
+                "group_power": group_power,
+                "support_power": 0.0,
+                "mission_power": group_power,
+                "enemy_power": 0.0,
+            }
         front = self._front_runner_position(units, center)
         nearby = enemies.closer_than(LOCAL_BATTLE_RADIUS, front).filter(
             lambda unit: not getattr(unit, "is_structure", False)
             and not self.unit_values.is_worker(unit)
         )
         enemy_power = _total_power(self, nearby)
+        own_tags = {unit.tag for unit in units}
+        mission_units_by_tag = {
+            unit.tag: unit
+            for group in self._current_groups.values()
+            for unit in group
+        }
+        support_units = Units(
+            [
+                unit
+                for tag, unit in mission_units_by_tag.items()
+                if tag not in own_tags
+                and unit.distance_to(front) <= RETREAT_SUPPORT_RADIUS
+            ],
+            self.ai,
+        )
         own_power = _total_power(self, units)
+        support_power = _total_power(self, support_units)
+        mission_units = Units(list(mission_units_by_tag.values()), self.ai)
+        mission_power = _total_power(self, mission_units)
+        group_power_share = own_power / mission_power if mission_power > 0 else 1.0
         if enemy_power <= 0:
-            return float("inf")
-        if own_power <= 0:
-            return 0.0
-        return own_power / enemy_power
+            group_ratio = support_ratio = mission_ratio = float("inf")
+        else:
+            group_ratio = own_power / enemy_power if own_power > 0 else 0.0
+            support_ratio = (
+                (own_power + support_power) / enemy_power
+                if own_power + support_power > 0
+                else 0.0
+            )
+            mission_ratio = (
+                mission_power / enemy_power if mission_power > 0 else 0.0
+            )
+        return {
+            "group_ratio": group_ratio,
+            "support_ratio": support_ratio,
+            "mission_ratio": mission_ratio,
+            "group_power_share": group_power_share,
+            "group_power": own_power,
+            "support_power": support_power,
+            "mission_power": mission_power,
+            "enemy_power": enemy_power,
+        }
+
+    def _local_battle_ratio(self, units: Units, center: Point2) -> float:
+        """Compatibility helper returning the effective retreat-gate ratio."""
+        assessment = self._battle_power_assessment(units, center)
+        return effective_retreat_ratio(
+            group_ratio=assessment["group_ratio"],
+            support_ratio=assessment["support_ratio"],
+            mission_ratio=assessment["mission_ratio"],
+            group_power_share=assessment["group_power_share"],
+        )
 
     def _arrived_at(self, center: Point2, zone_id: Optional[str]) -> bool:
         if not zone_id:
@@ -772,10 +872,20 @@ class CombatControlAct(ActBase):
                     current.get("source") or "llm"
                 )
             policy_state = self._retreat_states.get(group_id)
-            if (
-                policy_state is not None
-                and policy_state.state != STATE_ACTIVE
-            ):
+            if policy_state is not None:
+                def compact_ratio(value: float) -> Optional[float]:
+                    return None if value == float("inf") else round(value, 3)
+
+                state["retreat_assessment"] = {
+                    "group_ratio": compact_ratio(policy_state.group_ratio),
+                    "support_ratio": compact_ratio(policy_state.support_ratio),
+                    "mission_ratio": compact_ratio(policy_state.mission_ratio),
+                    "effective_ratio": compact_ratio(policy_state.effective_ratio),
+                    "group_power_share": round(policy_state.group_power_share, 3),
+                    "support_power": round(policy_state.support_power, 3),
+                    "enemy_power": round(policy_state.enemy_power, 3),
+                }
+            if policy_state is not None and policy_state.state != STATE_ACTIVE:
                 state["policy_state"] = policy_state.state
                 state["policy_detail"] = policy_state.detail
                 state["command_source"] = "auto_retreat"

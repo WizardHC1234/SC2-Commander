@@ -129,27 +129,30 @@ def render_optimizer_decision(decision: dict[str, Any]) -> str:
             "control_class": str(priority.get("control_class") or "").strip(),
         },
         "hypothesis": str(decision.get("hypothesis") or "").strip(),
-        "failure_mode_analysis": (
-            dict(decision.get("failure_mode_analysis"))
-            if isinstance(decision.get("failure_mode_analysis"), dict)
-            else {}
-        ),
-        "priority_alignment": (
-            dict(decision.get("priority_alignment"))
-            if isinstance(decision.get("priority_alignment"), dict)
-            else {}
-        ),
+        "failure_mode_analysis": {
+            key: value
+            for key, value in (
+                dict(decision.get("failure_mode_analysis"))
+                if isinstance(decision.get("failure_mode_analysis"), dict)
+                else {}
+            ).items()
+            if key
+            in {
+                "failure_stage",
+                "gate_attainment_and_launch",
+                "commitment_and_contact_timing",
+                "own_package_at_contact",
+                "opponent_package_and_growth",
+                "post_contact_continuity",
+                "production_feasibility",
+                "optimization_implication",
+            }
+        },
         "mechanism_prediction": (
             dict(decision.get("mechanism_prediction"))
             if isinstance(decision.get("mechanism_prediction"), dict)
             else {}
         ),
-        "retrieval_assessment": (
-            dict(decision.get("retrieval_assessment"))
-            if isinstance(decision.get("retrieval_assessment"), dict)
-            else {}
-        ),
-        "contact_evidence": list(decision.get("contact_evidence") or [])[:16],
         "plan": {
             "direction": str(plan.get("direction") or "").strip(),
             "material_behavior_change": str(
@@ -164,22 +167,8 @@ def render_optimizer_decision(decision: dict[str, Any]) -> str:
                 plan.get("new_hard_prerequisites") or []
             ),
             "production_tradeoffs": list(plan.get("production_tradeoffs") or []),
-            "window_tradeoff_evidence": list(
-                plan.get("window_tradeoff_evidence") or []
-            ),
             "why_window_remains_favorable": str(
                 plan.get("why_window_remains_favorable") or ""
-            ).strip(),
-            "preservation_checks": list(plan.get("preservation_checks") or []),
-            "composition_change_allowed": bool(
-                plan.get("composition_change_allowed")
-            ),
-            "retreat_change_allowed": bool(plan.get("retreat_change_allowed")),
-            "stage_scope_evidence": list(
-                plan.get("stage_scope_evidence") or []
-            ),
-            "stage_scope_reason": str(
-                plan.get("stage_scope_reason") or ""
             ).strip(),
         },
     }

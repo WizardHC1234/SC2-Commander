@@ -9,6 +9,8 @@ import pytest
 
 from evol_agent.analysis.match_record import MatchRecordReader
 from evol_agent.core.analysis_agent_loop import (
+    _evaluate_candidate_package_budgets,
+    _normalize_candidate_package_proposal,
     _normalize_cross_match_decision,
     _summarize_matches,
     run_analysis_agent_loop,
@@ -23,10 +25,12 @@ from evol_agent.core.context import render_single_game_analyses
 from evol_agent.core.experiment_audit import _normalize_audit
 from evol_agent.core.match_summary import _normalize_summary_payload, run_fixed_match_summary
 from evol_agent.core.match_summary_cache import MatchSummaryCache
+from evol_agent.core.optimization_agent_loop import extract_final_cross_match_decision
 from evol_agent.core.prompts import (
     build_cross_match_decision_prompt,
     build_cross_match_discovery_prompt,
     build_fixed_match_summary_prompt,
+    build_optimization_package_prompt,
 )
 from evol_agent.sc2_data_agent.bridge import KNOWLEDGE_VERIFICATION_SCHEMA
 from evol_agent.core.types import BattleAnalysis, GameDigest
@@ -535,7 +539,7 @@ def test_cross_match_prompt_keeps_complete_events() -> None:
     assert "deterministic match evidence" not in prompt
     assert "Cross-Match Discovery Agent" in prompt
     assert "Do not return next_action, candidate_plans, candidate_rule, or target_paragraph_id" in prompt
-    assert "distinguish competing explanations" in prompt
+    assert "depends on costs, prerequisites, production time" in prompt
     assert "query_knowledge" not in prompt
     assert '"time_s":431' in prompt
     assert '"enemy_observed":"visible marines"' in prompt
@@ -918,6 +922,15 @@ def _propose_decision(**overrides) -> dict:
         "hypothesis": "a second factory completes more tanks before contact",
         "failure_mode_analysis": {
             "failure_stage": "during_commitment_or_engagement",
+            "gate_attainment_and_launch": "the intended gate is reached and commitment follows without a recorded delay",
+            "earliest_strategy_fixable_link": "the completed package is insufficient at first contact",
+            "why_later_levers_do_not_outrank_it": "post-contact recovery cannot repair the initial package loss",
+            "commitment_and_contact_timing": "the force commits in the intended window but meets stronger pressure",
+            "own_package_at_contact": "the core force is incomplete at decisive contact",
+            "opponent_package_and_growth": "the opponent has a stronger completed package at contact",
+            "post_contact_continuity": "continuity fails after the first force is broken",
+            "production_feasibility": "the current producer allocation leaves the core force incomplete",
+            "optimization_implication": "repair pre-contact production before changing later behavior",
             "failure_mode": "the army breaks in the first decisive engagement",
             "survival_prerequisite": "the opener usually survives until the planned change is active",
             "opponent_pressure_pattern": "pressure repeatedly arrives before the intended push",
@@ -988,11 +1001,134 @@ def _propose_decision(**overrides) -> dict:
                 "The failure is at first contact, but the selected mechanism changes "
                 "production completion rather than composition or retreat behavior."
             ),
+            "strategy_area_audit": [
+                {
+                    "area": area,
+                    "decision": "revise" if area == "production_order_capacity" else "preserve",
+                    "finding": "the area was checked against the selected production mechanism",
+                    "required_change": "increase staged core production throughput" if area == "production_order_capacity" else "",
+                    "evidence": ["Game 2 @ 430s: incomplete package at contact"],
+                }
+                for area in (
+                    "goal_identity",
+                    "economy_expansion",
+                    "production_order_capacity",
+                    "technology_composition",
+                    "attack_timing_objective",
+                    "reinforcement_retreat_cleanup",
+                )
+            ],
         },
         "evidence_limits": [],
     }
     payload.update(overrides)
     return payload
+
+
+def _package_proposal(**overrides) -> dict:
+    base_plan = copy.deepcopy(_propose_decision()["plan"])
+    second_plan = copy.deepcopy(base_plan)
+    second_plan["direction"] = "Add one support unit without delaying the core push"
+    second_plan["material_behavior_change"] = "The first push keeps core mass and adds one support unit"
+    payload = {
+        "strengths_to_preserve": [
+            {"pattern": "two-base opener", "evidence": ["Game 1 @ 90s"]}
+        ],
+        "priority_problem": copy.deepcopy(_propose_decision()["priority_problem"]),
+        "failure_mode_analysis": copy.deepcopy(
+            _propose_decision()["failure_mode_analysis"]
+        ),
+        "parent_timing_package": {
+            "economy": {
+                "worker_target_before_commitment": 24,
+                "base_target_before_commitment": 1,
+                "gas_workers_before_commitment": 3,
+            },
+            "gate_components": [
+                {"action": "train_marine", "quantity": 12, "production_slots": 2},
+                {"action": "train_siege_tank", "quantity": 3, "production_slots": 1},
+            ],
+            "setup_actions": [
+                {"action": "build_barracks", "quantity": 2, "parallel_slots": 1},
+                {"action": "build_factory", "quantity": 1, "parallel_slots": 1},
+            ],
+        },
+        "candidate_packages": [
+            {
+                "id": "P1",
+                "hypothesis": "More Factory throughput reaches the same combat package sooner",
+                "plan": base_plan,
+                "timing_budget": {
+                    "target_latest_first_commitment_seconds": 560,
+                    "maximum_added_feasibility_seconds": 20,
+                    "budget_basis": ["Game 2 @ 430s: late incomplete contact"],
+                    "package": {
+                        "economy": {
+                            "worker_target_before_commitment": 24,
+                            "base_target_before_commitment": 1,
+                            "gas_workers_before_commitment": 3,
+                        },
+                        "gate_components": [
+                            {"action": "train_marine", "quantity": 12, "production_slots": 2},
+                            {"action": "train_siege_tank", "quantity": 3, "production_slots": 2},
+                        ],
+                        "setup_actions": [
+                            {"action": "build_barracks", "quantity": 2, "parallel_slots": 1},
+                            {"action": "build_factory", "quantity": 2, "parallel_slots": 2},
+                        ],
+                    },
+                },
+                "expected_effect": "Earlier complete contact",
+                "main_risk": "Factory cost may reduce Marine throughput",
+            },
+            {
+                "id": "P2",
+                "hypothesis": "One support unit improves the decisive engagement",
+                "plan": second_plan,
+                "timing_budget": {
+                    "target_latest_first_commitment_seconds": 620,
+                    "maximum_added_feasibility_seconds": 80,
+                    "budget_basis": ["Game 2 @ 430s: unsupported army loses contact"],
+                    "package": {
+                        "economy": {
+                            "worker_target_before_commitment": 26,
+                            "base_target_before_commitment": 1,
+                            "gas_workers_before_commitment": 6,
+                        },
+                        "gate_components": [
+                            {"action": "train_marine", "quantity": 12, "production_slots": 2},
+                            {"action": "train_siege_tank", "quantity": 3, "production_slots": 1},
+                            {"action": "train_medivac", "quantity": 1, "production_slots": 1},
+                        ],
+                        "setup_actions": [
+                            {"action": "build_barracks", "quantity": 2, "parallel_slots": 1},
+                            {"action": "build_factory", "quantity": 1, "parallel_slots": 1},
+                            {"action": "build_starport", "quantity": 1, "parallel_slots": 1},
+                        ],
+                    },
+                },
+                "expected_effect": "Stronger first engagement",
+                "main_risk": "Support tech may miss the contact window",
+            },
+        ],
+        "next_action": "evaluate_candidate_packages",
+        "action_reason": "Compare throughput and support hypotheses",
+        "evidence_limits": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _package_selection(package_id: str = "P1") -> dict:
+    return {
+        "selected_package_id": package_id,
+        "mechanism_prediction": copy.deepcopy(
+            _propose_decision()["mechanism_prediction"]
+        ),
+        "next_action": "propose_strategy_patch",
+        "action_reason": "best evidence-to-budget tradeoff",
+        "evidence_limits": [],
+    }
 
 
 def _verified_knowledge_run() -> dict:
@@ -1059,7 +1195,7 @@ def test_true_composition_or_retreat_permission_requires_repeated_stage_evidence
 
 
 def test_round2_prompt_reuses_discovery_findings() -> None:
-    prompt = build_cross_match_decision_prompt(
+    proposal_prompt = build_optimization_package_prompt(
         strategy_name="tank",
         race="terran",
         single_game_analyses=[
@@ -1073,7 +1209,6 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
         ],
         skill_texts={"strategy.md": VALID_STRATEGY},
         validation_errors=[],
-        knowledge_mode="enabled",
         discovery={
             "strengths": [{"pattern": "two-base opener", "evidence": ["Game 1 @ 90s"]}],
             "weaknesses": [{"pattern": "first fight loses more army", "evidence": ["Game 2 @ 430s"]}],
@@ -1086,38 +1221,100 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
             ],
         },
         knowledge_runs=[],
+        prior_experiences=[],
+        retrieval_evidence={},
     )
-    assert "Cross-Match Decision Agent" in prompt
-    assert "Knowledge may invalidate an earlier interpretation" in prompt
-    assert "Do not query the knowledge database again" in prompt
-    assert "tank production cap" in prompt
-    assert "primary causal hypothesis" in prompt
-    assert "coherent intervention package" in prompt
-    assert "not an exhaustive enum" in prompt
-    assert "Do not combine unrelated improvements" in prompt
-    assert "2-4 strongest plausible" in prompt
-    assert "considered_explanations" in prompt
-    assert "Do not treat a hypothesis as the primary cause if repeated counterexamples" in prompt
-    assert "## SC2 Strategic Priority" in prompt
-    assert "without using a fixed category ranking" in prompt
-    assert "commitment and first-contact timing" in prompt
-    assert "own and opponent packages at contact" in prompt
-    assert "force retained and reinforced" in prompt
-    assert "larger own force is not automatically better" in prompt
-    assert "a higher value retreats earlier" in prompt
-    assert "default 0.6" in prompt
-    assert "Replay-grounded reasoning demonstrations" in prompt
-    assert "build 142471" in prompt
-    assert "must not be inferred from the configured ratio alone" in prompt
-    assert "earliest shared strategy-fixable break" in prompt
-    assert "losing at the current or a later contact does not rule out" in prompt
-    assert "Scouting or scanning is useful only" in prompt
-    assert "## Prior Experiment Interpretation" in prompt
-    assert "Candidate selection and causal-hypothesis evaluation are separate" in prompt
-    assert "minimum material mechanism change occurred" in prompt
-    assert "mechanism_prediction" in prompt
-    assert "minimum_material_change" in prompt
-    assert "target_paragraph_id" not in prompt.split("Return one JSON object only:")[1]
+    proposal, error = _normalize_candidate_package_proposal(_package_proposal())
+    assert error == ""
+    assert proposal is not None
+    reports = _evaluate_candidate_package_budgets(proposal, race="terran")
+    prompt = build_cross_match_decision_prompt(
+        strategy_name="tank",
+        race="terran",
+        single_game_analyses=[],
+        skill_texts={"strategy.md": VALID_STRATEGY},
+        validation_errors=[],
+        knowledge_mode="enabled",
+        discovery={"unknowns": [{"unknown": "tank production cap"}]},
+        knowledge_runs=[],
+        candidate_package_payload=proposal,
+        package_budget_reports=reports,
+    )
+    assert "Optimization-Package Planner" in proposal_prompt
+    assert "two or three genuinely different" in proposal_prompt
+    assert "target_latest_first_commitment_seconds" in proposal_prompt
+    assert "tank production cap" in proposal_prompt
+    assert "Optimization-Package Selector" in prompt
+    assert "Program-calculated package budgets" in prompt
+    assert "candidate_earliest_feasible_time_seconds" in prompt
+    assert "selected_package_id" in prompt
+
+
+def test_package_preflight_marks_a_missed_time_budget() -> None:
+    raw = _package_proposal()
+    raw["candidate_packages"][0]["timing_budget"][
+        "target_latest_first_commitment_seconds"
+    ] = 1
+    proposal, error = _normalize_candidate_package_proposal(raw)
+    assert error == ""
+    assert proposal is not None
+    reports = _evaluate_candidate_package_budgets(proposal, race="terran")
+    first = next(item for item in reports if item["id"] == "P1")
+    assert first["target_latest_satisfied"] is False
+    assert first["status"] == "over_or_unresolved_budget"
+
+
+def test_package_preflight_joins_empirical_enemy_windows() -> None:
+    proposal, error = _normalize_candidate_package_proposal(_package_proposal())
+    assert error == ""
+    assert proposal is not None
+    summary = BattleAnalysis(
+        strategy_name="tank",
+        race="terran",
+        sample_size=1,
+        record_mix="0W/1L",
+        raw={
+            "result": "Defeat",
+            "events": [
+                {
+                    "time_s": 430.0,
+                    "own_state": {"army": "12 Marines, 3 Siege Tanks"},
+                    "enemy_observed": {"army": "8 Marines"},
+                    "enemy_truth": {
+                        "army": "8 Marines, 4 Siege Tanks",
+                        "technology": "Infantry Weapons 1",
+                    },
+                },
+                {
+                    "time_s": 560.0,
+                    "own_state": {"army": "18 Marines, 5 Siege Tanks"},
+                    "enemy_truth": {"army": "12 Marines, 7 Siege Tanks"},
+                },
+            ],
+            "major_engagements": [
+                {
+                    "time_s": 570.0,
+                    "own_force_before": "18 Marines, 5 Siege Tanks",
+                    "enemy_truth": "12 Marines, 7 Siege Tanks",
+                    "outcome": "army_broken",
+                }
+            ],
+        },
+    )
+
+    reports = _evaluate_candidate_package_budgets(
+        proposal,
+        race="terran",
+        summaries=[summary],
+    )
+
+    first = next(item for item in reports if item["id"] == "P1")
+    window = first["empirical_opponent_windows"][0]
+    assert window["result"] == "Defeat"
+    assert window["candidate_window"]["enemy_truth"]["army"]
+    assert window["first_engagement_at_or_after_candidate_window"]["outcome"] == (
+        "army_broken"
+    )
 
 
 def test_shared_prompt_instructions_do_not_embed_a_specific_strategy() -> None:
@@ -1144,15 +1341,18 @@ def test_shared_prompt_instructions_do_not_embed_a_specific_strategy() -> None:
     assert "marine/tank push" not in source
 
 
-def test_cross_match_always_makes_two_llm_calls_without_knowledge(monkeypatch) -> None:
+def test_cross_match_generates_preflights_and_selects_packages(monkeypatch) -> None:
     prompts: list[str] = []
 
     def fake_llm(prompt: str, **kwargs):
         prompts.append(prompt)
         if "Cross-Match Discovery Agent" in prompt:
             return _empty_discovery()
-        assert "Cross-Match Decision Agent" in prompt
-        return _propose_decision()
+        if "Optimization-Package Planner" in prompt:
+            return _package_proposal()
+        assert "Optimization-Package Selector" in prompt
+        assert "candidate_earliest_feasible_time_seconds" in prompt
+        return _package_selection()
 
     monkeypatch.setattr("evol_agent.core.analysis_agent_loop.call_json_llm", fake_llm)
     monkeypatch.setattr(
@@ -1168,10 +1368,24 @@ def test_cross_match_always_makes_two_llm_calls_without_knowledge(monkeypatch) -
     )
     complete = next(item for item in result.events if item.get("action") == "analysis_complete")
     assert result.completed is True
-    assert len(prompts) == 2
-    assert complete["llm_cross_match_calls"] == 2
+    assert len(prompts) == 3
+    assert complete["llm_cross_match_calls"] == 3
     assert result.battle_analysis.raw["plan"]["direction"].startswith("Build a second Factory")
+    assert result.battle_analysis.raw["selected_package_id"] == "P1"
+    assert len(result.battle_analysis.raw["package_budget_reports"]) == 2
+    assert result.battle_analysis.raw["selected_package_budget"][
+        "candidate_earliest_feasible_time_seconds"
+    ]
+    extracted = extract_final_cross_match_decision(result.battle_analysis)
+    assert extracted["selected_package_id"] == "P1"
+    assert extracted["selected_timing_budget"][
+        "target_latest_first_commitment_seconds"
+    ] == 560
     assert any(item.get("action") == "cross_match_discovery" for item in result.events)
+    assert any(
+        item.get("action") == "optimization_package_preflight"
+        for item in result.events
+    )
     assert any(item.get("action") == "cross_match_decision" for item in result.events)
 
 
@@ -1191,13 +1405,11 @@ def test_cross_match_queries_knowledge_once_then_decides(monkeypatch) -> None:
                 }
             ]
             return discovery
-        assert "Cross-Match Decision Agent" in prompt
         assert "Earlier completion was infeasible" in prompt
-        decision = _propose_decision()
-        decision["retrieval_assessment"]["knowledge_used"] = [
-            "Q1: verified production requirements"
-        ]
-        return decision
+        if "Optimization-Package Planner" in prompt:
+            return _package_proposal()
+        assert "Optimization-Package Selector" in prompt
+        return _package_selection()
 
     def fake_knowledge(questions, **kwargs):
         knowledge_calls.append(questions)
@@ -1221,14 +1433,14 @@ def test_cross_match_queries_knowledge_once_then_decides(monkeypatch) -> None:
     )
     complete = next(item for item in result.events if item.get("action") == "analysis_complete")
     assert result.completed is True
-    assert len(prompts) == 2
+    assert len(prompts) == 3
     assert len(knowledge_calls) == 1
-    assert complete["llm_cross_match_calls"] == 2
+    assert complete["llm_cross_match_calls"] == 3
     assert result.battle_analysis.raw["next_action"] == "propose_strategy_patch"
     assert result.knowledge_trace["discovery"]["knowledge_questions"][0]["id"] == "Q1"
 
 
-def test_round2_can_reject_round1_weakness(monkeypatch) -> None:
+def test_package_planner_can_attribute_problem_to_runtime(monkeypatch) -> None:
     def fake_llm(prompt: str, **kwargs):
         if "Cross-Match Discovery Agent" in prompt:
             discovery = _empty_discovery()
@@ -1248,10 +1460,11 @@ def test_round2_can_reject_round1_weakness(monkeypatch) -> None:
                 "evidence": ["Game 2 @ 430s"],
                 "control_class": "observation_limited",
             },
-            "hypothesis": "",
-            "next_action": "request_more_matches",
+            "failure_mode_analysis": {},
+            "parent_timing_package": {},
+            "candidate_packages": [],
+            "next_action": "inspect_runtime",
             "action_reason": "knowledge shows earlier tanks were infeasible; more games are needed",
-            "plan": None,
         }
 
     monkeypatch.setattr("evol_agent.core.analysis_agent_loop.call_json_llm", fake_llm)
@@ -1271,7 +1484,7 @@ def test_round2_can_reject_round1_weakness(monkeypatch) -> None:
         knowledge_mode="enabled",
     )
     assert result.completed is True
-    assert result.battle_analysis.raw["next_action"] == "request_more_matches"
+    assert result.battle_analysis.raw["next_action"] == "inspect_runtime"
     assert result.battle_analysis.raw["plan"] is None
 
 
@@ -1305,7 +1518,7 @@ def test_inspect_runtime_does_not_need_a_plan(monkeypatch) -> None:
     assert result.completed is True
     assert result.battle_analysis.raw["next_action"] == "inspect_runtime"
     assert result.battle_analysis.raw["plan"] is None
-    assert result.battle_analysis.raw["candidate_plans"] == []
+    assert "candidate_plans" not in result.battle_analysis.raw
 
 
 def test_resume_skips_discovery_and_reuses_knowledge_cache(tmp_path: Path, monkeypatch) -> None:
@@ -1327,13 +1540,11 @@ def test_resume_skips_discovery_and_reuses_knowledge_cache(tmp_path: Path, monke
     def fake_llm(prompt: str, **kwargs):
         prompts.append(prompt)
         assert "Cross-Match Discovery Agent" not in prompt
-        assert "Cross-Match Decision Agent" in prompt
         assert "Earlier completion was infeasible" in prompt
-        decision = _propose_decision()
-        decision["retrieval_assessment"]["knowledge_used"] = [
-            "Q1: verified production requirements"
-        ]
-        return decision
+        if "Optimization-Package Planner" in prompt:
+            return _package_proposal()
+        assert "Optimization-Package Selector" in prompt
+        return _package_selection()
 
     def boom_knowledge(*args, **kwargs):
         knowledge_llm_calls.append(1)
@@ -1357,7 +1568,7 @@ def test_resume_skips_discovery_and_reuses_knowledge_cache(tmp_path: Path, monke
         checkpoint=checkpoint,
     )
     assert result.completed is True
-    assert len(prompts) == 1
+    assert len(prompts) == 2
     assert knowledge_llm_calls == []
     assert result.battle_analysis.raw["next_action"] == "propose_strategy_patch"
 
@@ -1384,7 +1595,9 @@ def test_rejected_experiments_are_visible_in_round2(monkeypatch) -> None:
         prompts.append(prompt)
         if "Cross-Match Discovery Agent" in prompt:
             return _empty_discovery()
-        return _propose_decision()
+        if "Optimization-Package Planner" in prompt:
+            return _package_proposal()
+        return _package_selection()
 
     monkeypatch.setattr("evol_agent.core.analysis_agent_loop.call_json_llm", fake_llm)
     monkeypatch.setattr(
@@ -1400,10 +1613,10 @@ def test_rejected_experiments_are_visible_in_round2(monkeypatch) -> None:
         prior_experiences=prior,
     )
     assert result.completed is True
-    assert any("Cross-Match Decision Agent" in prompt for prompt in prompts)
-    decision_prompt = next(prompt for prompt in prompts if "Cross-Match Decision Agent" in prompt)
-    assert "attack_timing" in decision_prompt
-    assert "same primary lever produced significant score regression" in decision_prompt
-    assert "candidate_minus_parent" in decision_prompt
-    assert "Do not suppress a hypothesis merely because a previous candidate was rejected" in decision_prompt
-    assert "hypothesis_verdict=contradicted" in decision_prompt
+    planner_prompt = next(
+        prompt for prompt in prompts if "Optimization-Package Planner" in prompt
+    )
+    assert "attack_timing" in planner_prompt
+    assert "same primary lever produced significant score regression" in planner_prompt
+    assert "candidate_minus_parent" in planner_prompt
+    assert '"hypothesis_verdict":"inconclusive"' in planner_prompt

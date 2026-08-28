@@ -67,6 +67,17 @@ def canonical_mechanism_signature(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value or "").casefold()).strip("_")
 
 
+def canonical_material_change_signature(value: Any) -> str:
+    """Normalize an explicitly pre-registered material behavior change.
+
+    Semantic equivalence remains the analysis model's responsibility.  This exact
+    normalized fallback prevents a model from replaying the same intervention while
+    changing only its mechanism-family label (for example ``_v2``/``_v3``).
+    """
+
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
 @dataclass(frozen=True)
 class EvolutionConfig:
     strategy: str
@@ -342,12 +353,24 @@ class EvolutionRunner:
         self.strategies_dir = self.run_dir / "strategies"
         self.strategies_dir.mkdir(parents=True, exist_ok=True)
 
+    def _mechanism_audit_enabled(self) -> bool:
+        # Normal CLI runs use the built-in auditor. Unit/integration harnesses that
+        # inject a batch executor may explicitly omit it when testing score mechanics.
+        return self._experiment_auditor is not None or self._batch_executor is None
+
     def _new_state(self) -> dict[str, Any]:
-        selection_protocol = (
-            "confirmed_score_only_v2"
-            if self.config.confirmation_matches
-            else "score_only_v2"
-        )
+        if self._mechanism_audit_enabled():
+            selection_protocol = (
+                "confirmed_score_and_realized_mechanism_v3"
+                if self.config.confirmation_matches
+                else "score_and_realized_mechanism_v3"
+            )
+        else:
+            selection_protocol = (
+                "confirmed_score_only_v2"
+                if self.config.confirmation_matches
+                else "score_only_v2"
+            )
         return {
             "schema": "sc2_evolution.v3",
             "status": "running",
@@ -366,6 +389,7 @@ class EvolutionRunner:
             "difficulty_index": 0,
             "difficulty": self.config.difficulties[0],
             "mastered_difficulties": [],
+            "generation_semantics": "completed_candidate_evaluations_v1",
             "generation": 0,
             "difficulty_generation": 0,
             "games_used": 0,
@@ -377,6 +401,7 @@ class EvolutionRunner:
             "candidate_generation_failures": [],
             "mechanism_policy_rejections": [],
             "generation_search_restarts": [],
+            "exhausted_search_cycles": [],
             "skipped_generations": [],
             "abandoned_analysis_checkpoints": [],
             "candidate_resume_dir": None,
@@ -805,6 +830,30 @@ class EvolutionRunner:
 
     def _migrate_lifecycle_state(self, state: dict[str, Any]) -> bool:
         changed = False
+        if state.get("generation_semantics") != "completed_candidate_evaluations_v1":
+            experiments = [
+                item
+                for item in (state.get("experiment_history") or [])
+                if isinstance(item, dict) and str(item.get("candidate") or "").strip()
+            ]
+            completed_total = len(experiments)
+            current_difficulty = str(state.get("difficulty") or "")
+            completed_here = sum(
+                1
+                for item in experiments
+                if str(item.get("difficulty") or "") == current_difficulty
+            )
+            state["generation"] = completed_total
+            state["difficulty_generation"] = completed_here
+            state["generation_semantics"] = "completed_candidate_evaluations_v1"
+            if (
+                state.get("status") == "completed"
+                and state.get("completion_reason") == "generation_budget_reached"
+                and completed_total < self.config.max_total_generations
+            ):
+                state["status"] = "running"
+                state.pop("completion_reason", None)
+            changed = True
         if not isinstance(state.get("mastered_difficulties"), list):
             backfill = list(self.config.difficulties[: int(state.get("difficulty_index") or 0)])
             state["mastered_difficulties"] = backfill
@@ -827,11 +876,18 @@ class EvolutionRunner:
         elif champion_batch is None and state.get("champion_baseline") is not None:
             state["champion_baseline"] = None
             changed = True
-        selection_protocol = (
-            "confirmed_score_only_v2"
-            if self.config.confirmation_matches
-            else "score_only_v2"
-        )
+        if self._mechanism_audit_enabled():
+            selection_protocol = (
+                "confirmed_score_and_realized_mechanism_v3"
+                if self.config.confirmation_matches
+                else "score_and_realized_mechanism_v3"
+            )
+        else:
+            selection_protocol = (
+                "confirmed_score_only_v2"
+                if self.config.confirmation_matches
+                else "score_only_v2"
+            )
         if state.get("selection_protocol") != selection_protocol:
             state["selection_protocol"] = selection_protocol
             changed = True
@@ -1187,37 +1243,16 @@ class EvolutionRunner:
             for item in history
             if str(item.get("difficulty") or "") in {"", difficulty}
         ]
-        blocked = self._blocked_mechanism_families(state, difficulty=difficulty)
-        active_block_signatures = {
-            canonical_mechanism_signature(family) for family in blocked
-        }
-        policy_rejections = [
-            item
-            for item in (state.get("mechanism_policy_rejections") or [])
-            if isinstance(item, dict)
-            and str(item.get("difficulty") or "") in {"", difficulty}
-            and canonical_mechanism_signature(item.get("mechanism_family"))
-            in active_block_signatures
-        ]
-        policy = []
-        if blocked:
-            policy.append(
-                {
-                    "kind": "mechanism_search_policy",
-                    "blocked_mechanism_families": blocked,
-                    "rule": (
-                        "Do not propose a blocked family or a materially equivalent "
-                        "renaming. Choose a different causal mechanism."
-                    ),
-                }
-            )
-        search_restarts = [
+        # History is compact outcome evidence, never a pre-match ban list. Keep
+        # recent experiments and only the latest generation failure reason so a
+        # malformed attempt can be repaired without turning history into policy.
+        latest_restart = [
             item
             for item in (state.get("generation_search_restarts") or [])
             if isinstance(item, dict)
             and str(item.get("difficulty") or "") in {"", difficulty}
-        ][-6:]
-        return related + policy_rejections + policy + search_restarts
+        ][-1:]
+        return related[-8:] + latest_restart
 
     def _blocked_mechanism_families(
         self,
@@ -1271,6 +1306,48 @@ class EvolutionRunner:
                 )
         return blocked
 
+    def _blocked_material_changes(
+        self,
+        state: dict[str, Any],
+        *,
+        difficulty: str,
+    ) -> dict[str, str]:
+        """Return exact material interventions that must not be replayed.
+
+        The semantic validator still judges paraphrases and genuine repairs.  This
+        deterministic guard handles the common failure mode where the analysis model
+        emits the identical minimum material change under a renamed family.
+        """
+
+        blocked: dict[str, str] = {}
+        for item in state.get("experiment_history") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("difficulty") or "") not in {"", difficulty}:
+                continue
+            prediction = item.get("mechanism_prediction")
+            if not isinstance(prediction, dict):
+                continue
+            material_change = str(
+                prediction.get("minimum_material_change") or ""
+            ).strip()
+            signature = canonical_material_change_signature(material_change)
+            if not signature:
+                continue
+            implementation = str(item.get("implementation_verdict") or "unknown")
+            hypothesis = str(item.get("hypothesis_verdict") or "inconclusive")
+            if implementation != "implemented":
+                blocked.setdefault(
+                    signature,
+                    "the same material change was not realized in prior matches",
+                )
+            elif hypothesis == "contradicted":
+                blocked.setdefault(
+                    signature,
+                    "the same implemented material change was contradicted",
+                )
+        return blocked
+
     def _restart_generation_search(
         self,
         state: dict[str, Any],
@@ -1281,9 +1358,8 @@ class EvolutionRunner:
         source_action: str,
         checkpoint_dir: Path | str | None = None,
         mechanism_family: str = "",
-        consume_generation: bool = False,
     ) -> bool:
-        """Continue a bounded strategy search instead of terminating the run."""
+        """Retry search without consuming a completed-candidate generation."""
         checkpoint_value = str(checkpoint_dir or state.get("candidate_resume_dir") or "").strip()
         if checkpoint_value:
             resolved = str(Path(checkpoint_value).resolve())
@@ -1333,32 +1409,34 @@ class EvolutionRunner:
             )
         self._sync_search_parent(state, champion, champion_evidence)
 
-        if consume_generation or restart_count >= MAX_SEARCH_RESTARTS_PER_GENERATION:
-            state.setdefault("skipped_generations", []).append(
+        restart_in_cycle = (
+            (restart_count - 1) % MAX_SEARCH_RESTARTS_PER_GENERATION
+        ) + 1
+        if restart_in_cycle >= MAX_SEARCH_RESTARTS_PER_GENERATION:
+            state.setdefault("exhausted_search_cycles", []).append(
                 {
                     "generation": generation,
                     "difficulty": difficulty,
                     "champion": champion,
-                    "reason": "search_restart_budget_exhausted",
-                    "restart_count": restart_count,
+                    "reason": "search_cycle_exhausted_without_evaluable_candidate",
+                    "search_cycle": (
+                        (restart_count - 1) // MAX_SEARCH_RESTARTS_PER_GENERATION
+                    ) + 1,
+                    "restart_count_total": restart_count,
                     "last_failure": restart["reason"],
                     "created_at": datetime.now().isoformat(),
                 }
             )
-            state["generation"] = generation + 1
-            state["difficulty_generation"] = (
-                int(state.get("difficulty_generation") or 0) + 1
-            )
             print(
-                "EvolAgent exhausted this generation's search alternatives; "
-                "the Champion is retained and the run continues to the next "
-                "configured generation.",
+                "EvolAgent exhausted one candidate-search cycle; the Champion is "
+                "retained and a fresh search cycle starts for the same unevaluated "
+                "generation.",
                 flush=True,
             )
         else:
             print(
                 "EvolAgent search attempt was not evaluable; retaining the "
-                f"Champion and trying a different mechanism ({restart_count}/"
+                f"Champion and trying a different mechanism ({restart_in_cycle}/"
                 f"{MAX_SEARCH_RESTARTS_PER_GENERATION}).",
                 flush=True,
             )
@@ -1430,20 +1508,6 @@ class EvolutionRunner:
                 if isinstance(failure_mode_analysis, dict)
                 else {}
             )
-        if "priority_alignment" not in spec:
-            priority_alignment = rationale.get("priority_alignment")
-            spec["priority_alignment"] = (
-                dict(priority_alignment)
-                if isinstance(priority_alignment, dict)
-                else {}
-            )
-        if "retrieval_assessment" not in spec:
-            retrieval_assessment = rationale.get("retrieval_assessment")
-            spec["retrieval_assessment"] = (
-                dict(retrieval_assessment)
-                if isinstance(retrieval_assessment, dict)
-                else {}
-            )
         if "intervention_package" not in spec:
             intervention_package = rationale.get("intervention_package")
             spec["intervention_package"] = (
@@ -1451,6 +1515,35 @@ class EvolutionRunner:
                 if isinstance(intervention_package, dict)
                 else {}
             )
+        spec.setdefault(
+            "selected_package_id", str(rationale.get("selected_package_id") or "")
+        )
+        if "selected_timing_budget" not in spec:
+            selected_timing_budget = rationale.get("selected_timing_budget")
+            spec["selected_timing_budget"] = (
+                dict(selected_timing_budget)
+                if isinstance(selected_timing_budget, dict)
+                else {}
+            )
+        if "selected_package_budget" not in spec:
+            selected_package_budget = rationale.get("selected_package_budget")
+            spec["selected_package_budget"] = (
+                dict(selected_package_budget)
+                if isinstance(selected_package_budget, dict)
+                else {}
+            )
+        if "candidate_package_evaluations" not in spec:
+            evaluations = rationale.get("candidate_package_evaluations")
+            spec["candidate_package_evaluations"] = _dict_list(evaluations)
+        if "first_commitment_timing" not in spec:
+            feasibility = rationale.get("deterministic_feasibility_audit")
+            timing = (
+                feasibility.get("contact_timing_report")
+                if isinstance(feasibility, dict)
+                and isinstance(feasibility.get("contact_timing_report"), dict)
+                else {}
+            )
+            spec["first_commitment_timing"] = dict(timing)
         spec.setdefault(
             "plan_direction",
             str(
@@ -1465,11 +1558,14 @@ class EvolutionRunner:
             spec["strengths_to_preserve"] = (
                 list(strengths) if isinstance(strengths, list) else []
             )
-        if "patches" not in spec:
-            patches = rationale.get("patches")
-            if not isinstance(patches, list) or not patches:
-                patches = rationale.get("selected_changes")
-            spec["patches"] = _dict_list(patches)
+        if "document_changes" not in spec:
+            changes = rationale.get("document_changes")
+            if not isinstance(changes, list) or not changes:
+                changes = rationale.get("patches")
+            if not isinstance(changes, list) or not changes:
+                changes = rationale.get("selected_changes")
+            spec["document_changes"] = _dict_list(changes)
+        spec.setdefault("patches", list(spec.get("document_changes") or []))
         spec.setdefault("expected_effect", str(rationale.get("expected_effect") or ""))
         spec.setdefault("main_risk", str(rationale.get("main_risk") or ""))
         return spec
@@ -2243,7 +2339,6 @@ class EvolutionRunner:
                 ),
                 source_action="candidate_generation_failed",
                 checkpoint_dir=candidate_result.checkpoint_dir,
-                consume_generation=True,
             )
         rationale = (
             candidate_result.improvement.analysis
@@ -2251,57 +2346,10 @@ class EvolutionRunner:
             else {}
         )
         experiment_spec = self._experiment_spec_from_rationale(rationale)
-        mechanism_family = str(
-            experiment_spec.get("mechanism_family") or ""
-        ).strip().lower()
-        blocked_families = self._blocked_mechanism_families(
-            state, difficulty=difficulty
-        )
-        blocked_family, blocked_reason = self._blocked_mechanism_reason(
-            blocked_families,
-            mechanism_family,
-        )
-        if mechanism_family and blocked_reason:
-            candidate_name = candidate_result.output_dir.name
-            rejection = {
-                "kind": "mechanism_policy_rejection",
-                "generation": int(state["generation"]),
-                "difficulty": difficulty,
-                "candidate": candidate_name,
-                "mechanism_family": mechanism_family,
-                "mechanism_signature": canonical_mechanism_signature(
-                    mechanism_family
-                ),
-                "equivalent_blocked_family": blocked_family,
-                "reason": blocked_reason,
-                "decision": "policy_rejected_before_matches",
-                "created_at": datetime.now().isoformat(),
-            }
-            state.setdefault("mechanism_policy_rejections", []).append(rejection)
-            discarded = self._discard_policy_rejected_candidate(
-                candidate_result.output_dir
-            )
-            rejection["candidate_discarded"] = discarded
-            self._save_state(state)
-            print(
-                "EvolAgent candidate blocked before matches by mechanism policy: "
-                f"{mechanism_family} is equivalent to {blocked_family} "
-                f"({blocked_reason}); candidate {candidate_name} "
-                f"{'discarded' if discarded else 'was not removed'}",
-                flush=True,
-            )
-            return self._restart_generation_search(
-                state,
-                difficulty=difficulty,
-                champion=champion,
-                reason=(
-                    f"mechanism family {mechanism_family} is blocked by prior "
-                    f"evidence: {blocked_reason}"
-                ),
-                source_action="mechanism_policy_rejected",
-                checkpoint_dir=candidate_result.checkpoint_dir,
-                mechanism_family=mechanism_family,
-            )
+        # Historical experiments are supplied to the analysis model as evidence.
+        # Do not classify a new candidate by mechanism labels or text signatures
+        # before matches; the realized behavior and outcome audit decide whether
+        # the direction was genuinely repeated, repaired, or different.
         state["pending_candidate"] = {
             "strategy": candidate_result.output_dir.name,
             "strategy_dir": str(candidate_result.output_dir),
@@ -2318,9 +2366,6 @@ class EvolutionRunner:
             "evaluation_complete": False,
             "experiment_committed": False,
             "primary_change": str(rationale.get("primary_change") or ""),
-            "selected_plan_ids": _string_list(rationale.get("selected_plan_ids")),
-            "overall_assessment": str(rationale.get("overall_assessment") or ""),
-            "selected_changes": _dict_list(rationale.get("selected_changes")),
             "expected_effect": str(rationale.get("expected_effect") or ""),
             "main_risk": str(rationale.get("main_risk") or ""),
             "hypothesis": str(rationale.get("hypothesis") or ""),
@@ -2338,34 +2383,12 @@ class EvolutionRunner:
                 if isinstance(rationale.get("failure_mode_analysis"), dict)
                 else {}
             ),
-            "priority_alignment": (
-                dict(rationale.get("priority_alignment"))
-                if isinstance(rationale.get("priority_alignment"), dict)
-                else {}
-            ),
-            "retrieval_assessment": (
-                dict(rationale.get("retrieval_assessment"))
-                if isinstance(rationale.get("retrieval_assessment"), dict)
-                else {}
-            ),
             "intervention_package": (
                 dict(rationale.get("intervention_package"))
                 if isinstance(rationale.get("intervention_package"), dict)
                 else {}
             ),
-            "primary_lever": str(rationale.get("primary_lever") or ""),
-            "predictions": _string_list(rationale.get("predictions")),
-            "disproof_conditions": _string_list(rationale.get("disproof_conditions")),
-            "capability_mapping": (
-                dict(rationale.get("capability_mapping"))
-                if isinstance(rationale.get("capability_mapping"), dict)
-                else {}
-            ),
-            "inheritance": (
-                dict(rationale.get("inheritance"))
-                if isinstance(rationale.get("inheritance"), dict)
-                else {}
-            ),
+            "document_changes": _dict_list(rationale.get("document_changes")),
             "semantic_validation": (
                 dict(rationale.get("semantic_validation"))
                 if isinstance(rationale.get("semantic_validation"), dict)
@@ -2682,6 +2705,7 @@ class EvolutionRunner:
                 "post-experiment mechanism audit was unavailable"
             ],
             "lesson": "",
+            "gate_execution_audit": {},
         }
         auditor = self._experiment_auditor
         if auditor is None and self._batch_executor is None:
@@ -2846,9 +2870,17 @@ class EvolutionRunner:
             valid_inconclusive and streak_before >= 1
         )
         forced_promotion_after_inconclusive = False  # checkpoint compatibility
+        mastery_overrode_audit_uncertainty = bool(
+            self._mechanism_audit_enabled()
+            and accepted
+            and candidate_mastered
+            and implementation_verdict in {"underpowered", "unknown"}
+        )
         promotion_blocked_by_audit = bool(
-            accepted
-            and implementation_verdict == "execution_invalid"
+            self._mechanism_audit_enabled()
+            and accepted
+            and implementation_verdict != "implemented"
+            and not mastery_overrode_audit_uncertainty
         )
         if promotion_blocked_by_audit:
             accepted = False
@@ -2910,6 +2942,11 @@ class EvolutionRunner:
             "audit_evidence_limits": list(
                 mechanism_audit.get("evidence_limits") or []
             ),
+            "gate_execution_audit": (
+                dict(mechanism_audit.get("gate_execution_audit"))
+                if isinstance(mechanism_audit.get("gate_execution_audit"), dict)
+                else {}
+            ),
             "implementation_verdict": str(
                 mechanism_audit.get("implementation_verdict") or "unknown"
             ),
@@ -2920,7 +2957,15 @@ class EvolutionRunner:
             "causal_result": hypothesis_verdict,
             "performance_gain_cause": performance_gain_cause,
             "posterior_probability_better": probability,
-            "selection_rule": "candidate_score_strictly_greater",
+            "selection_rule": (
+                "candidate_mastery_threshold_and_score_gain"
+                if mastery_overrode_audit_uncertainty
+                else (
+                    "candidate_score_strictly_greater_and_mechanism_implemented"
+                    if self._mechanism_audit_enabled()
+                    else "candidate_score_strictly_greater"
+                )
+            ),
             "base_decision": base_outcome,
             "forced_promotion_after_inconclusive": (
                 forced_promotion_after_inconclusive
@@ -2938,6 +2983,7 @@ class EvolutionRunner:
             "mastery_win_rate_threshold": self.config.mastery_score_threshold,
             "posterior_used_for_selection": False,
             "promotion_blocked_by_audit": promotion_blocked_by_audit,
+            "mastery_overrode_audit_uncertainty": mastery_overrode_audit_uncertainty,
             "repairable_underpowered_retry": repairable_underpowered,
             "underpowered_retry_exhausted": underpowered_retry_exhausted,
             "champion_evidence_games": comparison_champion.games,
@@ -3075,9 +3121,10 @@ class EvolutionRunner:
             )
         elif promotion_blocked_by_audit:
             lesson = (
-                "The score improved, but the post-experiment audit found that "
-                "the candidate depends on unavailable runtime behavior; it was "
-                "not promoted and the hypothesis was not tested."
+                "The score improved, but the post-experiment audit did not confirm "
+                "that the candidate's material mechanism was implemented in the "
+                "matches. It was not promoted; a score change without a realized "
+                "intervention is not strategy-evolution evidence."
             )
         else:
             lesson = (
@@ -3143,6 +3190,23 @@ class EvolutionRunner:
             ),
             "audit_evidence_limits": list(
                 decision.get("audit_evidence_limits") or []
+            ),
+            "gate_execution_audit": (
+                dict(decision.get("gate_execution_audit"))
+                if isinstance(decision.get("gate_execution_audit"), dict)
+                else {}
+            ),
+            "first_commitment_timing": (
+                dict(experiment_spec.get("first_commitment_timing"))
+                if isinstance(experiment_spec.get("first_commitment_timing"), dict)
+                else {}
+            ),
+            "mechanism_equivalence_audit": (
+                dict(experiment_spec.get("mechanism_equivalence_audit"))
+                if isinstance(
+                    experiment_spec.get("mechanism_equivalence_audit"), dict
+                )
+                else {}
             ),
             "implementation_verdict": str(
                 decision.get("implementation_verdict") or "unknown"

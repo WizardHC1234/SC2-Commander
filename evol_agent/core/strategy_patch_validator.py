@@ -4,9 +4,14 @@ import json
 import re
 from typing import Any
 
-from .config import DEFAULT_OPTIMIZATION_MODEL, OPTIMIZATION_ENABLE_REASONING
+from .config import (
+    CONTACT_TIMING_EXTRACTION_ENABLE_REASONING,
+    DEFAULT_OPTIMIZATION_MODEL,
+    STRATEGY_SEMANTIC_VALIDATION_ENABLE_REASONING,
+)
 from .context import json_compact_block, render_knowledge_results, render_optimizer_decision
 from .llm import call_json_llm
+from .optimization_policy import HARD_VALIDATION_POLICY
 from .terran_build_order_simulator import simulate_terran_first_commitment
 from ..optimization.strategy_document import StrategyDocument
 
@@ -41,7 +46,7 @@ For both parent and candidate:
 - economy records only the economy explicitly required before first commitment: living SCV target, completed base target, and workers assigned to gas. Use null when the strategy does not specify a value; do not estimate income or time.
 - first commitment is the first strategically meaningful offensive commitment, not merely the earliest possible unit completion.
 - identify whether a newly added gate component can prevent the parent commitment from launching, and whether the candidate contains an explicit fallback that preserves the parent contact window.
-- a component required by plan.minimum_material_change or plan.coordinated_changes before first commitment remains a gate component even if candidate prose later calls it support or optional. Record that contradiction in notes rather than silently omitting the component.
+- a component required by plan.material_behavior_change or plan.coordinated_changes before first commitment remains a gate component even if candidate prose later calls it support or optional. Record that contradiction in notes rather than silently omitting the component.
 
 Cross-match Decision and contact evidence:
 {render_optimizer_decision(decision)}
@@ -171,6 +176,10 @@ def _build_contact_timing_report(
         "fallback_preserves_parent_window": bool(
             timing_model.get("fallback_preserves_parent_window")
         ),
+        "declared_packages": {
+            "parent": dict(timing_model.get("parent") or {}),
+            "candidate": dict(timing_model.get("candidate") or {}),
+        },
         "errors": errors,
         "evidence_warnings": list(
             dict.fromkeys(
@@ -208,6 +217,27 @@ def build_strategy_patch_validation_prompt(
     prior_experiences: list[Any] | None = None,
     contact_timing_report: dict[str, Any] | None = None,
 ) -> str:
+    return f"""You are validating a strategy patch as a narrow hard-error reviewer for an SC2 natural-language strategy. Do not judge whether the strategy is optimal, whether its explanation is detailed enough, or whether it resembles a prior experiment.
+
+{HARD_VALIDATION_POLICY}
+
+Runtime capabilities:
+{json_compact_block(capability_manifest or {})}
+
+Verified deterministic knowledge:
+{render_knowledge_results(knowledge_runs or [])}
+
+Parent strategy.md:
+{parent_text}
+
+Candidate strategy.md:
+{candidate_text}
+
+Return JSON only:
+{{"valid":true,"errors":[{{"type":"unsupported_action|missing_dependency|internal_inconsistency|supply_cap","location":"strategy paragraph","description":"hard non-executable error","severity":"blocking"}}]}}
+
+Use an empty errors list when the candidate is executable. Strategic uncertainty, missing audit fields, a debatable unit choice, a timing tradeoff, or similarity to history is non-blocking.
+"""
     compact_patches = [
         {
             "target": str(item.get("target") or ""),
@@ -269,6 +299,12 @@ style through the timing and manner of gaining advantage: early pressure,
 concentrated timing attack, defensive scaling, reinforcement pattern, commitment,
 and recovery. Do not reject a candidate merely because it adds or removes a unit.
 
+Use plan.strategy_area_audit as design guidance. Check whether revised areas are implemented and remain compatible with preserved areas, but do not block a candidate merely because an audit entry is missing, concise, or leaves an unaffected paragraph unchanged. Return a blocking error only when the omission creates a direct contradiction, makes the selected package non-executable, or clearly prevents its material behavior change. A coherent intervention may modify many titled paragraphs when they are causal dependencies of the same hypothesis; do not misclassify those dependent changes as unrelated objectives.
+
+Perform a staged production review beyond the first commitment. Check the opening order; relevant pre-commitment and post-commitment producer and unit targets; worker, base, gas, supply, and upgrade support; reinforcement throughput; and late-game completion. Missing detail is non-blocking unless a changed unit or production facility is unbounded in a way that creates a direct contradiction, exceeds supply, or makes the selected package impossible to execute. More production capacity should match the observed resource and queue bottleneck: mineral banking with occupied core queues may justify another relevant mineral-cost producer, while gas banking alone calls for a supported gas use or worker reallocation rather than an unrelated producer.
+
+Check offensive continuity semantically against the inferred combat style and reinforcement_retreat_cleanup audit. A pressure strategy must not silently become a retreat-and-full-rebuild loop that repeatedly suspends a viable offensive and reuses the opening gate. A timing or scaling strategy may preserve an evidence-supported disengage-and-regroup cycle. Treat tactical survival and strategic continuity as evidence-dependent, not as a universal no-retreat or always-retreat rule.
+
 Perform a style-and-window audit:
 - infer the Champion's combat style and critical power window from the strategy
   contract and complete parent document;
@@ -318,15 +354,6 @@ A support unit may be optional at first contact or may be a hard gate. It become
 blocking inconsistency only when the candidate says the original power window is
 preserved while the new support requirement can prevent that attack from launching.
 
-Perform a mechanism-history audit from concrete changes and causal predictions,
-not mechanism-family spelling. A renamed, strengthened, or "v2" label is not a new
-mechanism by itself. A rejected score alone does not block a mechanism. However:
-- implemented + contradicted blocks a semantically equivalent intervention;
-- underpowered_retry_exhausted blocks another equivalent package unless the new
-  candidate concretely repairs the recorded failed dependency;
-- a material repair must state what dependency changed and why the mechanism can
-  now actually occur in matches.
-
 Test strength:
 The candidate must be structurally capable of producing the pre-registered
 mechanism_prediction.expected_change at or beyond minimum_material_change. Reject
@@ -342,6 +369,15 @@ own numerical stage target. If it remains in ongoing reinforcement or late-game
 production, it must also have a numerical final count or cap. A temporary unit may
 instead have a stage count and explicit stop rule. Do not infer quantities from
 remaining supply or prose ratios.
+
+Perform one new_dependency_audit for every unit, upgrade, structure, or production
+transition added by the candidate or moved to an earlier stage. Verify its complete
+resource and production chain at the stage where it is required. In particular, a
+gas-cost target conflicts with an explicit zero-Refinery or mineral-only economy
+unless the candidate explicitly changes that economy before the target is produced.
+Runtime prerequisite expansion does not repair a direct contradiction in
+strategy.md. Also verify producers, add-ons, prerequisite structures, and whether
+the new target competes with a protected core unit for the same production slots.
 
 Recompute final_supply from workers and every final combat/support unit. The total
 must be complete and no greater than 200.
@@ -396,6 +432,19 @@ Return JSON only:
       "verdict": "bounded|missing_stage_target|missing_ultimate_goal_target|invalid_temporary_exception"
     }}
   ],
+  "new_dependency_audit": [
+    {{
+      "target": "new or earlier unit, upgrade, structure, or transition",
+      "stage": "when the candidate requires it",
+      "gas_required": false,
+      "gas_plan": "present|none|not_needed",
+      "required_prerequisites": ["required producer, add-on, structure, or prior upgrade"],
+      "declared_prerequisites": ["matching candidate instruction"],
+      "missing_dependencies": [],
+      "shared_production_tradeoff": "competition with protected core production, or empty",
+      "verdict": "complete|missing_prerequisite|resource_conflict|stage_conflict"
+    }}
+  ],
   "final_supply": {{
     "total": 0,
     "calculation": "workers plus every Macro.Ultimate Goal combat/support unit at full supply cost",
@@ -441,12 +490,6 @@ Return JSON only:
     ],
     "earliest_broken_link":"first lost winning mechanism, or empty",
     "verdict":"preserved|evidence_supported_revision|broken"
-  }},
-  "mechanism_history_audit": {{
-    "semantic_relation": "no_prior|new|material_repair|equivalent_to_prior",
-    "related_experiment_ids": ["experiment id"],
-    "repaired_dependencies": ["concrete repaired dependency"],
-    "verdict": "allowed|blocked"
   }},
   "errors": [
     {{
@@ -495,6 +538,9 @@ def _compact_prior_experiences(items: list[Any]) -> list[dict[str, Any]]:
                     "candidate": item.get("candidate"),
                     "mechanism_family": item.get("mechanism_family"),
                     "primary_change": item.get("primary_change"),
+                    "hypothesis": item.get("hypothesis"),
+                    "plan_direction": item.get("plan_direction"),
+                    "mechanism_prediction": item.get("mechanism_prediction"),
                     "intervention_package": (
                         {
                             name: intervention.get(name)
@@ -521,6 +567,155 @@ def _compact_prior_experiences(items: list[Any]) -> list[dict[str, Any]]:
             }
         )
     return compact
+
+
+def build_mechanism_equivalence_prompt(
+    *,
+    decision: dict[str, Any],
+    parent_text: str,
+    candidate_text: str,
+    patches: list[dict[str, Any]],
+    prior_experiences: list[Any],
+) -> str:
+    """Build a focused semantic-history check independent of patch validation."""
+    history = _compact_prior_experiences(prior_experiences)
+    return f"""You are an independent semantic experiment-history judge.
+
+Decide whether the proposed intervention is causally the same as a prior failed intervention. Ignore mechanism-family names, labels, version suffixes, paragraph ids, and wording overlap. Compare the actual strategy behavior being changed, its direction, its required dependencies, the intended contact window, and the causal prediction. For example, raising an attack threshold from 20 to 30 and later from 20 to 50 is normally the same direction even when the labels differ. Conversely, changing attack timing and changing post-contact reinforcement are not equivalent merely because both mention Marines.
+
+Use material_repair only when the candidate keeps the same causal idea but concretely repairs a dependency that prevented the earlier experiment from being implemented. Name the repaired dependency and point to the matching failed dependency in history. A larger numerical change, a renamed mechanism, or another prompt explanation is not a material repair by itself.
+
+Current Cross-match Decision:
+{render_optimizer_decision(decision)}
+
+Prior experiment history:
+{json_compact_block(history)}
+
+Parent strategy.md:
+{parent_text}
+
+Candidate strategy.md:
+{candidate_text}
+
+Candidate changes:
+{json_compact_block(patches)}
+
+Return JSON only:
+{{
+  "mechanism_equivalence_audit": {{
+    "semantic_relation": "new|material_repair|equivalent_to_prior",
+    "related_experiment_ids": ["exact experiment_id from history"],
+    "repaired_dependencies": ["concrete dependency repaired, or empty"],
+    "reason": "brief comparison of causal behavior, not names",
+    "confidence": "high|medium|low"
+  }}
+}}
+"""
+
+
+def _experiment_history_items(items: list[Any] | None) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in (items or [])
+        if isinstance(item, dict)
+        and not str(item.get("kind") or "").strip()
+        and str(item.get("experiment_id") or "").strip()
+    ]
+
+
+def _latest_gate_execution_issue(items: list[Any] | None) -> dict[str, Any]:
+    for item in reversed(_experiment_history_items(items)):
+        audit = item.get("gate_execution_audit")
+        if not isinstance(audit, dict):
+            continue
+        status = str(audit.get("status") or "").strip().lower()
+        if status in {"execution_issue", "measured"}:
+            return dict(audit) if status == "execution_issue" else {}
+    return {}
+
+
+def _normalize_mechanism_equivalence_audit(
+    raw: Any,
+    *,
+    prior_experiences: list[Any] | None,
+) -> tuple[dict[str, Any], list[str]]:
+    payload = (
+        raw.get("mechanism_equivalence_audit")
+        if isinstance(raw, dict)
+        and isinstance(raw.get("mechanism_equivalence_audit"), dict)
+        else raw
+    )
+    if not isinstance(payload, dict):
+        return {}, [
+            "decision_grounding — independent mechanism-history audit — "
+            "model returned no JSON object"
+        ]
+    relation = str(payload.get("semantic_relation") or "").strip().lower()
+    if relation not in {"new", "material_repair", "equivalent_to_prior"}:
+        return {}, [
+            "decision_grounding — independent mechanism-history audit — "
+            "semantic_relation must be new, material_repair, or equivalent_to_prior"
+        ]
+    history = _experiment_history_items(prior_experiences)
+    by_id = {
+        str(item.get("experiment_id") or "").strip(): item for item in history
+    }
+    related_ids = list(
+        dict.fromkeys(
+            str(item).strip()
+            for item in (payload.get("related_experiment_ids") or [])
+            if str(item).strip()
+        )
+    )
+    related = [by_id[item] for item in related_ids if item in by_id]
+    repaired = [
+        str(item).strip()
+        for item in (payload.get("repaired_dependencies") or [])
+        if str(item).strip()
+    ]
+    audit = {
+        "semantic_relation": relation,
+        "related_experiment_ids": related_ids,
+        "repaired_dependencies": repaired,
+        "reason": str(payload.get("reason") or "").strip(),
+        "confidence": str(payload.get("confidence") or "").strip().lower(),
+        "verdict": "allowed",
+    }
+    errors: list[str] = []
+    if relation in {"equivalent_to_prior", "material_repair"} and not related:
+        errors.append(
+            "decision_grounding — independent mechanism-history audit — semantic "
+            "equivalence must reference an exact prior experiment_id"
+        )
+    if relation == "material_repair" and not repaired:
+        errors.append(
+            "decision_grounding — material repair — identify the concrete failed "
+            "dependency repaired by this candidate"
+        )
+    if relation == "equivalent_to_prior":
+        failed = []
+        for item in related:
+            implementation = str(
+                item.get("implementation_verdict") or "unknown"
+            ).strip().lower()
+            hypothesis = str(
+                item.get("hypothesis_verdict") or "inconclusive"
+            ).strip().lower()
+            decision = str(item.get("decision") or "").strip().lower()
+            if (
+                hypothesis == "contradicted"
+                or implementation in {"underpowered", "execution_invalid", "unknown"}
+                or item.get("underpowered_retry_exhausted") is True
+                or decision in {"rejected", "policy_rejected_before_matches"}
+            ):
+                failed.append(str(item.get("experiment_id") or ""))
+        if failed:
+            audit["verdict"] = "blocked"
+            errors.append(
+                "decision_grounding — mechanism history — candidate is semantically "
+                "equivalent to failed prior experiment(s): " + ", ".join(failed)
+            )
+    return audit, list(dict.fromkeys(errors))
 
 
 def validate_strategy_patch_structure(
@@ -646,96 +841,49 @@ def _audit_value_is_missing(value: Any) -> bool:
 
 
 def _production_contract_errors(payload: dict[str, Any]) -> list[str]:
-    """Enforce the validator's structured production and supply audit.
-
-    The LLM may correctly describe a missing bound while still labelling the row
-    ``bounded`` or the issue ``non-blocking``.  These fields are an execution
-    contract, so their basic consistency is checked here instead of trusting the
-    model's severity label.
-    """
+    """Block explicit impossible production or supply findings, not missing prose."""
     errors: list[str] = []
     audit = payload.get("production_target_audit")
-    if not isinstance(audit, list) or not audit:
-        errors.append(
-            "missing_dependency — production_target_audit — "
-            "semantic validator must return the candidate-wide production audit"
-        )
-    else:
-        seen_units: set[str] = set()
+    if isinstance(audit, list):
         for index, row in enumerate(audit, start=1):
             if not isinstance(row, dict):
-                errors.append(
-                    f"missing_dependency — production_target_audit[{index}] — "
-                    "audit row must be an object"
-                )
                 continue
             unit = str(row.get("unit") or "").strip()
             label = unit or f"row {index}"
-            unit_key = unit.casefold()
-            if not unit:
-                errors.append(
-                    f"missing_dependency — production_target_audit[{index}] — "
-                    "unit is required"
-                )
-            elif unit_key in seen_units:
-                errors.append(
-                    f"internal_inconsistency — production_target_audit — "
-                    f"duplicate audit row for {unit}"
-                )
-            else:
-                seen_units.add(unit_key)
-
             stage_missing = _audit_value_is_missing(row.get("stage_target"))
             ultimate_missing = _audit_value_is_missing(
                 row.get("ultimate_goal_target")
             )
             stop_missing = _audit_value_is_missing(row.get("temporary_stop_rule"))
             verdict = str(row.get("verdict") or "").strip().lower()
-
-            if stage_missing:
-                errors.append(
-                    f"missing_dependency — production target for {label} — "
-                    "explicit numerical stage target is required"
-                )
-            if ultimate_missing and stop_missing:
+            if (
+                verdict in {"unbounded", "invalid", "inconsistent"}
+                and stage_missing
+                and ultimate_missing
+                and stop_missing
+            ):
                 errors.append(
                     f"missing_dependency — production bound for {label} — "
-                    "provide an Ultimate Goal count or an explicit temporary stop rule"
-                )
-            if verdict != "bounded":
-                errors.append(
-                    f"missing_dependency — production_target_audit for {label} — "
-                    f"verdict must be bounded, got {verdict or 'empty'}"
+                    "the validator explicitly found an unbounded continuing target"
                 )
 
     final_supply = payload.get("final_supply")
-    if not isinstance(final_supply, dict):
-        errors.append(
-            "missing_dependency — final_supply — semantic validator must return "
-            "the complete final supply audit"
-        )
-    else:
+    if isinstance(final_supply, dict):
         total = final_supply.get("total")
-        if isinstance(total, bool) or not isinstance(total, (int, float)):
-            errors.append(
-                "missing_dependency — final_supply.total — numeric total is required"
-            )
-        elif total < 0 or total > 200:
+        if (
+            not isinstance(total, bool)
+            and isinstance(total, (int, float))
+            and (total < 0 or total > 200)
+        ):
             errors.append(
                 f"internal_inconsistency — final_supply.total — {total} exceeds "
                 "the valid 0-200 supply range"
             )
-        calculation = str(final_supply.get("calculation") or "").strip()
-        if not calculation:
-            errors.append(
-                "missing_dependency — final_supply.calculation — complete supply "
-                "calculation is required"
-            )
         verdict = str(final_supply.get("verdict") or "").strip().lower()
-        if verdict != "valid":
+        if verdict in {"over_200", "invalid", "impossible"}:
             errors.append(
                 "internal_inconsistency — final_supply.verdict — "
-                f"expected valid, got {verdict or 'empty'}"
+                f"validator reported {verdict}"
             )
     return list(dict.fromkeys(errors))
 
@@ -747,24 +895,14 @@ def _style_and_history_contract_errors(
 ) -> list[str]:
     errors: list[str] = []
     style = payload.get("style_and_window_audit")
-    if not isinstance(style, dict):
-        errors.append(
-            "strategy_identity — style_and_window_audit — semantic validator must "
-            "compare combat style and the critical power window"
-        )
-    else:
-        if style.get("style_preserved") is not True:
+    if isinstance(style, dict):
+        if style.get("style_preserved") is False:
             errors.append(
                 "strategy_identity — combat style — candidate changes the "
                 "Champion's intended combat style"
             )
         effect = str(style.get("contact_window_effect") or "").strip().lower()
-        if effect not in {"earlier", "similar", "later", "unknown"}:
-            errors.append(
-                "strategy_identity — contact window — expected "
-                "earlier|similar|later|unknown"
-            )
-        if style.get("window_change_justified") is not True:
+        if effect in {"earlier", "later"} and style.get("window_change_justified") is False:
             errors.append(
                 "strategy_identity — critical power window — candidate changes or "
                 "suppresses the contact window without support from the selected decision"
@@ -774,33 +912,14 @@ def _style_and_history_contract_errors(
                 "internal_inconsistency — hidden attack gate — a production, support, "
                 "or technology prerequisite can block the declared Main Attack Gate"
             )
-        verdict = str(style.get("verdict") or "").strip().lower()
-        if verdict not in {"preserved", "evidence_supported_shift"}:
-            errors.append(
-                "strategy_identity — style-and-window verdict — expected preserved "
-                "or evidence_supported_shift"
-            )
 
-    expected_checks = list(
-        ((decision or {}).get("plan") or {}).get("preservation_checks") or []
-    )
     winning = payload.get("winning_mechanism_audit")
-    if expected_checks and not isinstance(winning, dict):
-        errors.append(
-            "preserved_strengths — winning_mechanism_audit — semantic validator "
-            "must compare the complete candidate with the Champion's validated wins"
-        )
-    elif isinstance(winning, dict):
+    if isinstance(winning, dict):
         reviewed = [
             item
             for item in (winning.get("reviewed_invariants") or [])
             if isinstance(item, dict)
         ]
-        if expected_checks and len(reviewed) < len(expected_checks):
-            errors.append(
-                "preserved_strengths — reviewed invariants — candidate audit does "
-                "not cover every protected winning mechanism"
-            )
         if any(
             str(item.get("candidate_effect") or "").strip().lower() == "broken"
             for item in reviewed
@@ -810,10 +929,9 @@ def _style_and_history_contract_errors(
                 "a validated Champion advantage"
             )
         winning_verdict = str(winning.get("verdict") or "").strip().lower()
-        if winning_verdict not in {"preserved", "evidence_supported_revision"}:
+        if winning_verdict == "broken":
             errors.append(
-                "preserved_strengths — winning-mechanism verdict — expected preserved "
-                "or evidence_supported_revision"
+                "preserved_strengths — winning-mechanism verdict — validator reported broken"
             )
         if str(winning.get("earliest_broken_link") or "").strip():
             errors.append(
@@ -821,55 +939,15 @@ def _style_and_history_contract_errors(
                 "reproduce the Champion's validated winning chain"
             )
 
-    history = payload.get("mechanism_history_audit")
-    if not isinstance(history, dict):
-        errors.append(
-            "decision_grounding — mechanism_history_audit — semantic validator must "
-            "compare the intervention with prior experiments"
-        )
-    else:
-        relation = str(history.get("semantic_relation") or "").strip().lower()
-        if relation not in {
-            "no_prior",
-            "new",
-            "material_repair",
-            "equivalent_to_prior",
-        }:
-            errors.append(
-                "decision_grounding — mechanism history relation — expected "
-                "no_prior|new|material_repair|equivalent_to_prior"
-            )
-        verdict = str(history.get("verdict") or "").strip().lower()
-        if verdict != "allowed" or relation == "equivalent_to_prior":
-            errors.append(
-                "decision_grounding — mechanism history — candidate repeats a "
-                "blocked or exhausted causal intervention"
-            )
-        if relation == "material_repair" and not list(
-            history.get("repaired_dependencies") or []
-        ):
-            errors.append(
-                "decision_grounding — material repair — identify the concrete failed "
-                "dependency repaired by this candidate"
-            )
-
     scope = payload.get("failure_stage_scope_audit")
     plan = (decision or {}).get("plan") or {}
     failure_mode = (decision or {}).get("failure_mode_analysis") or {}
     expected_stage = str(failure_mode.get("failure_stage") or "").strip().lower()
-    scope_required = bool(expected_stage or plan.get("stage_scope_reason"))
-    if not isinstance(scope, dict):
-        if scope_required:
-            errors.append(
-                "decision_grounding — failure-stage scope — semantic validator "
-                "did not compare composition and retreat changes with the selected "
-                "failure stage"
-            )
-    else:
+    if isinstance(scope, dict):
         composition_allowed = bool(plan.get("composition_change_allowed"))
         retreat_allowed = bool(plan.get("retreat_change_allowed"))
         reported_stage = str(scope.get("failure_stage") or "").strip().lower()
-        if expected_stage and reported_stage != expected_stage:
+        if expected_stage and reported_stage and reported_stage != expected_stage:
             errors.append(
                 "decision_grounding — failure-stage scope — semantic audit used a "
                 "different failure stage from the Cross-match Decision"
@@ -888,6 +966,44 @@ def _style_and_history_contract_errors(
             errors.append(
                 "decision_grounding — failure-stage scope — candidate changes do not "
                 "match the selected failure stage and scope permissions"
+            )
+    return list(dict.fromkeys(errors))
+
+
+def _new_dependency_contract_errors(payload: dict[str, Any]) -> list[str]:
+    """Enforce resource and prerequisite closure for candidate-added targets."""
+
+    audit = payload.get("new_dependency_audit")
+    if not isinstance(audit, list):
+        return []
+    errors: list[str] = []
+    for index, row in enumerate(audit, start=1):
+        if not isinstance(row, dict):
+            continue
+        target = str(row.get("target") or "").strip()
+        label = target or f"row {index}"
+        gas_required = row.get("gas_required") is True
+        gas_plan = str(row.get("gas_plan") or "").strip().lower()
+        if gas_required and gas_plan != "present":
+            errors.append(
+                f"missing_dependency — gas economy for {label} — a gas-cost target "
+                "requires an explicit compatible gas plan before its stage"
+            )
+        missing = [
+            str(item).strip()
+            for item in (row.get("missing_dependencies") or [])
+            if str(item).strip()
+        ]
+        if missing:
+            errors.append(
+                f"missing_dependency — dependency chain for {label} — "
+                + "; ".join(missing)
+            )
+        verdict = str(row.get("verdict") or "").strip().lower()
+        if verdict in {"missing_prerequisite", "incomplete", "invalid"}:
+            errors.append(
+                f"missing_dependency — new_dependency_audit for {label} — "
+                f"validator reported {verdict}"
             )
     return list(dict.fromkeys(errors))
 
@@ -966,6 +1082,7 @@ def _blocking_semantic_errors(
         blocking.append(message)
     valid = payload.get("valid")
     blocking.extend(_production_contract_errors(payload))
+    blocking.extend(_new_dependency_contract_errors(payload))
     blocking.extend(
         _style_and_history_contract_errors(payload, decision=decision)
     )
@@ -987,6 +1104,48 @@ def _blocking_semantic_errors(
     return []
 
 
+_HARD_SEMANTIC_TYPES = {
+    "unsupported_action",
+    "runtime_boundary",
+    "missing_dependency",
+    "technology_dependency",
+    "production_dependency",
+    "internal_inconsistency",
+    "supply_cap",
+    "unexecutable",
+}
+
+
+def _hard_semantic_errors(payload: dict[str, Any]) -> list[str]:
+    """Keep model review narrow; strategic quality belongs to match evaluation."""
+    reported = payload.get("errors") or []
+    if not isinstance(reported, list):
+        reported = [reported]
+    errors: list[str] = []
+    for item in reported:
+        if isinstance(item, str):
+            message = item.strip()
+            if message:
+                errors.append(message)
+            continue
+        if not isinstance(item, dict):
+            continue
+        issue_type = str(item.get("type") or item.get("category") or "").strip().lower()
+        issue_type = re.sub(r"[^a-z0-9]+", "_", issue_type).strip("_")
+        severity = str(item.get("severity") or "blocking").strip().lower()
+        if issue_type not in _HARD_SEMANTIC_TYPES or severity in {
+            "non-blocking",
+            "non_blocking",
+            "advisory",
+            "warning",
+        }:
+            continue
+        _severity, message = _semantic_issue(item)
+        if message:
+            errors.append(message)
+    return list(dict.fromkeys(errors))
+
+
 def validate_strategy_patch_semantics(
     *,
     decision: dict[str, Any],
@@ -1004,6 +1163,19 @@ def validate_strategy_patch_semantics(
 ) -> list[str]:
     capability_manifest = capability_manifest or {}
     errors = _runtime_boundary_errors(patches, candidate_text, capability_manifest)
+    gate_execution_issue = _latest_gate_execution_issue(prior_experiences)
+    if gate_execution_issue and any(
+        str(patch.get("target") or "").strip() == "main_attack_gate"
+        for patch in patches
+        if isinstance(patch, dict)
+    ):
+        errors.append(
+            "runtime_boundary — main_attack_gate — prior deterministic audit found "
+            "that the declared gate was reached but Commander did not launch at "
+            "repeated effective decision opportunities; keep the strategy gate "
+            "unchanged until runtime execution is repaired"
+        )
+        return errors
     contact_timing_report: dict[str, Any] = {}
     if _timing_audit_required(decision) and str(race).strip().casefold() == "terran":
         extraction = call_json_llm(
@@ -1014,7 +1186,7 @@ def validate_strategy_patch_semantics(
                 knowledge_runs=knowledge_runs,
             ),
             model=str(model or "").strip() or DEFAULT_OPTIMIZATION_MODEL,
-            is_reasoning=OPTIMIZATION_ENABLE_REASONING,
+            is_reasoning=CONTACT_TIMING_EXTRACTION_ENABLE_REASONING,
         )
         timing_model = (
             extraction.get("timing_model")
@@ -1047,22 +1219,26 @@ def validate_strategy_patch_semantics(
             contact_timing_report=contact_timing_report,
         ),
         model=str(model or "").strip() or DEFAULT_OPTIMIZATION_MODEL,
-        is_reasoning=OPTIMIZATION_ENABLE_REASONING,
+        is_reasoning=STRATEGY_SEMANTIC_VALIDATION_ENABLE_REASONING,
     )
     if not isinstance(result, dict):
-        errors.append("semantic validator returned no JSON object")
+        if audit_output is not None:
+            audit_output["hard_semantic_review"] = {
+                "status": "unavailable",
+                "warning": "hard semantic reviewer returned no JSON object",
+            }
         return errors
     payload = result.get("validation") if isinstance(result.get("validation"), dict) else result
     if not isinstance(payload, dict):
-        errors.append("semantic validator returned no JSON object")
+        if audit_output is not None:
+            audit_output["hard_semantic_review"] = {
+                "status": "unavailable",
+                "warning": "hard semantic reviewer returned no JSON object",
+            }
         return errors
-    errors.extend(
-        _blocking_semantic_errors(
-            payload,
-            decision=decision,
-            contact_timing_report=contact_timing_report,
-        )
-    )
+    if audit_output is not None:
+        audit_output["hard_semantic_review"] = dict(payload)
+    errors.extend(_hard_semantic_errors(payload))
     return errors
 
 
@@ -1105,6 +1281,7 @@ def validate_strategy_patch(
 
 
 __all__ = [
+    "build_mechanism_equivalence_prompt",
     "build_strategy_patch_validation_prompt",
     "validate_strategy_patch",
     "validate_strategy_patch_semantics",

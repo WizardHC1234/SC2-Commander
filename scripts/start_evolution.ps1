@@ -80,7 +80,7 @@ Write-Host "Matches/gen  : $CFG_MATCHES, concurrency=$CFG_CONCURRENCY, max_gen=$
 Write-Host "Candidate    : $CFG_CANDIDATE_MATCHES evaluation games"
 Write-Host "Retry        : $CFG_CANDIDATE_GENERATION_RETRIES feedback-guided candidate regeneration attempts"
 Write-Host "Confirmation : $CFG_CONFIRMATION_MATCHES extra games per strategy when results are close"
-Write-Host "Selection    : candidate score > champion score"
+Write-Host "Selection    : candidate score > champion score and the planned mechanism was implemented"
 Write-Host "Mastery      : Champion win rate >= $CFG_MASTERY_SCORE_THRESHOLD"
 Write-Host "Budget       : per-difficulty=$CFG_MAX_GENERATIONS_PER_DIFFICULTY, total=$CFG_MAX_GENERATIONS"
 Write-Host "Records dir  : $CFG_RECORDS_DIR"

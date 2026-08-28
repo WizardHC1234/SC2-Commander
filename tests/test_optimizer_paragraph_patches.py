@@ -32,6 +32,7 @@ def _semantic_payload(*, valid: bool = True, errors: list | None = None) -> dict
                 "verdict": "bounded",
             }
         ],
+        "new_dependency_audit": [],
         "final_supply": {
             "total": 119,
             "calculation": "75 Marines plus 44 SCVs equals 119 supply",
@@ -298,23 +299,20 @@ def test_optimizer_prompt_does_not_select_a_plan() -> None:
     assert "Generate the entire replacement strategy.md" in prompt
     assert '"strategy_md"' in prompt
     assert '"patches"' not in prompt.split("Return one JSON object only:")[1]
-    assert "coherent intervention package" in prompt
-    assert "minimum_material_change" in prompt
-    assert "cosmetic" in prompt
-    assert "globally rewritten document must still make one causal change" in prompt
-    assert "all technology and unit prerequisites are feasible" in prompt
-    assert "complete relationship\namong strategy identity, development" in prompt
+    assert "one coherent strategy" in prompt
+    assert "Learn from both outcomes" in prompt
+    assert "production plan coherent across opening" in prompt
+    assert "History is evidence, not a ban list" in prompt
     assert "Executor capability manifest" in prompt
     assert "production_target_audit" not in prompt.split("Return one JSON object only:")[1]
-    assert "Every unit that the complete candidate says to continue or resume" in prompt
-    assert "numerical final count or cap" in prompt
+    assert "staged targets when the candidate materially changes" in prompt
+    assert "Do not invent targets for unaffected units or phases" in prompt
     assert "no more than 200 supply" in prompt
-    assert "workers plus every final combat/support unit" in prompt
-    assert "strategy_contract.style" in prompt
-    assert "contact" in prompt and "timing, fighting package" in prompt
-    assert "fighting package" in prompt
-    assert "fixed category ranking" in prompt
-    assert "official Champion and the only" in prompt
+    assert "workers plus every final combat and support unit" in prompt
+    assert "Compact optimization brief" in prompt
+    assert "contact" in prompt and "own and enemy composition" in prompt
+    assert "Current Champion strategy.md" in prompt
+    assert "do not fill audit forms" in prompt
     assert "Independent factual match summaries" not in prompt
 
 
@@ -549,7 +547,7 @@ def test_blocking_semantic_retry_exhaustion_uses_latest_candidate(
     assert events[-1]["valid"] is False
 
 
-def test_underpowered_semantic_retry_exhaustion_uses_latest_candidate(
+def test_underpowered_semantic_opinion_is_left_to_match_evaluation(
     monkeypatch,
 ) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
@@ -596,11 +594,11 @@ def test_underpowered_semantic_retry_exhaustion_uses_latest_candidate(
         initial_tool_observations=[],
     )
 
-    assert result.ok is False
-    assert improvement is None
-    assert optimizer_calls == 5
-    assert errors
-    assert events[-1]["valid"] is False
+    assert result.ok is True
+    assert improvement is not None
+    assert optimizer_calls == 1
+    assert errors == []
+    assert events[-1]["valid"] is True
 
 
 def test_mixed_underpowered_and_blocking_semantic_errors_use_latest_candidate(
@@ -659,7 +657,6 @@ def test_mixed_underpowered_and_blocking_semantic_errors_use_latest_candidate(
     assert result.ok is False
     assert improvement is None
     assert optimizer_calls == 5
-    assert any("underpowered_implementation" in error for error in errors)
     assert any("missing_dependency" in error for error in errors)
     assert events[-1]["valid"] is False
 
@@ -771,9 +768,6 @@ def test_optimizer_accepts_complete_strategy_document_and_derives_changes(
     complete_candidate = TANK_STRATEGY.replace(
         "45 completed and living Marines and 10 completed and living Siege Tanks",
         "36 completed and living Marines and 8 completed and living Siege Tanks",
-    ).replace(
-        "rebuild to 45 Marines and 10 Siege Tanks",
-        "rebuild to 36 Marines and 8 Siege Tanks",
     )
 
     def fake_llm(prompt: str, **kwargs):

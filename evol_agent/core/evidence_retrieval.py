@@ -273,6 +273,8 @@ def _history_text(item: Any) -> str:
         "decision",
         "implementation_verdict",
         "hypothesis_verdict",
+        "gate_execution_audit",
+        "first_commitment_timing",
     )
     return json.dumps(
         {key: item.get(key) for key in fields if key in item},
@@ -304,6 +306,8 @@ def _compact_history_item(item: Any) -> dict[str, Any]:
         "intervention_package",
         "implementation_verdict",
         "hypothesis_verdict",
+        "gate_execution_audit",
+        "first_commitment_timing",
         "plan_direction",
         "patches",
         "decision",

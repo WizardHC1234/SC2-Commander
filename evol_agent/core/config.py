@@ -73,9 +73,16 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_ANALYSIS_MODEL = DEFAULT_MODEL
 DEFAULT_OPTIMIZATION_MODEL = DEFAULT_MODEL
 
+# Reasoning is enabled only for stages that make causal or strategic judgments.
+# Factual extraction, deterministic calculation, and checklist validation remain
+# non-reasoning calls to control latency and token usage.
 MATCH_SUBAGENT_ENABLE_REASONING = False
-ANALYSIS_ENABLE_REASONING = False
-OPTIMIZATION_ENABLE_REASONING = False
+CROSS_MATCH_DISCOVERY_ENABLE_REASONING = True
+CROSS_MATCH_DECISION_ENABLE_REASONING = True
+CANDIDATE_GENERATION_ENABLE_REASONING = True
+CONTACT_TIMING_EXTRACTION_ENABLE_REASONING = False
+STRATEGY_SEMANTIC_VALIDATION_ENABLE_REASONING = False
+EXPERIMENT_AUDIT_ENABLE_REASONING = True
 
 DEFAULT_KNOWLEDGE_MODE = "enabled"
 KNOWLEDGE_MODES = ("enabled", "disabled")
@@ -95,21 +102,17 @@ def resolve_model(explicit: str = "", *, role: str = "default") -> str:
 # JSON transport retries happen inside call_json_llm.
 LLM_CALL_MAX_ATTEMPTS = 2
 LLM_CALL_RETRY_DELAYS_SECONDS = (2.0, 5.0)
-# Bound each provider request so a live process cannot wait forever on a
-# half-open connection. Large batch-analysis prompts can legitimately take
-# several minutes on reasoning models, so keep this above Commander turn time.
-# Bound each provider request so a live process cannot wait forever on a
-# half-open connection. Large batch-analysis prompts can legitimately take
-# several minutes on reasoning models, so keep this above Commander turn time.
-LLM_CALL_TIMEOUT_SECONDS = 300.0
+# Reasoning calls from Kimi and similar models can exceed five minutes. Keep a
+# finite bound, but leave enough room for a complete strategic judgment.
+LLM_CALL_TIMEOUT_SECONDS = 480.0
 
 # Match summaries are independent and can be produced concurrently.
 MAX_CONCURRENT_MATCH_SUBAGENTS = 3
 
-# Knowledge lookup is optional: match evidence drives the analysis, and static
-# SC2 facts are queried only when they can change a candidate decision.
-MIN_KNOWLEDGE_QUERIES = 0
-MAX_KNOWLEDGE_QUERIES = 4
+# Discovery may request a small number of deterministic SC2 facts. When it makes
+# a production, timing, upgrade, or matchup claim but omits the query, the
+# analysis loop adds one grounded fallback query.
+MAX_KNOWLEDGE_QUERIES = 3
 
 # Candidate retries feed every structural, deterministic-knowledge, basic, and
 # semantic validation error back to the optimizer. Keep this bounded: retries

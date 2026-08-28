@@ -5,9 +5,9 @@ import re
 from typing import Any
 
 from .config import (
+    CANDIDATE_GENERATION_ENABLE_REASONING,
     DEFAULT_OPTIMIZATION_MODEL,
     MAX_VALIDATION_RETRIES,
-    OPTIMIZATION_ENABLE_REASONING,
 )
 from .llm import call_json_llm
 from .prompts import build_candidate_prompt
@@ -159,6 +159,27 @@ def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[
             if isinstance(raw.get("mechanism_prediction"), dict)
             else {}
         ),
+        "selected_package_id": str(raw.get("selected_package_id") or ""),
+        "selected_timing_budget": (
+            dict(raw.get("selected_timing_budget"))
+            if isinstance(raw.get("selected_timing_budget"), dict)
+            else {}
+        ),
+        "selected_package_budget": (
+            dict(raw.get("selected_package_budget"))
+            if isinstance(raw.get("selected_package_budget"), dict)
+            else {}
+        ),
+        "selected_engagement_assessment": (
+            dict(raw.get("selected_engagement_assessment"))
+            if isinstance(raw.get("selected_engagement_assessment"), dict)
+            else {}
+        ),
+        "package_budget_reports": [
+            dict(item)
+            for item in (raw.get("package_budget_reports") or [])
+            if isinstance(item, dict)
+        ],
         "retrieval_assessment": (
             dict(raw.get("retrieval_assessment"))
             if isinstance(raw.get("retrieval_assessment"), dict)
@@ -474,79 +495,6 @@ def _normalize_optimizer_candidate(
         for item in (raw.get("preserved_strengths") or [])
         if str(item).strip()
     ]
-    raw_inheritance = raw.get("inheritance")
-    inheritance = dict(raw_inheritance) if isinstance(raw_inheritance, dict) else {}
-
-    def inheritance_items(key: str) -> list[dict[str, str]]:
-        values = inheritance.get(key)
-        if not isinstance(values, list):
-            return []
-        normalized: list[dict[str, str]] = []
-        for value in values:
-            if isinstance(value, dict):
-                item = {
-                    "item": str(
-                        value.get("item")
-                        or value.get("mechanism")
-                        or value.get("change")
-                        or ""
-                    ).strip(),
-                    "reason": str(
-                        value.get("reason")
-                        or value.get("evidence")
-                        or value.get("why")
-                        or ""
-                    ).strip(),
-                }
-            else:
-                item = {"item": str(value).strip(), "reason": ""}
-            if item["item"]:
-                normalized.append(item)
-        return normalized
-
-    normalized_inheritance = {
-        "keep": inheritance_items("keep"),
-        "revise": inheritance_items("revise"),
-        "remove": inheritance_items("remove"),
-    }
-    if not any(normalized_inheritance.values()):
-        # Compatibility fallback for older optimizer responses. Live prompts now
-        # require an explicit ledger, but old checkpoints can still be resumed.
-        normalized_inheritance = {
-            "keep": [{"item": item, "reason": "preserved strength"} for item in preserved],
-            "revise": [
-                {
-                    "item": item.get("target", "strategy document"),
-                    "reason": item.get("why_required")
-                    or "changed by full-document strategy generation",
-                }
-                for item in (normalized_patches or document_changes)
-            ],
-            "remove": [],
-        }
-    preservation_audit: list[dict[str, str]] = []
-    for item in raw.get("preservation_audit") or []:
-        if not isinstance(item, dict):
-            continue
-        invariant = str(item.get("invariant") or "").strip()
-        effect = str(item.get("effect") or "").strip().lower()
-        if not invariant or effect not in {
-            "preserved",
-            "improved",
-            "evidence_supported_revision",
-            "broken",
-        }:
-            continue
-        preservation_audit.append(
-            {
-                "invariant": invariant,
-                "effect": effect,
-                "candidate_rule": str(item.get("candidate_rule") or "").strip(),
-                "reason": str(item.get("reason") or "").strip(),
-            }
-        )
-        if len(preservation_audit) >= 8:
-            break
     return (
         {
             "action": action,
@@ -556,8 +504,6 @@ def _normalize_optimizer_candidate(
             "expected_effect": str(raw.get("expected_effect") or "").strip(),
             "main_risk": str(raw.get("main_risk") or "").strip(),
             "preserved_strengths": preserved,
-            "inheritance": normalized_inheritance,
-            "preservation_audit": preservation_audit,
         },
         "",
     )
@@ -640,63 +586,33 @@ def _candidate_rationale(
     return {
         "strategy_contract": dict(decision.get("strategy_contract") or {}),
         "outcome_contrast": dict(decision.get("outcome_contrast") or {}),
+        "strengths_to_preserve": list(decision.get("strengths_to_preserve") or []),
+        "priority_problem": (
+            dict(priority) if isinstance(priority, dict) else {"problem": problem}
+        ),
         "hypothesis": hypothesis,
-        "mechanism_family": str(decision.get("mechanism_family") or "").strip(),
+        "mechanism_family": str(decision.get("mechanism_family") or direction).strip(),
         "failure_mode_analysis": (
             dict(decision.get("failure_mode_analysis"))
             if isinstance(decision.get("failure_mode_analysis"), dict)
             else {}
         ),
-        "priority_alignment": (
-            dict(decision.get("priority_alignment"))
-            if isinstance(decision.get("priority_alignment"), dict)
-            else {}
-        ),
         "mechanism_prediction": mechanism_prediction,
-        "retrieval_assessment": (
-            dict(decision.get("retrieval_assessment"))
-            if isinstance(decision.get("retrieval_assessment"), dict)
-            else {}
+        "selected_package_id": str(decision.get("selected_package_id") or ""),
+        "selected_timing_budget": dict(decision.get("selected_timing_budget") or {}),
+        "selected_package_budget": dict(decision.get("selected_package_budget") or {}),
+        "selected_engagement_assessment": dict(
+            decision.get("selected_engagement_assessment") or {}
         ),
-        "priority_problem": problem,
-        "plan_direction": direction,
-        "intervention_package": dict(plan),
-        "primary_lever": "other",
-        "predictions": [
-            str(mechanism_prediction.get("outcome_prediction") or expected_effect).strip()
-            or "candidate matches test the supplied hypothesis"
-        ],
-        "disproof_conditions": [
-            str(mechanism_prediction.get("disproof_condition") or "").strip()
-            or "the intended mechanism materially changes but the predicted outcome does not"
-        ],
-        "capability_mapping": {
-            "macro_actions": [],
-            "changed_macro_actions": [],
-            "army_controls": [],
-            "information_controls": [],
-            "runtime_dependencies": [],
-            "unsupported_dependencies": [],
-        },
-        "preserved_strength": strengths[0] if strengths else "",
-        "strengths_to_preserve": list(decision.get("strengths_to_preserve") or []),
-        "preserved_strengths": list(candidate.get("preserved_strengths") or strengths),
-        "preservation_audit": list(candidate.get("preservation_audit") or []),
-        "inheritance": dict(candidate.get("inheritance") or {}),
-        "selected_plan_ids": ["D1"],
-        "overall_assessment": direction,
-        "selected_changes": [
-            {
-                "source_plan_id": "D1",
-                "problem_id": "P1",
-                "target": item.get("target"),
-                "change": item.get("new") or item.get("replacement"),
-                "why": item.get("why_required")
-                or "required by the generated complete strategy",
-            }
-            for item in changes
+        "candidate_package_evaluations": [
+            dict(item)
+            for item in (decision.get("package_budget_reports") or [])
             if isinstance(item, dict)
         ],
+        "plan_direction": direction,
+        "intervention_package": dict(plan),
+        "preserved_strengths": list(candidate.get("preserved_strengths") or strengths),
+        "document_changes": [item for item in changes if isinstance(item, dict)],
         "primary_change": direction,
         "expected_effect": expected_effect,
         "main_risk": main_risk,
@@ -743,6 +659,7 @@ def run_optimization_agent_loop(
     last_improvement: EvolImprovement | None = None
     latest_applied_improvement: EvolImprovement | None = None
     latest_applied_failure_stage = ""
+    timing_feedback_sent = False
     parent_text = str(skill_texts.get("strategy.md") or "")
     try:
         parent_document = StrategyDocument.parse(parent_text)
@@ -780,7 +697,7 @@ def run_optimization_agent_loop(
                 knowledge_runs=knowledge_runs,
             ),
             model=model,
-            is_reasoning=OPTIMIZATION_ENABLE_REASONING,
+            is_reasoning=CANDIDATE_GENERATION_ENABLE_REASONING,
         )
         raw = _unwrap_candidate(action)
         if raw is None:
@@ -801,47 +718,6 @@ def run_optimization_agent_loop(
                 {
                     "attempt": attempt,
                     "action": str(raw.get("action") or "draft_candidate"),
-                    "valid": False,
-                    "error": error,
-                    "llm_calls": llm_calls,
-                }
-            )
-            continue
-
-        required_preservation_checks = list(
-            (decision.get("plan") or {}).get("preservation_checks") or []
-        )
-        preservation_audit = list(normalized.get("preservation_audit") or [])
-        if required_preservation_checks and not preservation_audit:
-            error = (
-                "optimizer must audit how the complete candidate preserves the "
-                "Champion's validated winning mechanisms"
-            )
-            candidate = normalized
-            validation_errors.append(error)
-            prompt_errors = [error]
-            events.append(
-                {
-                    "attempt": attempt,
-                    "action": "candidate_preservation_audit",
-                    "valid": False,
-                    "error": error,
-                    "llm_calls": llm_calls,
-                }
-            )
-            continue
-        if any(item.get("effect") == "broken" for item in preservation_audit):
-            error = (
-                "candidate preservation audit marks a validated winning mechanism "
-                "as broken"
-            )
-            candidate = normalized
-            validation_errors.append(error)
-            prompt_errors = [error]
-            events.append(
-                {
-                    "attempt": attempt,
-                    "action": "candidate_preservation_audit",
                     "valid": False,
                     "error": error,
                     "llm_calls": llm_calls,
@@ -994,6 +870,10 @@ def run_optimization_agent_loop(
         draft_improvement.raw["files"] = dict(draft_improvement.files)
         latest_applied_improvement = draft_improvement
         last_improvement = draft_improvement
+        print(
+            f"{prefix}DataAgent: validating candidate action dependencies",
+            flush=True,
+        )
         candidate_knowledge = _candidate_knowledge_run(
             candidate_text=patched_text,
             parent_text=parent_text,
@@ -1041,8 +921,6 @@ def run_optimization_agent_loop(
             parent_text=parent_text,
             candidate_text=patched_text,
             patches=normalized["patches"],
-            inheritance=normalized.get("inheritance"),
-            preservation_audit=normalized.get("preservation_audit"),
             capability_manifest=capability_manifest,
             knowledge_runs=knowledge_runs,
             prior_experiences=prior_experiences,
@@ -1053,6 +931,105 @@ def run_optimization_agent_loop(
         if semantic_audit:
             draft_improvement.raw["deterministic_feasibility_audit"] = semantic_audit
             draft_improvement.analysis["deterministic_feasibility_audit"] = semantic_audit
+        timing_report = (
+            semantic_audit.get("contact_timing_report")
+            if isinstance(semantic_audit, dict)
+            and isinstance(semantic_audit.get("contact_timing_report"), dict)
+            else {}
+        )
+        timing_delta = timing_report.get("earliest_feasible_timing_delta_seconds")
+        plan = decision.get("plan") if isinstance(decision.get("plan"), dict) else {}
+        contact_effect = str(plan.get("contact_window_effect") or "unknown").strip().lower()
+        timing_justification = str(plan.get("why_window_remains_favorable") or "").strip()
+        selected_budget = (
+            decision.get("selected_timing_budget")
+            if isinstance(decision.get("selected_timing_budget"), dict)
+            else {}
+        )
+        target_latest = selected_budget.get("target_latest_first_commitment_seconds")
+        maximum_added = selected_budget.get("maximum_added_feasibility_seconds")
+        actual_candidate_time = timing_report.get(
+            "candidate_earliest_feasible_time_seconds"
+        )
+        budget_violations: list[str] = []
+        if timing_report.get("complete") is True:
+            if (
+                isinstance(target_latest, (int, float))
+                and isinstance(actual_candidate_time, (int, float))
+                and float(actual_candidate_time) > float(target_latest)
+            ):
+                budget_violations.append(
+                    f"earliest feasible commitment {float(actual_candidate_time):.1f}s "
+                    f"exceeds the selected package limit {float(target_latest):.1f}s"
+                )
+            if (
+                isinstance(maximum_added, (int, float))
+                and isinstance(timing_delta, (int, float))
+                and float(timing_delta) > float(maximum_added)
+            ):
+                budget_violations.append(
+                    f"added feasibility delay {float(timing_delta):.1f}s exceeds the "
+                    f"selected package allowance {float(maximum_added):.1f}s"
+                )
+        if not timing_feedback_sent and budget_violations:
+            timing_feedback_sent = True
+            feedback = (
+                "Program-calculated strategy timing violates the selected optimization "
+                "package budget: "
+                + "; ".join(budget_violations)
+                + ". Regenerate the complete strategy without adding first-commitment "
+                "requirements outside the selected package."
+            )
+            candidate = payload
+            validation_errors.append(feedback)
+            prompt_errors = [feedback]
+            events.append(
+                {
+                    "attempt": attempt,
+                    "action": "selected_package_budget_feedback",
+                    "valid": False,
+                    "error": feedback,
+                    "llm_calls": llm_calls,
+                }
+            )
+            print(
+                f"{prefix}OptimizationAgent: package-budget feedback; revising once: "
+                f"{feedback}",
+                flush=True,
+            )
+            continue
+        if (
+            not timing_feedback_sent
+            and timing_report.get("complete") is True
+            and isinstance(timing_delta, (int, float))
+            and float(timing_delta) > 30.0
+            and contact_effect != "later"
+            and not timing_justification
+        ):
+            timing_feedback_sent = True
+            feedback = (
+                "Program-calculated earliest feasible first commitment is "
+                f"{float(timing_delta):.1f}s later than the Champion. Revise the complete "
+                "strategy once to recover the intended contact window, or explicitly make "
+                "the later package's combat advantage and survival tradeoff clear."
+            )
+            candidate = payload
+            validation_errors.append(feedback)
+            prompt_errors = [feedback]
+            events.append(
+                {
+                    "attempt": attempt,
+                    "action": "contact_timing_feedback",
+                    "valid": False,
+                    "error": feedback,
+                    "llm_calls": llm_calls,
+                }
+            )
+            print(
+                f"{prefix}OptimizationAgent: timing feedback; revising once: {feedback}",
+                flush=True,
+            )
+            continue
         if semantic_errors:
             error = "; ".join(semantic_errors)
             latest_applied_failure_stage = "semantic"

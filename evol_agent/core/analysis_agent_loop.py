@@ -13,7 +13,8 @@ from .checkpoint import (
     stage_reached,
 )
 from .config import (
-    ANALYSIS_ENABLE_REASONING,
+    CROSS_MATCH_DECISION_ENABLE_REASONING,
+    CROSS_MATCH_DISCOVERY_ENABLE_REASONING,
     DEFAULT_ANALYSIS_MODEL,
     MAX_CONCURRENT_MATCH_SUBAGENTS,
     MAX_KNOWLEDGE_QUERIES,
@@ -33,12 +34,15 @@ from .evidence_retrieval import build_retrieval_evidence_packet
 from .prompts import (
     build_cross_match_decision_prompt,
     build_cross_match_discovery_prompt,
+    build_optimization_package_prompt,
 )
+from .terran_build_order_simulator import simulate_terran_first_commitment
 from .types import AnalysisPipelineResult, BattleAnalysis, GameDigest, ToolObservation
 from ..sc2_data_agent import (
     build_knowledge_query,
     find_knowledge_run_error,
     is_knowledge_run_verified,
+    resolve_knowledge_entities,
     run_knowledge_query,
 )
 
@@ -74,6 +78,15 @@ _ASSESSMENTS = frozenset(
     }
 )
 _CONFIDENCE = frozenset({"low", "medium", "high"})
+_STRATEGY_AREAS = (
+    "goal_identity",
+    "economy_expansion",
+    "production_order_capacity",
+    "technology_composition",
+    "attack_timing_objective",
+    "reinforcement_retreat_cleanup",
+)
+_STRATEGY_AREA_DECISIONS = frozenset({"preserve", "revise"})
 _OUTCOME_RELATIONSHIPS = frozenset(
     {
         "winning_mechanism_not_reproduced",
@@ -83,6 +96,7 @@ _OUTCOME_RELATIONSHIPS = frozenset(
     }
 )
 _WINDOW_EFFECTS = frozenset({"earlier", "similar", "later", "unknown"})
+_PACKAGE_NEXT_ACTIONS = frozenset({"evaluate_candidate_packages", "inspect_runtime"})
 _FAILURE_STAGES = frozenset(
     {
         "before_core_mechanism",
@@ -93,6 +107,42 @@ _FAILURE_STAGES = frozenset(
 )
 _PRESERVATION_EFFECTS = frozenset(
     {"preserve", "improve", "evidence_supported_tradeoff"}
+)
+_REQUIREMENT_FACT_TERMS = (
+    "cost",
+    "resource",
+    "mineral",
+    "gas",
+    "supply",
+    "build",
+    "production",
+    "producer",
+    "prerequisite",
+    "timing",
+    "delay",
+    "throughput",
+    "queue",
+    "upgrade",
+    "reinforcement",
+)
+_COUNTER_FACT_TERMS = (
+    "counter",
+    "matchup",
+    "composition",
+    "versus",
+    "against",
+    "克制",
+    "兵种搭配",
+)
+_EFFECT_FACT_TERMS = (
+    "effect",
+    "ability",
+    "upgrade",
+    "synergy",
+    "support",
+    "效果",
+    "升级",
+    "协同",
 )
 
 
@@ -220,6 +270,134 @@ def _normalize_knowledge_questions(raw: Any) -> list[dict[str, Any]]:
     return questions
 
 
+def _discovery_fact_text(discovery: dict[str, Any]) -> str:
+    """Collect only diagnosis text used to ground a fallback data query."""
+    contract = discovery.get("strategy_contract") or {}
+    contrast = discovery.get("outcome_contrast") or {}
+    values: list[str] = [
+        str(contract.get("core_win_mechanism") or ""),
+        str(contract.get("critical_power_window") or ""),
+        *[str(item) for item in contract.get("core_commitments") or []],
+        str(contrast.get("loss_shortfall") or ""),
+        str(contrast.get("causal_difference") or ""),
+    ]
+    for field in (
+        "weaknesses",
+        "unknowns",
+        "opponent_pressure_patterns",
+        "matchup_patterns",
+    ):
+        for item in discovery.get(field) or []:
+            if not isinstance(item, dict):
+                continue
+            values.extend(
+                str(item.get(key) or "")
+                for key in ("pattern", "unknown", "why_it_matters")
+            )
+    return " ".join(value.strip() for value in values if value.strip())
+
+
+def _discovery_evidence_refs(discovery: dict[str, Any]) -> list[str]:
+    contrast = discovery.get("outcome_contrast") or {}
+    refs = [
+        *list(contrast.get("winning_evidence") or []),
+        *list(contrast.get("loss_evidence") or []),
+    ]
+    for field in (
+        "strengths",
+        "weaknesses",
+        "opponent_pressure_patterns",
+        "matchup_patterns",
+    ):
+        for item in discovery.get(field) or []:
+            if isinstance(item, dict):
+                refs.extend(item.get("evidence") or [])
+    return list(dict.fromkeys(str(item).strip() for item in refs if str(item).strip()))[:6]
+
+
+def _ensure_strategy_fact_query(
+    discovery: dict[str, Any],
+    *,
+    knowledge_mode: str,
+) -> dict[str, Any]:
+    """Ensure strategy-factual diagnoses reach the deterministic Data Agent.
+
+    Discovery remains the query planner. This fallback only covers the common
+    failure mode where it makes production, timing, upgrade, or matchup claims
+    but accidentally returns no structured query.
+    """
+    if knowledge_mode != "enabled" or discovery.get("knowledge_questions"):
+        return discovery
+    fact_text = _discovery_fact_text(discovery)
+    if not fact_text:
+        return discovery
+    folded = fact_text.casefold()
+    needs: list[str] = []
+    if any(term in folded for term in _REQUIREMENT_FACT_TERMS):
+        needs.append("requirements")
+    elif any(term in folded for term in _COUNTER_FACT_TERMS):
+        needs.append("counters")
+    elif any(term in folded for term in _EFFECT_FACT_TERMS):
+        needs.append("effects")
+    if not needs:
+        return discovery
+    try:
+        resolved = resolve_knowledge_entities(fact_text)
+    except (OSError, ValueError):
+        resolved = []
+    entities = list(
+        dict.fromkeys(
+            str(item.get("name") or "").strip()
+            for item in resolved
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        )
+    )[:6]
+    if not entities:
+        return discovery
+    if needs == ["requirements"]:
+        requested_facts = "costs, production or build times, producers, and prerequisites"
+    elif needs == ["counters"]:
+        requested_facts = "deterministic counter relationships"
+    else:
+        requested_facts = "deterministic effects and capabilities"
+    question = {
+        "id": "Q1",
+        "question": (
+            "Using the bundled SC2 dataset tools as the source of truth, verify "
+            f"{requested_facts} for {', '.join(entities)} before strategy editing."
+        ),
+        "entities": entities,
+        "needs": needs,
+        "query_reason": (
+            "The discovery diagnosis relies on these static SC2 facts, but did not "
+            "return a structured Data Agent query."
+        ),
+        "evidence_refs": _discovery_evidence_refs(discovery),
+        "hypothesis_scope": "verify_the_primary_strategy_fact_dependency",
+        "calculations": [],
+        "source": "deterministic_fallback_from_discovery",
+    }
+    output = dict(discovery)
+    output["knowledge_questions"] = [question]
+    query_plan = dict(output.get("query_plan") or {})
+    query_plan["game_knowledge_queries"] = [question]
+    output["query_plan"] = query_plan
+    return output
+
+
+def _retrievable_evidence_ref(value: str) -> str:
+    """Normalize common `Game N: ... at Ts` model output for record lookup."""
+    text = str(value or "").strip()
+    if re.search(r"Game\s+\d+\s*@\s*\d", text, re.IGNORECASE):
+        return text
+    game = re.search(r"Game\s+(\d+)", text, re.IGNORECASE)
+    time = re.search(r"(?:@|\bat)\s*(\d+(?:\.\d+)?)\s*s\b", text, re.IGNORECASE)
+    if not game or not time:
+        return text
+    detail = text.split(":", 1)[1].strip() if ":" in text else text
+    return f"Game {game.group(1)} @ {time.group(1)}s: {detail}"
+
+
 def _normalize_match_evidence_queries(
     raw: Any,
     *,
@@ -233,6 +411,7 @@ def _normalize_match_evidence_queries(
         refs = _clean_strings(
             item.get("evidence_refs") or item.get("evidence"), limit=8
         )
+        refs = [_retrievable_evidence_ref(ref) for ref in refs]
         if not reason or not refs:
             continue
         queries.append(
@@ -247,7 +426,10 @@ def _normalize_match_evidence_queries(
     if queries:
         return queries
     for pattern in fallback_patterns:
-        refs = _clean_strings(pattern.get("evidence"), limit=6)
+        refs = [
+            _retrievable_evidence_ref(ref)
+            for ref in _clean_strings(pattern.get("evidence"), limit=6)
+        ]
         if not refs:
             continue
         queries.append(
@@ -305,6 +487,7 @@ def _normalize_cross_match_discovery(
         raw.get("opponent_pressure_patterns"), limit=4
     )
     matchup_patterns = _normalize_pattern_items(raw.get("matchup_patterns"), limit=4)
+    outcome_contrast = _normalize_outcome_contrast(raw.get("outcome_contrast"))
     raw_query_plan = raw.get("query_plan") if isinstance(raw.get("query_plan"), dict) else {}
     questions = (
         _normalize_knowledge_questions(
@@ -314,7 +497,19 @@ def _normalize_cross_match_discovery(
         if knowledge_mode == "enabled"
         else []
     )
-    fallback_patterns = [*weaknesses, *pressure_patterns, *matchup_patterns]
+    fallback_patterns = [
+        *weaknesses,
+        {
+            "pattern": outcome_contrast.get("loss_shortfall") or "loss outcome contrast",
+            "evidence": outcome_contrast.get("loss_evidence") or [],
+        },
+        {
+            "pattern": outcome_contrast.get("winning_pattern") or "winning outcome contrast",
+            "evidence": outcome_contrast.get("winning_evidence") or [],
+        },
+        *pressure_patterns,
+        *matchup_patterns,
+    ]
     query_plan = {
         "match_evidence_queries": _normalize_match_evidence_queries(
             raw_query_plan.get("match_evidence_queries"),
@@ -326,22 +521,21 @@ def _normalize_cross_match_discovery(
         ),
         "game_knowledge_queries": questions,
     }
+    discovery = {
+        "strategy_contract": normalize_strategy_contract(
+            raw.get("strategy_contract"), strategy_name=strategy_name
+        ),
+        "outcome_contrast": outcome_contrast,
+        "strengths": strengths,
+        "weaknesses": weaknesses,
+        "unknowns": unknowns,
+        "opponent_pressure_patterns": pressure_patterns,
+        "matchup_patterns": matchup_patterns,
+        "knowledge_questions": questions,
+        "query_plan": query_plan,
+    }
     return (
-        {
-            "strategy_contract": normalize_strategy_contract(
-                raw.get("strategy_contract"), strategy_name=strategy_name
-            ),
-            "outcome_contrast": _normalize_outcome_contrast(
-                raw.get("outcome_contrast")
-            ),
-            "strengths": strengths,
-            "weaknesses": weaknesses,
-            "unknowns": unknowns,
-            "opponent_pressure_patterns": pressure_patterns,
-            "matchup_patterns": matchup_patterns,
-            "knowledge_questions": questions,
-            "query_plan": query_plan,
-        },
+        _ensure_strategy_fact_query(discovery, knowledge_mode=knowledge_mode),
         "",
     )
 
@@ -405,6 +599,7 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
         retreat_change_allowed = False
         stage_scope_evidence: list[str] = []
         stage_scope_reason = ""
+        strategy_area_audit: list[dict[str, Any]] = []
     elif isinstance(raw, dict):
         direction = str(
             raw.get("direction") or raw.get("name") or raw.get("plan") or ""
@@ -452,6 +647,32 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
             raw.get("stage_scope_evidence"), limit=6
         )
         stage_scope_reason = str(raw.get("stage_scope_reason") or "").strip()
+        strategy_area_audit = []
+        seen_areas: set[str] = set()
+        for item in raw.get("strategy_area_audit") or []:
+            if not isinstance(item, dict):
+                continue
+            area = str(item.get("area") or "").strip().lower()
+            decision = str(item.get("decision") or "").strip().lower()
+            if (
+                area not in _STRATEGY_AREAS
+                or area in seen_areas
+                or decision not in _STRATEGY_AREA_DECISIONS
+            ):
+                continue
+            required_change = str(item.get("required_change") or "").strip()
+            if decision == "revise" and not required_change:
+                continue
+            strategy_area_audit.append(
+                {
+                    "area": area,
+                    "decision": decision,
+                    "finding": str(item.get("finding") or "").strip(),
+                    "required_change": required_change,
+                    "evidence": _clean_strings(item.get("evidence"), limit=4),
+                }
+            )
+            seen_areas.add(area)
         preservation_checks = []
         for item in raw.get("preservation_checks") or []:
             if not isinstance(item, dict):
@@ -474,6 +695,15 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
         return None, "plan must be an object with direction"
     if not direction:
         return None, "plan.direction is required"
+    if not material_behavior_change:
+        material_behavior_change = direction
+    if not coordinated_changes:
+        coordinated_changes = [
+            {
+                "change": direction,
+                "why_required": "Implements the evidence-supported optimization direction.",
+            }
+        ]
     return {
         "direction": direction,
         "material_behavior_change": material_behavior_change,
@@ -489,14 +719,396 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
         "retreat_change_allowed": retreat_change_allowed,
         "stage_scope_evidence": stage_scope_evidence,
         "stage_scope_reason": stage_scope_reason,
+        "strategy_area_audit": strategy_area_audit,
     }, ""
+
+
+def _optional_nonnegative_number(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _normalize_timing_components(
+    raw: Any,
+    *,
+    slot_key: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return rows
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "").strip()
+        try:
+            quantity = int(item.get("quantity") or 0)
+            slots = int(item.get(slot_key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if action and quantity > 0 and slots > 0:
+            rows.append({"action": action, "quantity": quantity, slot_key: slots})
+    return rows[:16]
+
+
+def _normalize_timing_package(raw: Any) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "timing package must be an object"
+    economy_raw = raw.get("economy") if isinstance(raw.get("economy"), dict) else {}
+    economy: dict[str, int | None] = {}
+    for field in (
+        "worker_target_before_commitment",
+        "base_target_before_commitment",
+        "gas_workers_before_commitment",
+    ):
+        value = economy_raw.get(field)
+        if value in (None, ""):
+            economy[field] = None
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = -1
+        economy[field] = parsed if parsed >= 0 else None
+    gate_components = _normalize_timing_components(
+        raw.get("gate_components"), slot_key="production_slots"
+    )
+    setup_actions = _normalize_timing_components(
+        raw.get("setup_actions"), slot_key="parallel_slots"
+    )
+    if not gate_components:
+        return None, "timing package requires at least one gate component"
+    return {
+        "economy": economy,
+        "gate_components": gate_components,
+        "setup_actions": setup_actions,
+    }, ""
+
+
+def _normalize_candidate_package_proposal(
+    raw: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "optimization package proposal returned no JSON object"
+    next_action = str(raw.get("next_action") or "").strip()
+    if next_action not in _PACKAGE_NEXT_ACTIONS:
+        return None, "next_action must be evaluate_candidate_packages or inspect_runtime"
+    priority, priority_error = _normalize_priority_problem(raw.get("priority_problem"))
+    if priority_error:
+        return None, priority_error
+    failure_mode, _failure_error = _normalize_failure_mode_analysis(
+        raw.get("failure_mode_analysis")
+    )
+    parent_timing_package, parent_error = _normalize_timing_package(
+        raw.get("parent_timing_package")
+    )
+    common = {
+        "strengths_to_preserve": _normalize_pattern_items(
+            raw.get("strengths_to_preserve") or raw.get("strengths")
+        ),
+        "priority_problem": priority or {},
+        "failure_mode_analysis": failure_mode,
+        "next_action": next_action,
+        "action_reason": str(raw.get("action_reason") or "").strip(),
+        "evidence_limits": _clean_strings(raw.get("evidence_limits")),
+    }
+    if next_action == "inspect_runtime":
+        return {
+            **common,
+            "candidate_packages": [],
+            "parent_timing_package": parent_timing_package or {},
+        }, ""
+    if parent_error or parent_timing_package is None:
+        return None, (
+            "evaluate_candidate_packages requires a usable parent_timing_package: "
+            + parent_error
+        )
+
+    packages: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(raw.get("candidate_packages") or [], 1):
+        if not isinstance(item, dict):
+            continue
+        package_id = str(item.get("id") or f"P{index}").strip().upper()
+        hypothesis = str(item.get("hypothesis") or "").strip()
+        plan, plan_error = _normalize_plan(item.get("plan"))
+        timing_raw = item.get("timing_budget")
+        timing_raw = timing_raw if isinstance(timing_raw, dict) else {}
+        timing_package, timing_error = _normalize_timing_package(
+            timing_raw.get("package")
+        )
+        target_latest = _optional_nonnegative_number(
+            timing_raw.get("target_latest_first_commitment_seconds")
+        )
+        maximum_added = _optional_nonnegative_number(
+            timing_raw.get("maximum_added_feasibility_seconds")
+        )
+        budget_basis = _clean_strings(timing_raw.get("budget_basis"), limit=5)
+        if (
+            not package_id
+            or package_id in seen_ids
+            or not hypothesis
+            or plan_error
+            or plan is None
+            or timing_error
+            or timing_package is None
+            or (target_latest is None and maximum_added is None)
+            or not budget_basis
+        ):
+            continue
+        seen_ids.add(package_id)
+        packages.append(
+            {
+                "id": package_id,
+                "hypothesis": hypothesis,
+                "plan": plan,
+                "timing_budget": {
+                    "target_latest_first_commitment_seconds": target_latest,
+                    "maximum_added_feasibility_seconds": maximum_added,
+                    "budget_basis": budget_basis,
+                    "package": timing_package,
+                },
+                "engagement_assessment": (
+                    {
+                        key: str((item.get("engagement_assessment") or {}).get(key) or "").strip()
+                        for key in (
+                            "intended_contact_window",
+                            "own_package_role",
+                            "observed_opponent_package",
+                            "counter_and_upgrade_relationship",
+                            "reinforcement_and_continuity",
+                        )
+                    }
+                    if isinstance(item.get("engagement_assessment"), dict)
+                    else {}
+                ),
+                "expected_effect": str(item.get("expected_effect") or "").strip(),
+                "main_risk": str(item.get("main_risk") or "").strip(),
+            }
+        )
+        if len(packages) >= 3:
+            break
+    if len(packages) < 2:
+        return None, (
+            "evaluate_candidate_packages requires two or three usable hypothesis packages"
+        )
+    return {
+        **common,
+        "parent_timing_package": parent_timing_package,
+        "candidate_packages": packages,
+    }, ""
+
+
+def _compact_window_state(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: value.get(key)
+        for key in ("army", "technology", "buildings", "intel")
+        if value.get(key) not in (None, "", [], {})
+    }
+
+
+def _nearest_window_event(
+    summary: BattleAnalysis,
+    target_seconds: float | None,
+) -> dict[str, Any] | None:
+    if not isinstance(target_seconds, (int, float)):
+        return None
+    events = [
+        item
+        for item in (summary.raw.get("events") or [])
+        if isinstance(item, dict) and isinstance(item.get("time_s"), (int, float))
+    ]
+    if not events:
+        return None
+    event = min(events, key=lambda item: abs(float(item["time_s"]) - target_seconds))
+    event_time = float(event["time_s"])
+    return {
+        "time_s": round(event_time, 1),
+        "offset_from_target_s": round(event_time - float(target_seconds), 1),
+        "trigger": str(event.get("trigger") or ""),
+        "own_state": _compact_window_state(event.get("own_state")),
+        "enemy_observed": _compact_window_state(event.get("enemy_observed")),
+        "enemy_truth": _compact_window_state(event.get("enemy_truth")),
+    }
+
+
+def _empirical_opponent_windows(
+    summaries: list[BattleAnalysis] | None,
+    *,
+    parent_seconds: float | None,
+    candidate_seconds: float | None,
+) -> list[dict[str, Any]]:
+    """Join simulated package times to the nearest recorded opponent snapshots."""
+    rows: list[dict[str, Any]] = []
+    for game_index, summary in enumerate(summaries or [], 1):
+        parent_snapshot = _nearest_window_event(summary, parent_seconds)
+        candidate_snapshot = _nearest_window_event(summary, candidate_seconds)
+        engagements = [
+            item
+            for item in (summary.raw.get("major_engagements") or [])
+            if isinstance(item, dict)
+            and isinstance(item.get("time_s"), (int, float))
+        ]
+        first_relevant = next(
+            (
+                item
+                for item in sorted(engagements, key=lambda row: float(row["time_s"]))
+                if not isinstance(candidate_seconds, (int, float))
+                or float(item["time_s"]) >= float(candidate_seconds)
+            ),
+            engagements[0] if engagements else None,
+        )
+        engagement = None
+        if isinstance(first_relevant, dict):
+            engagement = {
+                key: first_relevant.get(key)
+                for key in (
+                    "time_s",
+                    "own_force_before",
+                    "enemy_observed",
+                    "enemy_truth",
+                    "own_force_after",
+                    "own_reinforcement_after",
+                    "retreat_policy",
+                    "loss_timing",
+                    "outcome",
+                )
+                if first_relevant.get(key) not in (None, "", [], {})
+            }
+        if parent_snapshot or candidate_snapshot or engagement:
+            rows.append(
+                {
+                    "game": game_index,
+                    "result": str(summary.raw.get("result") or ""),
+                    "parent_window": parent_snapshot,
+                    "candidate_window": candidate_snapshot,
+                    "first_engagement_at_or_after_candidate_window": engagement,
+                }
+            )
+        if len(rows) >= 10:
+            break
+    return rows
+
+
+def _evaluate_candidate_package_budgets(
+    proposal: dict[str, Any],
+    *,
+    race: str,
+    summaries: list[BattleAnalysis] | None = None,
+) -> list[dict[str, Any]]:
+    packages = list(proposal.get("candidate_packages") or [])
+    if str(race or "").strip().casefold() != "terran":
+        return [
+            {
+                "id": item.get("id"),
+                "status": "unavailable_for_race",
+                "complete": False,
+            }
+            for item in packages
+            if isinstance(item, dict)
+        ]
+    parent = simulate_terran_first_commitment(
+        proposal.get("parent_timing_package") or {}
+    )
+    parent_time = parent.get("earliest_feasible_time_seconds")
+    parent_cost = (
+        parent.get("total_cost")
+        if isinstance(parent.get("total_cost"), dict)
+        else {}
+    )
+    reports: list[dict[str, Any]] = []
+    for item in packages:
+        if not isinstance(item, dict):
+            continue
+        budget = (
+            item.get("timing_budget")
+            if isinstance(item.get("timing_budget"), dict)
+            else {}
+        )
+        candidate = simulate_terran_first_commitment(budget.get("package") or {})
+        candidate_time = candidate.get("earliest_feasible_time_seconds")
+        target_latest = budget.get("target_latest_first_commitment_seconds")
+        maximum_added = budget.get("maximum_added_feasibility_seconds")
+        delta = (
+            float(candidate_time) - float(parent_time)
+            if isinstance(candidate_time, (int, float))
+            and isinstance(parent_time, (int, float))
+            else None
+        )
+        latest_ok = (
+            None
+            if target_latest is None or not isinstance(candidate_time, (int, float))
+            else float(candidate_time) <= float(target_latest)
+        )
+        delay_ok = (
+            None
+            if maximum_added is None or delta is None
+            else delta <= float(maximum_added)
+        )
+        candidate_cost = (
+            candidate.get("total_cost")
+            if isinstance(candidate.get("total_cost"), dict)
+            else {}
+        )
+        complete = bool(parent.get("complete") and candidate.get("complete"))
+        within_budget = complete and latest_ok is not False and delay_ok is not False
+        reports.append(
+            {
+                "id": item.get("id"),
+                "status": (
+                    "within_budget" if within_budget else "over_or_unresolved_budget"
+                ),
+                "complete": complete,
+                "parent_earliest_feasible_time_seconds": parent_time,
+                "candidate_earliest_feasible_time_seconds": candidate_time,
+                "earliest_feasible_timing_delta_seconds": (
+                    round(delta, 3) if delta is not None else None
+                ),
+                "target_latest_first_commitment_seconds": target_latest,
+                "maximum_added_feasibility_seconds": maximum_added,
+                "target_latest_satisfied": latest_ok,
+                "maximum_added_delay_satisfied": delay_ok,
+                "gate_cost_delta": {
+                    key: round(
+                        float(candidate_cost.get(key) or 0.0)
+                        - float(parent_cost.get(key) or 0.0),
+                        3,
+                    )
+                    for key in ("minerals", "gas", "supply")
+                },
+                "declared_candidate_package": dict(budget.get("package") or {}),
+                "empirical_opponent_windows": _empirical_opponent_windows(
+                    summaries,
+                    parent_seconds=(
+                        float(parent_time)
+                        if isinstance(parent_time, (int, float))
+                        else None
+                    ),
+                    candidate_seconds=(
+                        float(candidate_time)
+                        if isinstance(candidate_time, (int, float))
+                        else None
+                    ),
+                ),
+                "bottlenecks": list(candidate.get("bottlenecks") or []),
+                "warnings": list(candidate.get("warnings") or []),
+                "errors": list(candidate.get("errors") or []),
+            }
+        )
+    return reports
 
 
 def _normalize_failure_mode_analysis(
     raw: Any,
 ) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(raw, dict):
-        return None, "failure_mode_analysis must be an object"
+        return {}, ""
     fields = (
         "failure_mode",
         "survival_prerequisite",
@@ -505,19 +1117,9 @@ def _normalize_failure_mode_analysis(
         "counterexample_check",
     )
     normalized = {field: str(raw.get(field) or "").strip() for field in fields}
-    missing = [field for field, value in normalized.items() if not value]
-    if missing:
-        return None, "failure_mode_analysis requires " + ", ".join(missing)
     covered_failures = _clean_strings(raw.get("covered_failures"), limit=10)
     unexplained_failures = _clean_strings(raw.get("unexplained_failures"), limit=10)
     counterexamples = _clean_strings(raw.get("counterexamples"), limit=10)
-    if len({item.casefold() for item in covered_failures}) < 2:
-        return None, (
-            "failure_mode_analysis.covered_failures requires at least two "
-            "distinct match failures for a repeated primary mechanism"
-        )
-    if not counterexamples:
-        return None, "failure_mode_analysis.counterexamples requires at least one item"
     normalized.update(
         {
             "covered_failures": covered_failures,
@@ -530,6 +1132,9 @@ def _normalize_failure_mode_analysis(
     # with older checkpoints, but new prompts request all of them.
     for field in (
         "failure_stage",
+        "gate_attainment_and_launch",
+        "earliest_strategy_fixable_link",
+        "why_later_levers_do_not_outrank_it",
         "commitment_and_contact_timing",
         "own_package_at_contact",
         "opponent_package_and_growth",
@@ -542,11 +1147,7 @@ def _normalize_failure_mode_analysis(
             normalized[field] = value
     stage = str(raw.get("failure_stage") or "").strip().lower()
     if stage and stage not in _FAILURE_STAGES:
-        return None, (
-            "failure_mode_analysis.failure_stage must be "
-            "before_core_mechanism, during_commitment_or_engagement, "
-            "after_successful_engagement, or mixed"
-        )
+        stage = ""
     if stage:
         normalized["failure_stage"] = stage
     return normalized, ""
@@ -577,16 +1178,13 @@ def _normalize_priority_alignment(
     raw: Any,
 ) -> tuple[dict[str, str] | None, str]:
     if not isinstance(raw, dict):
-        return None, "priority_alignment must be an object"
+        return {}, ""
     fields = (
         "selected_priority",
         "higher_priority_assessment",
         "downstream_combat_effect",
     )
     normalized = {field: str(raw.get(field) or "").strip() for field in fields}
-    missing = [field for field, value in normalized.items() if not value]
-    if missing:
-        return None, "priority_alignment requires " + ", ".join(missing)
     return normalized, ""
 
 
@@ -594,13 +1192,11 @@ def _normalize_retrieval_assessment(
     raw: Any,
 ) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(raw, dict):
-        return None, "retrieval_assessment must be an object"
+        return {}, ""
     query_summary = str(raw.get("query_summary") or "").strip()
     confidence = str(raw.get("confidence") or "").strip().lower()
     if confidence not in _CONFIDENCE:
-        return None, "retrieval_assessment.confidence must be low, medium, or high"
-    if not query_summary:
-        return None, "retrieval_assessment.query_summary is required"
+        confidence = "medium"
     return (
         {
             "query_summary": query_summary,
@@ -824,92 +1420,8 @@ def _adapt_decision_for_optimizer(
     *,
     strategy_name: str,
 ) -> dict[str, Any]:
-    """Map the simplified Decision schema onto the current Optimizer payload."""
-    strengths = decision.get("strengths_to_preserve") or []
-    priority = decision.get("priority_problem") or {}
-    hypothesis = str(decision.get("hypothesis") or "").strip()
-    plan = decision.get("plan") if isinstance(decision.get("plan"), dict) else None
-    next_action = str(decision.get("next_action") or "")
-    payload = dict(decision)
-    payload["wins_to_preserve"] = [
-        {"pattern": item["pattern"], "evidence": item["evidence"], "why": ""}
-        for item in strengths
-        if isinstance(item, dict)
-    ]
-    payload["problems"] = [priority] if priority.get("problem") else []
-    payload["primary_problem"] = priority
-    payload["winning_mechanism"] = (
-        str((decision.get("strategy_contract") or {}).get("observed_winning_signature") or "").strip()
-        or (strengths[0]["pattern"] if strengths and isinstance(strengths[0], dict) else "")
-    )
-    payload["cross_outcome_comparison"] = [
-        text
-        for text in (
-            str((decision.get("outcome_contrast") or {}).get("causal_difference") or "").strip(),
-            str((decision.get("outcome_contrast") or {}).get("preservation_rule") or "").strip(),
-        )
-        if text
-    ]
-    payload["knowledge_questions"] = []
-    plans: list[dict[str, Any]] = []
-    if next_action == "propose_strategy_patch" and plan:
-        plans.append(
-            {
-                "id": "D1",
-                "name": str(plan.get("direction") or ""),
-                "hypothesis": hypothesis,
-                "primary_lever": "other",
-                "addresses_problem_ids": ["P1"],
-                "changes": list(plan.get("coordinated_changes") or []),
-                "predictions": [
-                    str(
-                        (decision.get("mechanism_prediction") or {}).get(
-                            "outcome_prediction"
-                        )
-                        or ""
-                    )
-                ],
-                "disproof_conditions": [
-                    str(
-                        (decision.get("mechanism_prediction") or {}).get(
-                            "disproof_condition"
-                        )
-                        or ""
-                    )
-                ],
-                "capability_mapping": {},
-                "expected_benefit": "",
-                "risk_to_winning_mechanism": "",
-                "preserve": list(plan.get("preserve") or []),
-                "preservation_checks": list(plan.get("preservation_checks") or []),
-                "contact_window_effect": str(
-                    plan.get("contact_window_effect") or "unknown"
-                ),
-            }
-        )
-    payload["candidate_plans"] = plans
-    payload["optimization_targets"] = [
-        {
-            "plan_id": item["id"],
-            "addresses_problem_ids": item["addresses_problem_ids"],
-            "strategy_change": item["name"],
-            "changes": item["changes"],
-        }
-        for item in plans
-    ]
-    payload["repeated_failures"] = [
-        {
-            "problem_id": priority.get("problem_id") or "P1",
-            "cause": priority.get("problem") or "",
-            "consequence": priority.get("consequence") or "",
-            "seen_in": priority.get("evidence") or [],
-            "strategy_fixable": bool(priority.get("strategy_fixable")),
-            "control_class": priority.get("control_class") or "",
-            "confidence": priority.get("confidence") or "medium",
-        }
-    ] if priority.get("problem") else []
-    payload["strategy_name"] = strategy_name
-    return payload
+    """Keep the live Decision payload small; readers handle old checkpoints."""
+    return {**decision, "strategy_name": strategy_name}
 
 
 def _normalize_cross_match_decision(
@@ -960,6 +1472,23 @@ def _normalize_cross_match_decision(
     )
     if plan_error and next_action == "propose_strategy_patch":
         return None, plan_error
+    if next_action == "propose_strategy_patch" and plan and not mechanism_prediction:
+        material_change = str(
+            plan.get("material_behavior_change") or plan.get("direction") or hypothesis
+        ).strip()
+        mechanism_prediction = {
+            "expected_change": material_change,
+            "minimum_material_change": material_change,
+            "outcome_prediction": hypothesis or material_change,
+            "combat_success_measure": (
+                "Improve the decisive engagement, continued pressure, or match outcome."
+            ),
+            "disproof_condition": (
+                "The intended behavior is observed in candidate matches but combat and "
+                "match performance do not improve."
+            ),
+        }
+        mechanism_error = ""
     runtime_attribution_error = _runtime_attribution_error(
         next_action=next_action,
         action_reason=action_reason,
@@ -997,16 +1526,28 @@ def _normalize_cross_match_decision(
         elif not plan:
             return None, "propose_strategy_patch requires plan.direction"
         elif mechanism_error or not mechanism_prediction:
-            return None, mechanism_error or (
-                "propose_strategy_patch requires mechanism_prediction"
-            )
-        elif not plan.get("material_behavior_change"):
-            return None, "propose_strategy_patch requires plan.material_behavior_change"
-        elif not plan.get("coordinated_changes"):
-            return None, "propose_strategy_patch requires plan.coordinated_changes"
+            return None, mechanism_error or "propose_strategy_patch requires a usable change"
         elif require_outcome_contract and not failure_mode_analysis.get("failure_stage"):
             return None, (
                 "propose_strategy_patch requires failure_mode_analysis.failure_stage"
+            )
+        elif require_outcome_contract and any(
+            not failure_mode_analysis.get(field)
+            for field in (
+                "gate_attainment_and_launch",
+                "earliest_strategy_fixable_link",
+                "why_later_levers_do_not_outrank_it",
+                "commitment_and_contact_timing",
+                "own_package_at_contact",
+                "opponent_package_and_growth",
+                "post_contact_continuity",
+                "production_feasibility",
+                "optimization_implication",
+            )
+        ):
+            return None, (
+                "propose_strategy_patch requires a complete causal-order analysis "
+                "from gate attainment through contact and post-contact continuity"
             )
         elif require_outcome_contract and not plan.get("stage_scope_reason"):
             return None, (
@@ -1079,6 +1620,27 @@ def _normalize_cross_match_decision(
             raw.get("considered_explanations")
         ),
         "plan": plan,
+        "selected_package_id": str(raw.get("selected_package_id") or "").strip(),
+        "selected_timing_budget": (
+            dict(raw.get("selected_timing_budget"))
+            if isinstance(raw.get("selected_timing_budget"), dict)
+            else {}
+        ),
+        "selected_package_budget": (
+            dict(raw.get("selected_package_budget"))
+            if isinstance(raw.get("selected_package_budget"), dict)
+            else {}
+        ),
+        "candidate_packages": [
+            dict(item)
+            for item in (raw.get("candidate_packages") or [])
+            if isinstance(item, dict)
+        ],
+        "package_budget_reports": [
+            dict(item)
+            for item in (raw.get("package_budget_reports") or [])
+            if isinstance(item, dict)
+        ],
         "evidence_limits": _clean_strings(raw.get("evidence_limits")),
         "strategy_contract": normalize_strategy_contract(
             raw.get("strategy_contract") or fallback_strategy_contract,
@@ -1086,6 +1648,67 @@ def _normalize_cross_match_decision(
         ),
     }
     return _adapt_decision_for_optimizer(decision, strategy_name=strategy_name), ""
+
+
+def _normalize_package_selection(
+    raw: dict[str, Any],
+    *,
+    proposal: dict[str, Any],
+    package_budget_reports: list[dict[str, Any]],
+    strategy_name: str,
+    fallback_strategy_contract: dict[str, Any] | None,
+    fallback_outcome_contrast: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "package selection returned no JSON object"
+    selected_id = str(raw.get("selected_package_id") or "").strip().upper()
+    selected = next(
+        (
+            item
+            for item in (proposal.get("candidate_packages") or [])
+            if isinstance(item, dict)
+            and str(item.get("id") or "").strip().upper() == selected_id
+        ),
+        None,
+    )
+    if selected is None:
+        return None, "selected_package_id must name one proposed optimization package"
+    selected_report = next(
+        (
+            item
+            for item in package_budget_reports
+            if isinstance(item, dict)
+            and str(item.get("id") or "").strip().upper() == selected_id
+        ),
+        {},
+    )
+    merged = {
+        **raw,
+        "strengths_to_preserve": proposal.get("strengths_to_preserve") or [],
+        "priority_problem": proposal.get("priority_problem") or {},
+        "failure_mode_analysis": proposal.get("failure_mode_analysis") or {},
+        "hypothesis": selected.get("hypothesis"),
+        "plan": selected.get("plan"),
+    }
+    payload, error = _normalize_cross_match_decision(
+        merged,
+        strategy_name=strategy_name,
+        fallback_strategy_contract=fallback_strategy_contract,
+        fallback_outcome_contrast=fallback_outcome_contrast,
+    )
+    if payload is None:
+        return None, error
+    payload["selected_package_id"] = selected_id
+    payload["candidate_packages"] = list(proposal.get("candidate_packages") or [])
+    payload["package_budget_reports"] = list(package_budget_reports)
+    payload["selected_package_budget"] = dict(selected_report)
+    payload["selected_timing_budget"] = dict(selected.get("timing_budget") or {})
+    payload["selected_engagement_assessment"] = dict(
+        selected.get("engagement_assessment") or {}
+    )
+    payload["expected_effect"] = str(selected.get("expected_effect") or "").strip()
+    payload["main_risk"] = str(selected.get("main_risk") or "").strip()
+    return payload, ""
 
 
 def _normalize_batch_analysis(
@@ -1107,6 +1730,7 @@ def _run_analysis_json(
     normalizer,
     events: list[dict[str, Any]],
     label: str,
+    is_reasoning: bool,
 ) -> tuple[dict[str, Any] | None, list[str], int]:
     schema_errors: list[str] = []
     payload: dict[str, Any] | None = None
@@ -1116,7 +1740,7 @@ def _run_analysis_json(
         result = call_json_llm(
             build_prompt(schema_errors),
             model=model,
-            is_reasoning=ANALYSIS_ENABLE_REASONING,
+            is_reasoning=is_reasoning,
         )
         raw = _unwrap_analysis(result)
         if raw is None:
@@ -1168,6 +1792,7 @@ def _run_cross_match_discovery(
         ),
         events=events,
         label="cross_match_discovery",
+        is_reasoning=CROSS_MATCH_DISCOVERY_ENABLE_REASONING,
     )
     if payload is not None:
         print(
@@ -1204,8 +1829,80 @@ def _run_cross_match_decision(
     events: list[dict[str, Any]],
     prefix: str,
 ) -> tuple[dict[str, Any] | None, list[str], int]:
-    print(f"{prefix}AnalysisAgent: cross-match decision", flush=True)
-    payload, errors, calls = _run_analysis_json(
+    print(f"{prefix}AnalysisAgent: generating optimization packages", flush=True)
+    proposal, proposal_errors, proposal_calls = _run_analysis_json(
+        build_prompt=lambda schema_errors: build_optimization_package_prompt(
+            strategy_name=strategy_name,
+            race=race,
+            single_game_analyses=summaries,
+            skill_texts=skill_texts,
+            validation_errors=schema_errors,
+            prior_experiences=prior_experiences or [],
+            discovery=discovery,
+            knowledge_runs=knowledge_runs,
+            retrieval_evidence=retrieval_evidence,
+            capability_manifest=capability_manifest or {},
+        ),
+        model=model,
+        normalizer=_normalize_candidate_package_proposal,
+        events=events,
+        label="optimization_package_generation",
+        is_reasoning=CROSS_MATCH_DECISION_ENABLE_REASONING,
+    )
+    if proposal is None:
+        return None, proposal_errors, proposal_calls
+    if proposal.get("next_action") == "inspect_runtime":
+        payload = {
+            "strategy_name": strategy_name,
+            "strategy_contract": normalize_strategy_contract(
+                discovery.get("strategy_contract"), strategy_name=strategy_name
+            ),
+            "outcome_contrast": _normalize_outcome_contrast(
+                discovery.get("outcome_contrast")
+            ),
+            "strengths_to_preserve": proposal.get("strengths_to_preserve") or [],
+            "priority_problem": proposal.get("priority_problem") or {},
+            "hypothesis": "",
+            "failure_mode_analysis": proposal.get("failure_mode_analysis") or {},
+            "mechanism_prediction": {},
+            "plan": None,
+            "candidate_packages": [],
+            "package_budget_reports": [],
+            "next_action": "inspect_runtime",
+            "action_reason": proposal.get("action_reason") or "Runtime inspection required.",
+            "evidence_limits": proposal.get("evidence_limits") or [],
+        }
+        return payload, proposal_errors, proposal_calls
+
+    print(
+        f"{prefix}DataAgent: preflighting "
+        f"{len(proposal.get('candidate_packages') or [])} optimization package(s)",
+        flush=True,
+    )
+    budget_reports = _evaluate_candidate_package_budgets(
+        proposal,
+        race=race,
+        summaries=summaries,
+    )
+    for report in budget_reports:
+        print(
+            f"{prefix}DataAgent: package {report.get('id')} "
+            f"earliest={report.get('candidate_earliest_feasible_time_seconds')}s "
+            f"delta={report.get('earliest_feasible_timing_delta_seconds')}s "
+            f"opponent_windows={len(report.get('empirical_opponent_windows') or [])} "
+            f"status={report.get('status')}",
+            flush=True,
+        )
+    events.append(
+        {
+            "action": "optimization_package_preflight",
+            "package_count": len(budget_reports),
+            "reports": budget_reports,
+        }
+    )
+
+    print(f"{prefix}AnalysisAgent: selecting optimization package", flush=True)
+    payload, selection_errors, selection_calls = _run_analysis_json(
         build_prompt=lambda schema_errors: build_cross_match_decision_prompt(
             strategy_name=strategy_name,
             race=race,
@@ -1218,20 +1915,21 @@ def _run_cross_match_decision(
             knowledge_runs=knowledge_runs,
             retrieval_evidence=retrieval_evidence,
             capability_manifest=capability_manifest or {},
+            candidate_package_payload=proposal,
+            package_budget_reports=budget_reports,
         ),
         model=model,
-        normalizer=lambda raw: _normalize_cross_match_decision(
+        normalizer=lambda raw: _normalize_package_selection(
             raw,
+            proposal=proposal,
+            package_budget_reports=budget_reports,
             strategy_name=strategy_name,
-            require_retrieval_assessment=False,
-            retrieval_evidence=retrieval_evidence,
-            knowledge_runs=knowledge_runs,
             fallback_strategy_contract=discovery.get("strategy_contract"),
             fallback_outcome_contrast=discovery.get("outcome_contrast"),
-            require_outcome_contract=True,
         ),
         events=events,
-        label="cross_match_decision",
+        label="optimization_package_selection",
+        is_reasoning=CROSS_MATCH_DECISION_ENABLE_REASONING,
     )
     if payload is not None:
         print(
@@ -1242,10 +1940,15 @@ def _run_cross_match_decision(
             {
                 "action": "cross_match_decision",
                 "next_action": payload.get("next_action"),
+                "selected_package_id": payload.get("selected_package_id"),
                 "priority_problem": (payload.get("priority_problem") or {}).get("problem"),
             }
         )
-    return payload, errors, calls
+    return (
+        payload,
+        [*proposal_errors, *selection_errors],
+        proposal_calls + selection_calls,
+    )
 
 
 def _observations_from_runs(
@@ -1281,7 +1984,7 @@ def _observations_from_runs(
             )
         )
         print(
-            f"{prefix}AnalysisAgent: knowledge {index}/{len(runs)} "
+            f"{prefix}DataAgent: knowledge {index}/{len(runs)} "
             f"question={run.get('question_id')} status={'ok' if verified else 'failed'}",
             flush=True,
         )
@@ -1307,7 +2010,7 @@ def _run_knowledge_queries(
     runs: list[dict[str, Any]] = []
     retrieval_evidence: dict[str, Any] = {}
     print(
-        f"{prefix}AnalysisAgent: resolving {len(questions)} deterministic knowledge question(s)",
+        f"{prefix}DataAgent: resolving {len(questions)} deterministic knowledge question(s)",
         flush=True,
     )
     for question in questions:

@@ -283,8 +283,12 @@ if ($TOTAL_MATCHES -le 1) {
     $outFile = Join-Path $singleLogDir "fg_run_0.log"
     $recordDirFile = Join-Path $singleLogDir ".record_dir_0.txt"
     $pythonArgs = New-RunVsAiArgs -RunIndex $START_INDEX -RecordRoot $recordRoot -BatchName $BATCH_NAME -RecordDirFile $recordDirFile
+    # Native python/sc2 INFO on stderr must not abort under $ErrorActionPreference=Stop.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & $PYTHON_EXE @pythonArgs *>> $outFile
     $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
     $outFile = Move-MatchConsoleLog -OutFile $outFile -RecordDirFile $recordDirFile
 
     Write-Host "Log: $outFile"
