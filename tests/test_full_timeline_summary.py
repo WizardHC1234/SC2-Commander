@@ -9,9 +9,12 @@ import pytest
 
 from evol_agent.analysis.match_record import MatchRecordReader
 from evol_agent.core.analysis_agent_loop import (
+    _annotate_package_knowledge,
+    _candidate_package_knowledge_questions,
     _evaluate_candidate_package_budgets,
     _normalize_candidate_package_proposal,
     _normalize_cross_match_decision,
+    _normalize_parent_timing_package_extraction,
     _summarize_matches,
     run_analysis_agent_loop,
 )
@@ -31,6 +34,7 @@ from evol_agent.core.prompts import (
     build_cross_match_discovery_prompt,
     build_fixed_match_summary_prompt,
     build_optimization_package_prompt,
+    build_parent_timing_package_prompt,
 )
 from evol_agent.sc2_data_agent.bridge import KNOWLEDGE_VERIFICATION_SCHEMA
 from evol_agent.core.types import BattleAnalysis, GameDigest
@@ -1119,9 +1123,56 @@ def _package_proposal(**overrides) -> dict:
     return payload
 
 
+def _parent_timing_extraction() -> dict:
+    return {
+        "parent_timing_package": {
+            "economy": {
+                "worker_target_before_commitment": None,
+                "base_target_before_commitment": None,
+                "gas_workers_before_commitment": None,
+                "evidence": {},
+            },
+            "gate_components": [
+                {
+                    "action": "train_marine",
+                    "quantity": 1,
+                    "production_slots": 1,
+                    "strategy_excerpt": "Marine and Tank force",
+                }
+            ],
+            "setup_actions": [],
+        },
+        "requirement_coverage": [
+            {
+                "strategy_excerpt": "* Opening: Build workers, supply, production, gas, and technology toward fixed absolute targets.",
+                "classification": "behavioral_pre_commitment",
+                "mapped_to": [],
+                "reason": "This test strategy does not provide numeric targets.",
+            },
+            {
+                "strategy_excerpt": "* Main Attack Gate: Gather the persistent main force before attacking and send reinforcements toward the same objective.",
+                "classification": "mixed",
+                "mapped_to": ["gate_components.train_marine"],
+                "reason": "The gate is pre-commitment and reinforcement is post-commitment.",
+            },
+        ],
+    }
+
+
 def _package_selection(package_id: str = "P1") -> dict:
     return {
         "selected_package_id": package_id,
+        "data_agent_assessment": {
+            "considered_query_ids": [
+                f"PKG_{package_id}_REQ",
+                f"PKG_{package_id}_MATCHUP",
+                f"PKG_{package_id}_UPGRADE",
+            ],
+            "supporting_findings": ["deterministic requirements were checked"],
+            "contradicted_claims": [],
+            "rejected_package_ids": [],
+            "limitations": [],
+        },
         "mechanism_prediction": copy.deepcopy(
             _propose_decision()["mechanism_prediction"]
         ),
@@ -1244,10 +1295,13 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
     assert "two or three genuinely different" in proposal_prompt
     assert "target_latest_first_commitment_seconds" in proposal_prompt
     assert "tank production cap" in proposal_prompt
+    assert "fixed-composition reserve or defensive squad" in proposal_prompt
     assert "Optimization-Package Selector" in prompt
     assert "Program-calculated package budgets" in prompt
     assert "candidate_earliest_feasible_time_seconds" in prompt
     assert "selected_package_id" in prompt
+    assert "Do not select a package" in prompt
+    assert "custom fixed-composition army detachment" in prompt
 
 
 def test_package_preflight_marks_a_missed_time_budget() -> None:
@@ -1261,7 +1315,54 @@ def test_package_preflight_marks_a_missed_time_budget() -> None:
     reports = _evaluate_candidate_package_budgets(proposal, race="terran")
     first = next(item for item in reports if item["id"] == "P1")
     assert first["target_latest_satisfied"] is False
-    assert first["status"] == "over_or_unresolved_budget"
+    assert first["status"] == "timing_risk"
+
+
+def test_candidate_packages_create_requirements_and_matchup_queries() -> None:
+    proposal, error = _normalize_candidate_package_proposal(_package_proposal())
+    assert error == ""
+    assert proposal is not None
+
+    questions = _candidate_package_knowledge_questions(proposal)
+
+    p1_questions = [
+        item for item in questions if "P1" in (item.get("plan_ids") or [])
+    ]
+    requirement = next(
+        item
+        for item in p1_questions
+        if item["hypothesis_scope"] == "candidate_package_requirements"
+    )
+    assert "train_marine" in requirement["actions"]
+    assert requirement["needs"] == ["requirements"]
+    assert any(
+        item.get("type") == "resource_demand_per_minute"
+        for item in requirement["calculations"]
+    )
+    assert any(
+        item["hypothesis_scope"] == "candidate_package_matchup"
+        for item in p1_questions
+    )
+
+
+def test_failed_package_requirement_query_marks_only_that_package_unresolved() -> None:
+    reports = [
+        {"id": "P1", "status": "feasible"},
+        {"id": "P2", "status": "feasible"},
+    ]
+    failed_run = {
+        "question_id": "PKG_P1_REQ",
+        "plan_ids": ["P1"],
+        "hypothesis_scope": "candidate_package_requirements",
+        "ok": False,
+        "error": "missing prerequisite action",
+    }
+
+    _annotate_package_knowledge(reports, [failed_run])
+
+    assert reports[0]["status"] == "unresolved"
+    assert reports[0]["knowledge_status"] == "unresolved"
+    assert reports[1]["status"] == "feasible"
 
 
 def test_package_preflight_joins_empirical_enemy_windows() -> None:
@@ -1341,6 +1442,269 @@ def test_shared_prompt_instructions_do_not_embed_a_specific_strategy() -> None:
     assert "marine/tank push" not in source
 
 
+def test_parent_timing_extraction_requires_current_strategy_evidence() -> None:
+    payload = _parent_timing_extraction()
+    normalized, error = _normalize_parent_timing_package_extraction(
+        payload,
+        strategy_text=VALID_STRATEGY,
+    )
+    assert error == ""
+    assert normalized is not None
+    assert normalized["gate_components"][0]["action"] == "train_marine"
+
+    bad = copy.deepcopy(payload)
+    bad["parent_timing_package"]["gate_components"][0][
+        "strategy_excerpt"
+    ] = "20 Marines from four Barracks"
+    normalized, error = _normalize_parent_timing_package_extraction(
+        bad,
+        strategy_text=VALID_STRATEGY,
+    )
+    assert normalized is None
+    assert "gate component" in error
+
+
+def test_parent_timing_extraction_rejects_omitted_strategy_bullets() -> None:
+    payload = _parent_timing_extraction()
+    payload["requirement_coverage"] = payload["requirement_coverage"][:1]
+
+    normalized, error = _normalize_parent_timing_package_extraction(
+        payload,
+        strategy_text=VALID_STRATEGY,
+    )
+
+    assert normalized is None
+    assert "omitted strategy bullets" in error
+
+
+def test_parent_timing_extraction_coerces_zero_and_dict_slots() -> None:
+    payload = _parent_timing_extraction()
+    payload["parent_timing_package"]["gate_components"] = [
+        {
+            "action": "train_marine",
+            "quantity": 45,
+            "production_slots": {
+                "build_barracks": 3,
+                "build_barracks_reactor": 2,
+                "build_barracks_techlab": 1,
+            },
+            "strategy_excerpt": "Marine and Tank force",
+        }
+    ]
+    payload["parent_timing_package"]["setup_actions"] = [
+        {
+            "action": "build_gas",
+            "quantity": 4,
+            "parallel_slots": 0,
+            "strategy_excerpt": "Opening: Build workers, supply, production, gas, and technology toward fixed absolute targets.",
+        }
+    ]
+    payload["requirement_coverage"] = [
+        {
+            "strategy_excerpt": "* Opening: Build workers, supply, production, gas, and technology toward fixed absolute targets.",
+            "classification": "mapped_pre_commitment",
+            "mapped_to": ["setup_actions.build_gas"],
+            "reason": "Refinery count is pre-commitment.",
+        },
+        {
+            "strategy_excerpt": "* Main Attack Gate: Gather the persistent main force before attacking and send reinforcements toward the same objective.",
+            "classification": "mixed",
+            "mapped_to": ["gate_components.train_marine"],
+            "reason": "The gate is pre-commitment and reinforcement is post-commitment.",
+        },
+    ]
+
+    normalized, error = _normalize_parent_timing_package_extraction(
+        payload,
+        strategy_text=VALID_STRATEGY,
+    )
+
+    assert error == ""
+    assert normalized is not None
+    assert normalized["gate_components"][0]["production_slots"] == 6
+    assert normalized["setup_actions"][0] == {
+        "action": "build_gas",
+        "quantity": 4,
+        "parallel_slots": 1,
+    }
+
+
+def test_parent_timing_extraction_downgrades_empty_mixed_coverage() -> None:
+    payload = _parent_timing_extraction()
+    payload["requirement_coverage"] = [
+        {
+            "strategy_excerpt": "* Opening: Build workers, supply, production, gas, and technology toward fixed absolute targets.",
+            "classification": "mixed",
+            "mapped_to": [],
+            "reason": "",
+        },
+        {
+            "strategy_excerpt": "* Main Attack Gate: Gather the persistent main force before attacking and send reinforcements toward the same objective.",
+            "classification": "mixed",
+            "mapped_to": ["gate_components.train_marine"],
+            "reason": "The gate is pre-commitment and reinforcement is post-commitment.",
+        },
+    ]
+
+    normalized, error = _normalize_parent_timing_package_extraction(
+        payload,
+        strategy_text=VALID_STRATEGY,
+    )
+
+    assert error == ""
+    assert normalized is not None
+
+
+def test_parent_timing_extraction_matches_excerpts_without_bullet_marker() -> None:
+    payload = _parent_timing_extraction()
+    payload["requirement_coverage"] = [
+        {
+            "strategy_excerpt": "Opening: Build workers, supply, production, gas, and technology toward fixed absolute targets.",
+            "classification": "behavioral_pre_commitment",
+            "mapped_to": [],
+            "reason": "This test strategy does not provide numeric targets.",
+        },
+        {
+            "strategy_excerpt": "Main Attack Gate: Gather the persistent main force before attacking and send reinforcements toward the same objective.",
+            "classification": "mixed",
+            "mapped_to": ["gate_components.train_marine"],
+            "reason": "The gate is pre-commitment and reinforcement is post-commitment.",
+        },
+    ]
+
+    normalized, error = _normalize_parent_timing_package_extraction(
+        payload,
+        strategy_text=VALID_STRATEGY,
+    )
+
+    assert error == ""
+    assert normalized is not None
+
+
+def test_parent_timing_extraction_drops_absent_gas_mapping_for_mineral_only() -> None:
+    payload = _parent_timing_extraction()
+    payload["requirement_coverage"] = [
+        {
+            "strategy_excerpt": "* Opening: Build workers, supply, production, gas, and technology toward fixed absolute targets.",
+            "classification": "mapped_pre_commitment",
+            "mapped_to": ["setup_actions.build_gas"],
+            "reason": "Mentions gas wording.",
+        },
+        {
+            "strategy_excerpt": "* Main Attack Gate: Gather the persistent main force before attacking and send reinforcements toward the same objective.",
+            "classification": "mixed",
+            "mapped_to": ["gate_components.train_marine"],
+            "reason": "The gate is pre-commitment and reinforcement is post-commitment.",
+        },
+    ]
+
+    normalized, error = _normalize_parent_timing_package_extraction(
+        payload,
+        strategy_text=VALID_STRATEGY,
+    )
+
+    assert error == ""
+    assert normalized is not None
+    assert normalized["setup_actions"] == []
+
+
+def test_parent_timing_extraction_skips_zero_qty_and_hallucinated_setup() -> None:
+    payload = _parent_timing_extraction()
+    payload["parent_timing_package"]["setup_actions"] = [
+        {
+            "action": "build_gas",
+            "quantity": 0,
+            "parallel_slots": 0,
+            "strategy_excerpt": "build 0 Refineries",
+        },
+        {
+            "action": "build_supply_depot",
+            "quantity": 0,
+            "parallel_slots": 0,
+            "strategy_excerpt": "No explicit supply depot quantity is declared.",
+        },
+        {
+            "action": "build_factory",
+            "quantity": 2,
+            "parallel_slots": 1,
+            "strategy_excerpt": "invented factory line absent from strategy",
+        },
+    ]
+
+    normalized, error = _normalize_parent_timing_package_extraction(
+        payload,
+        strategy_text=VALID_STRATEGY,
+    )
+
+    assert error == ""
+    assert normalized is not None
+    assert normalized["setup_actions"] == []
+
+
+def test_parent_timing_package_cache_is_bound_to_strategy_hash(tmp_path: Path) -> None:
+    checkpoint = EvolCheckpoint(tmp_path, {"stage": "created"})
+    package = {
+        "economy": {
+            "worker_target_before_commitment": 44,
+            "base_target_before_commitment": 2,
+            "gas_workers_before_commitment": None,
+        },
+        "gate_components": [
+            {"action": "train_siege_tank", "quantity": 10, "production_slots": 2}
+        ],
+        "setup_actions": [],
+    }
+    checkpoint.save_parent_timing_package(strategy_hash="strategy-a", package=package)
+
+    assert checkpoint.load_parent_timing_package(strategy_hash="strategy-a") == package
+    assert checkpoint.load_parent_timing_package(strategy_hash="strategy-b") is None
+
+
+def test_candidate_planner_uses_canonical_parent_package() -> None:
+    canonical = {
+        "economy": {
+            "worker_target_before_commitment": 44,
+            "base_target_before_commitment": 2,
+            "gas_workers_before_commitment": None,
+        },
+        "gate_components": [
+            {"action": "train_siege_tank", "quantity": 10, "production_slots": 2}
+        ],
+        "setup_actions": [
+            {"action": "build_factory", "quantity": 2, "parallel_slots": 2}
+        ],
+    }
+    proposal = _package_proposal()
+    proposal["parent_timing_package"] = {
+        "economy": {
+            "worker_target_before_commitment": 24,
+            "base_target_before_commitment": 1,
+            "gas_workers_before_commitment": 0,
+        },
+        "gate_components": [
+            {"action": "train_marine", "quantity": 20, "production_slots": 4}
+        ],
+        "setup_actions": [],
+    }
+    normalized, error = _normalize_candidate_package_proposal(
+        proposal,
+        parent_timing_package=canonical,
+    )
+    assert error == ""
+    assert normalized is not None
+    assert normalized["parent_timing_package"] == canonical
+
+    prompt = build_parent_timing_package_prompt(
+        strategy_name="tank",
+        race="terran",
+        strategy_text=VALID_STRATEGY,
+        validation_errors=[],
+        capability_manifest={},
+    )
+    assert '"worker_target_before_commitment":24' not in prompt
+    assert '"quantity":20' not in prompt
+
+
 def test_cross_match_generates_preflights_and_selects_packages(monkeypatch) -> None:
     prompts: list[str] = []
 
@@ -1348,6 +1712,8 @@ def test_cross_match_generates_preflights_and_selects_packages(monkeypatch) -> N
         prompts.append(prompt)
         if "Cross-Match Discovery Agent" in prompt:
             return _empty_discovery()
+        if "Parent Strategy Package Extractor" in prompt:
+            return _parent_timing_extraction()
         if "Optimization-Package Planner" in prompt:
             return _package_proposal()
         assert "Optimization-Package Selector" in prompt
@@ -1368,8 +1734,8 @@ def test_cross_match_generates_preflights_and_selects_packages(monkeypatch) -> N
     )
     complete = next(item for item in result.events if item.get("action") == "analysis_complete")
     assert result.completed is True
-    assert len(prompts) == 3
-    assert complete["llm_cross_match_calls"] == 3
+    assert len(prompts) == 4
+    assert complete["llm_cross_match_calls"] == 4
     assert result.battle_analysis.raw["plan"]["direction"].startswith("Build a second Factory")
     assert result.battle_analysis.raw["selected_package_id"] == "P1"
     assert len(result.battle_analysis.raw["package_budget_reports"]) == 2
@@ -1389,7 +1755,7 @@ def test_cross_match_generates_preflights_and_selects_packages(monkeypatch) -> N
     assert any(item.get("action") == "cross_match_decision" for item in result.events)
 
 
-def test_cross_match_queries_knowledge_once_then_decides(monkeypatch) -> None:
+def test_cross_match_queries_discovery_and_candidate_packages_then_decides(monkeypatch) -> None:
     prompts: list[str] = []
     knowledge_calls: list[list] = []
 
@@ -1405,7 +1771,9 @@ def test_cross_match_queries_knowledge_once_then_decides(monkeypatch) -> None:
                 }
             ]
             return discovery
-        assert "Earlier completion was infeasible" in prompt
+        if "Parent Strategy Package Extractor" in prompt:
+            return _parent_timing_extraction()
+        assert KNOWLEDGE_VERIFICATION_SCHEMA in prompt
         if "Optimization-Package Planner" in prompt:
             return _package_proposal()
         assert "Optimization-Package Selector" in prompt
@@ -1413,7 +1781,17 @@ def test_cross_match_queries_knowledge_once_then_decides(monkeypatch) -> None:
 
     def fake_knowledge(questions, **kwargs):
         knowledge_calls.append(questions)
-        return [_verified_knowledge_run()]
+        runs = []
+        for question in questions:
+            run = copy.deepcopy(_verified_knowledge_run())
+            run["question_id"] = question.get("id")
+            run["question"] = question.get("question")
+            run["query_reason"] = question.get("query_reason")
+            run["evidence_refs"] = question.get("evidence_refs") or []
+            run["hypothesis_scope"] = question.get("hypothesis_scope")
+            run["plan_ids"] = question.get("plan_ids") or []
+            runs.append(run)
+        return runs
 
     monkeypatch.setattr("evol_agent.core.analysis_agent_loop.call_json_llm", fake_llm)
     monkeypatch.setattr(
@@ -1433,9 +1811,13 @@ def test_cross_match_queries_knowledge_once_then_decides(monkeypatch) -> None:
     )
     complete = next(item for item in result.events if item.get("action") == "analysis_complete")
     assert result.completed is True
-    assert len(prompts) == 3
-    assert len(knowledge_calls) == 1
-    assert complete["llm_cross_match_calls"] == 3
+    assert len(prompts) == 4
+    assert len(knowledge_calls) == 2
+    assert any(
+        question.get("hypothesis_scope") == "candidate_package_requirements"
+        for question in knowledge_calls[1]
+    )
+    assert complete["llm_cross_match_calls"] == 4
     assert result.battle_analysis.raw["next_action"] == "propose_strategy_patch"
     assert result.knowledge_trace["discovery"]["knowledge_questions"][0]["id"] == "Q1"
 
@@ -1452,7 +1834,9 @@ def test_package_planner_can_attribute_problem_to_runtime(monkeypatch) -> None:
                 }
             ]
             return discovery
-        assert "Earlier completion was infeasible" in prompt
+        if "Parent Strategy Package Extractor" in prompt:
+            return _parent_timing_extraction()
+        assert KNOWLEDGE_VERIFICATION_SCHEMA in prompt
         return {
             "strengths_to_preserve": [{"pattern": "two-base opener", "evidence": ["Game 1 @ 90s"]}],
             "priority_problem": {
@@ -1492,6 +1876,8 @@ def test_inspect_runtime_does_not_need_a_plan(monkeypatch) -> None:
     def fake_llm(prompt: str, **kwargs):
         if "Cross-Match Discovery Agent" in prompt:
             return _empty_discovery()
+        if "Parent Strategy Package Extractor" in prompt:
+            return _parent_timing_extraction()
         return {
             "next_action": "inspect_runtime",
             "action_reason": "Commander already issued the gather command but movement failed",
@@ -1540,15 +1926,27 @@ def test_resume_skips_discovery_and_reuses_knowledge_cache(tmp_path: Path, monke
     def fake_llm(prompt: str, **kwargs):
         prompts.append(prompt)
         assert "Cross-Match Discovery Agent" not in prompt
-        assert "Earlier completion was infeasible" in prompt
+        if "Parent Strategy Package Extractor" in prompt:
+            return _parent_timing_extraction()
+        assert KNOWLEDGE_VERIFICATION_SCHEMA in prompt
         if "Optimization-Package Planner" in prompt:
             return _package_proposal()
         assert "Optimization-Package Selector" in prompt
         return _package_selection()
 
-    def boom_knowledge(*args, **kwargs):
-        knowledge_llm_calls.append(1)
-        raise AssertionError("cached knowledge should be reused")
+    def package_knowledge(question, **kwargs):
+        question_id = str(question.get("id") or "")
+        assert question_id != "Q1", "cached discovery knowledge should be reused"
+        knowledge_llm_calls.append(question_id)
+        run = copy.deepcopy(_verified_knowledge_run())
+        run["question_id"] = question_id
+        run["question"] = question.get("question")
+        run["query_reason"] = question.get("query_reason")
+        run["evidence_refs"] = question.get("evidence_refs") or []
+        run["hypothesis_scope"] = question.get("hypothesis_scope")
+        run["plan_ids"] = question.get("plan_ids") or []
+        run["query"] = "package-specific deterministic query"
+        return run
 
     monkeypatch.setattr("evol_agent.core.analysis_agent_loop.call_json_llm", fake_llm)
     monkeypatch.setattr(
@@ -1557,7 +1955,7 @@ def test_resume_skips_discovery_and_reuses_knowledge_cache(tmp_path: Path, monke
     )
     monkeypatch.setattr(
         "evol_agent.core.analysis_agent_loop.run_knowledge_query",
-        boom_knowledge,
+        package_knowledge,
     )
     result = run_analysis_agent_loop(
         strategy_name="tank",
@@ -1568,8 +1966,8 @@ def test_resume_skips_discovery_and_reuses_knowledge_cache(tmp_path: Path, monke
         checkpoint=checkpoint,
     )
     assert result.completed is True
-    assert len(prompts) == 2
-    assert knowledge_llm_calls == []
+    assert len(prompts) == 3
+    assert knowledge_llm_calls
     assert result.battle_analysis.raw["next_action"] == "propose_strategy_patch"
 
 
@@ -1595,6 +1993,8 @@ def test_rejected_experiments_are_visible_in_round2(monkeypatch) -> None:
         prompts.append(prompt)
         if "Cross-Match Discovery Agent" in prompt:
             return _empty_discovery()
+        if "Parent Strategy Package Extractor" in prompt:
+            return _parent_timing_extraction()
         if "Optimization-Package Planner" in prompt:
             return _package_proposal()
         return _package_selection()

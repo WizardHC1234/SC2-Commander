@@ -1193,6 +1193,12 @@ def validate_strategy_patch_semantics(
             if isinstance(extraction, dict)
             else None
         )
+        canonical_parent = decision.get("parent_timing_package")
+        if isinstance(timing_model, dict) and isinstance(canonical_parent, dict):
+            timing_model = {
+                **timing_model,
+                "parent": dict(canonical_parent),
+            }
         contact_timing_report = _build_contact_timing_report(
             timing_model,
             knowledge_runs,

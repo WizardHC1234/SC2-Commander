@@ -52,6 +52,12 @@ def _compact_optimization_brief(decision: dict[str, Any]) -> dict[str, Any]:
             "program_preflight": dict(
                 decision.get("selected_package_budget") or {}
             ),
+            "engagement_assessment": dict(
+                decision.get("selected_engagement_assessment") or {}
+            ),
+            "data_agent_assessment": dict(
+                decision.get("data_agent_assessment") or {}
+            ),
         },
         "evidence_limits": list(decision.get("evidence_limits") or []),
     }
@@ -111,6 +117,7 @@ Important implementation guidance:
 - The selected package's earliest-feasible preflight and latest useful commitment bound are a budget for the generated strategy. Do not silently add first-attack prerequisites that push the actual generated strategy beyond that budget.
 - If the evidence identifies a runtime execution failure rather than a strategy defect, do not disguise it as another strategy threshold change.
 - Use only supported runtime controls. The strategy may specify high-level macro targets and army objectives, but not coordinates, unit tags, manual abilities, formation, transport loading, or unit-level micro.
+- Do not invent a fixed-composition defensive squad or any other custom detachment. The executor, not strategy.md, owns membership of the persistent main group and reinforcement group; strategy.md cannot reserve exact units, automatically replenish a subgroup, or script its later split or merge. Express defense as high-level posture for an observed runtime group or revise executable economy, production, composition, technology, and attack-readiness targets.
 - Return concise strategy text. Prefer one observable instruction over repeated warnings and narrow exceptions.
 
 {revision_context}

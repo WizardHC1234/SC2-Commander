@@ -80,6 +80,9 @@ MATCH_SUBAGENT_ENABLE_REASONING = False
 CROSS_MATCH_DISCOVERY_ENABLE_REASONING = True
 CROSS_MATCH_DECISION_ENABLE_REASONING = True
 CANDIDATE_GENERATION_ENABLE_REASONING = True
+# Determining which requirements belong to the first commitment is a semantic
+# chronology task rather than a literal field copy, so keep reasoning enabled.
+PARENT_TIMING_PACKAGE_EXTRACTION_ENABLE_REASONING = True
 CONTACT_TIMING_EXTRACTION_ENABLE_REASONING = False
 STRATEGY_SEMANTIC_VALIDATION_ENABLE_REASONING = False
 EXPERIMENT_AUDIT_ENABLE_REASONING = True
@@ -112,7 +115,7 @@ MAX_CONCURRENT_MATCH_SUBAGENTS = 3
 # Discovery may request a small number of deterministic SC2 facts. When it makes
 # a production, timing, upgrade, or matchup claim but omits the query, the
 # analysis loop adds one grounded fallback query.
-MAX_KNOWLEDGE_QUERIES = 3
+MAX_KNOWLEDGE_QUERIES = 5
 
 # Candidate retries feed every structural, deterministic-knowledge, basic, and
 # semantic validation error back to the optimizer. Keep this bounded: retries

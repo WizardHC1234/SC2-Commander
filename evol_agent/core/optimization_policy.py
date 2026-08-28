@@ -27,6 +27,7 @@ Use these rules as strategic guidance, not as a form-filling checklist:
    when the new candidate explains the missing dependency or implementation change.
 9. Write concise, observable, reusable rules. Do not fit exact match timestamps,
    opponent builds, map zone ids, hidden state, or unit-level micro.
+10. Keep army control inside the runtime boundary. Do not create persistent custom detachments, reserve exact unit counts or types for a separate mission, or require scripted split, replenishment, transfer, or merge operations. Express defense and reinforcement through high-level intent for observed runtime groups.
 """.strip()
 
 

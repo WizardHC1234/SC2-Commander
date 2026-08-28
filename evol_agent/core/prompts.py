@@ -34,6 +34,7 @@ RUNTIME_CONTRACT = """Current runtime contract:
 - Macro targets execute concurrently and replace the previous target list. Every still-needed unmet target must be emitted again; ordering expresses resource priority.
 - The runtime expands structure prerequisites and automatically adds build_gas when selected actions require gas. Action descriptions are authoritative for costs, supply, duration, producers, research locations, and prerequisites.
 - The persistent main group is the operational force. group_1 contains newly produced units far from it and normally reinforces the main force or its current objective.
+- Army-group membership is owned by the executor. The language strategy cannot create a custom detachment, reserve an exact number or type of units for a separate mission, keep such a detachment automatically replenished, or explicitly split, merge, and dissolve groups. It may give high-level hold, defend, regroup, or attack intent to groups that actually appear in the current observation; reinforcements join the persistent main group automatically when they reach it.
 - Army movement is group-level and uses one semantic destination with an available movement mode. The Commander resolves semantic locations to observed zone IDs.
 - At most one SCV scout is active. Scanner Sweep costs Orbital energy. Every decision has one observable wake condition plus a runtime fallback deadline.
 - Observable enemy information includes currently visible contents and last_seen_enemy_contents with seconds_since_last_seen. Scan readiness is observable. Each Commander cycle is one decision; later wakes re-evaluate the same strategy after a scan or scout request.
@@ -60,6 +61,7 @@ Strategic search guidance (not an exhaustive enum; one generation tests one prim
 - Unit composition and support-unit balance: ratios and stage targets while keeping the defining army concept.
 - Attack readiness, commitment threshold, and timing: observable living-force, upgrade, regroup, and intel gates rather than a clock as the only commit rule.
 - Reinforcement and post-engagement behavior: preserve pressure or rebuild coherently according to the strategy style. The Main Attack Gate applies only to the first attack and must not be copied into Recovery and Cleanup.
+- Defensive posture may describe where the currently observed operational force should gather or what threat should cause a new decision. It must not require a fixed-composition reserve squad, automatic reserve replenishment, or a later scripted merge, because those group-membership operations are not strategy controls.
 """
 
 
@@ -89,6 +91,8 @@ current production and commitment window are already viable and repeated evidenc
 shows that a small defense preserves them. When a gate was satisfied but the force
 did not commit, classify the problem as runtime execution rather than raising,
 lowering, or rewriting the strategy gate.
+
+When pre-commitment defense is strategy-fixable, express it through executable economy, production, composition, technology, attack-readiness, or high-level posture changes for the observed operational group. Do not propose a fixed-composition reserve squad or any plan that requires the strategy to split, preserve, replenish, transfer, or later merge custom army membership.
 
 Keep the stages distinct during diagnosis. Main Attack Gate controls only the first
 planned commitment. Once that commitment occurs, evaluate Engagement and
@@ -612,6 +616,9 @@ Create a bounded, evidence-linked query plan before diagnosis:
 - experience_query must describe the observed failure signature, not a strategy filename or a preferred replacement. It will retrieve both successful and failed prior interventions.
 - game_knowledge_queries may request only static SC2 facts needed to distinguish the supported interpretations. Each question must state why it is needed, the match references that motivated it, and the bounded hypothesis scope.
 - When production throughput or continuous resource demand matters, add deterministic calculations instead of estimating arithmetic in prose. Use parallel_production with action, quantity, and production_slots, or resource_demand_per_minute with action and production_slots.
+- Match every requested fact to the query schema: costs, build or research times, producers, and prerequisites require `requirements`; unit or upgrade behavior requires `effects`; matchup claims require `counters`; production arithmetic requires a deterministic calculation.
+- Do not ask the static database how many units will win a dynamic engagement, whether a build is optimal, or what strategy should be chosen. Use recorded same-time army evidence for those judgments.
+- Query reasons must describe an uncertainty, not assert an unverified capability. For example, do not claim that a support unit provides anti-air before the database verifies that effect.
 
 Use concrete evidence such as:
 "Game 3 @ 420s: ..."
@@ -736,6 +743,7 @@ def build_optimization_package_prompt(
     discovery: dict[str, Any] | None,
     knowledge_runs: list[dict[str, Any]] | None,
     retrieval_evidence: dict[str, Any] | None,
+    parent_timing_package: dict[str, Any] | None = None,
     capability_manifest: dict[str, Any] | None = None,
 ) -> str:
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
@@ -743,7 +751,12 @@ def build_optimization_package_prompt(
 
 {OPTIMIZATION_POLICY}
 
-The deterministic build-order simulator will evaluate every package before selection. Therefore each package must describe the complete first-commitment production package, including unchanged Champion components that remain required. Use exact runtime action identifiers from the supplied strategy and action metadata (`train_*`, `build_*`, and `research_*`). A time budget is not an LLM estimate: provide the evidence-derived latest useful first-commitment bound and allowed delay, while the program calculates earliest_feasible_time_seconds, resources, prerequisites, supply, and production queues. For each package, compare the intended own force with the enemy compositions recorded near the same time, including unit counters, upgrades, defender advantage, reinforcements, and whether continued production can sustain the attack. Do not assume that a larger but later own army is stronger after the opponent's growth.
+The deterministic build-order simulator will evaluate every package before selection. The parent package below was extracted separately from the current strategy and is read-only. Do not reproduce, reinterpret, or replace it. Each candidate package must describe the complete first-commitment production package, including unchanged Champion components that remain required. Use exact runtime action identifiers from the supplied strategy and action metadata (`train_*`, `build_*`, and `research_*`). A time budget is not an LLM estimate: provide the evidence-derived latest useful first-commitment bound and allowed delay, while the program calculates earliest_feasible_time_seconds, resources, prerequisites, supply, and production queues. For each package, compare the intended own force with the enemy compositions recorded near the same time, including unit counters, upgrades, defender advantage, reinforcements, and whether continued production can sustain the attack. Do not assume that a larger but later own army is stronger after the opponent's growth.
+
+Every proposed package must be implementable through the current strategy controls. The executor owns membership of the persistent main group and reinforcement group. Reject before returning any hypothesis that requires a fixed-composition reserve or defensive squad, exact unit reservation for a separate mission, automatic subgroup replenishment, or scripted split, transfer, merge, or dissolution. A defensive hypothesis must instead use executable macro targets, composition, technology, attack readiness, or high-level posture for groups that actually appear in observations.
+
+Read-only parent first-commitment package:
+{json.dumps(parent_timing_package or {}, ensure_ascii=False, separators=(',', ':'))}
 
 Previous schema errors:
 {errors}
@@ -768,7 +781,6 @@ Return JSON only. Use next_action=evaluate_candidate_packages whenever at least 
   "strengths_to_preserve":[{{"pattern":"successful behavior","evidence":"match reference"}}],
   "priority_problem":{{"problem":"earliest important shortfall","evidence":["at least one match reference"],"control_class":"strategy_fixable|commander_execution|runtime_execution|observation_limited","confidence":"low|medium|high","consequence":"combat or match consequence"}},
   "failure_mode_analysis":{{"failure_stage":"before_core_mechanism|during_commitment_or_engagement|after_successful_engagement|mixed","gate_attainment_and_launch":"whether the intended attack became available and launched","commitment_and_contact_timing":"actual timing contrast","own_package_at_contact":"own army and upgrades","opponent_package_and_growth":"enemy army and growth","post_contact_continuity":"reinforcement and continued attack","production_feasibility":"income, queues, upgrades, and bottlenecks","optimization_implication":"concise implication","covered_failures":["match evidence"],"counterexamples":["conflicting or winning evidence"]}},
-  "parent_timing_package":{{"economy":{{"worker_target_before_commitment":24,"base_target_before_commitment":1,"gas_workers_before_commitment":0}},"gate_components":[{{"action":"exact_runtime_train_action","quantity":20,"production_slots":4}}],"setup_actions":[{{"action":"exact_runtime_build_action","quantity":4,"parallel_slots":2}}]}},
   "candidate_packages":[
     {{
       "id":"P1",
@@ -778,7 +790,7 @@ Return JSON only. Use next_action=evaluate_candidate_packages whenever at least 
         "target_latest_first_commitment_seconds":300,
         "maximum_added_feasibility_seconds":20,
         "budget_basis":["Game N @ Ts: why this window matters"],
-        "package":{{"economy":{{"worker_target_before_commitment":24,"base_target_before_commitment":1,"gas_workers_before_commitment":0}},"gate_components":[{{"action":"exact_runtime_train_action","quantity":20,"production_slots":4}}],"setup_actions":[{{"action":"exact_runtime_build_action","quantity":4,"parallel_slots":2}}]}}
+        "package":{{"economy":{{"worker_target_before_commitment":null,"base_target_before_commitment":null,"gas_workers_before_commitment":null}},"gate_components":[],"setup_actions":[]}}
       }},
       "engagement_assessment":{{"intended_contact_window":"relative window supported by records","own_package_role":"how the own package fights","observed_opponent_package":"enemy composition and growth near that window","counter_and_upgrade_relationship":"relevant counter, support, and upgrade relationship from evidence and DataAgent knowledge","reinforcement_and_continuity":"whether production, retained force, and reinforcements can sustain pressure after contact"}},
       "expected_effect":"expected contact, combat, continuation, or victory change",
@@ -789,6 +801,61 @@ Return JSON only. Use next_action=evaluate_candidate_packages whenever at least 
   "action_reason":"short evidence-based reason",
   "evidence_limits":["uncertainty or runtime issue"]
 }}
+"""
+
+
+def build_parent_timing_package_prompt(
+    *,
+    strategy_name: str,
+    race: str,
+    strategy_text: str,
+    validation_errors: list[str],
+    capability_manifest: dict[str, Any] | None = None,
+) -> str:
+    """Extract the Champion's first-commitment package without optimization context."""
+    errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
+    return f"""You are EvolAgent's Parent Strategy Package Extractor. Perform only a faithful extraction from the supplied current strategy.md. Do not analyze match results, propose improvements, lower or raise targets, or use the strategy filename as a profile. Do not calculate time, costs, income, or resource feasibility.
+
+Extract the complete package that the current strategy establishes for its first meaningful offensive commitment. Read the strategy chronologically across all bullets instead of looking only at the Main Attack Gate. An economy, expansion, production, or technology requirement belongs to the package when the strategy establishes or maintains it before the main attack, even when that requirement is written in a separate section and does not literally say "before the attack." For example, a base count held until the attack, a worker target pursued during the opening, and explicitly declared producer, add-on, refinery, or required-upgrade counts used to create the gate force are pre-commitment requirements. Do not include a third base explicitly started after the attack, ultimate army goals, reinforcement targets, recovery thresholds, or cleanup behavior.
+
+Use exact runtime action identifiers from the action metadata. Gate components are the units or upgrades whose completion directly opens the first commitment. Setup actions are the strategy's explicit absolute quantities of production structures, add-ons, gas structures, expansions, supply infrastructure, and required upgrades established for that commitment. Include declared producer capacity even though the simulator could infer a minimal prerequisite automatically. Production slots must reflect the strategy's declared producer and add-on capacity. Economy fields contain explicit pre-commitment worker, base, and gas-worker targets; use null only when the strategy truly gives no such target. A positive refinery count belongs in setup_actions as build_gas; do not invent a gas-worker count from it.
+
+Zero means absence. If the strategy says mineral-only, build 0 Refineries, no gas, or otherwise forbids Refineries before the attack, do not emit setup_actions.build_gas and set economy.gas_workers_before_commitment to null. In requirement_coverage, never map such a bullet to setup_actions.build_gas or economy.gas_workers_before_commitment. Map only fields that actually appear in parent_timing_package (for example worker_target_before_commitment), or classify the bullet as behavioral_pre_commitment when it only states that gas is unused.
+
+Every non-null economy field and every gate or setup item must include a verbatim strategy_excerpt supporting the extraction. The excerpt must occur in the supplied strategy.md. Do not copy illustrative values because this prompt contains no example strategy.
+
+production_slots and parallel_slots must be positive integers (>= 1) whenever quantity >= 1. Never emit 0. Never emit a dict of building counts as production_slots; put declared producer or add-on counts in setup_actions instead, and set production_slots to the integer queue capacity used for that gate unit.
+
+Review every Markdown bullet in strategy.md. Return one requirement_coverage entry for every bullet, copying the complete bullet verbatim. Classify it as mapped_pre_commitment when its quantitative timing requirements are represented in the package, behavioral_pre_commitment when it affects behavior but has no quantity represented by this simulator, post_commitment when it applies only after the first commitment, or mixed when it contains both pre- and post-commitment content. Scouting, Scanner Sweep behavior, and pre-attack army posture without numeric simulator fields are behavioral_pre_commitment (or post_commitment for after-attack parts)—never mixed with an empty mapped_to. mapped_to must name only package fields or actions that were actually extracted for that bullet, using economy.<field>, gate_components.<action>, or setup_actions.<action>. Do not invent mapped_to names that are absent from parent_timing_package. A mapped_pre_commitment or mixed entry must have at least one valid mapped_to item. Explicit positive numeric economy, base, refinery, producer, add-on, upgrade, or gate-unit requirements that apply before the attack must not be classified as merely behavioral.
+
+Strategy name: {strategy_name}
+Race: {race}
+
+Previous extraction errors:
+{errors}
+
+Current strategy.md:
+{strategy_text}
+
+Runtime action metadata:
+{json.dumps(capability_manifest or {}, ensure_ascii=False, separators=(',', ':'))}
+
+Return JSON only:
+{{
+  "parent_timing_package":{{
+    "economy":{{
+      "worker_target_before_commitment":null,
+      "base_target_before_commitment":null,
+      "gas_workers_before_commitment":null,
+      "evidence":{{}}
+    }},
+    "gate_components":[],
+    "setup_actions":[]
+  }},
+  "requirement_coverage":[{{"strategy_excerpt":"complete Markdown bullet copied verbatim","classification":"mapped_pre_commitment|behavioral_pre_commitment|post_commitment|mixed","mapped_to":["economy.worker_target_before_commitment","setup_actions.build_barracks","gate_components.train_unit"],"reason":"brief chronological classification reason"}}]
+}}
+
+Each gate_components item must contain action, quantity, production_slots, and strategy_excerpt. Each setup_actions item must contain action, quantity, parallel_slots, and strategy_excerpt. For every non-null economy field, economy.evidence must contain the same field name mapped to its verbatim strategy excerpt.
 """
 
 
@@ -804,7 +871,7 @@ def _compact_decision_prompt(
     package_budget_reports: list[dict[str, Any]] | None,
 ) -> str:
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
-    return f"""You are EvolAgent's Optimization-Package Selector. Select exactly one proposed package after comparing its causal support, preservation of winning behavior, deterministic production feasibility, resource cost, first-commitment time budget, and matchup-adjusted strength against the empirical opponent snapshots in each budget report. Do not combine packages or invent a new package. A slower package is selectable only when match evidence supports the later contact window and the expected combat advantage outweighs opponent growth. Prefer a package that reaches a favorable relative-power window and can sustain the next engagement, not merely one with more own units.
+    return f"""You are EvolAgent's Optimization-Package Selector. Select exactly one proposed package after comparing its causal support, preservation of winning behavior, deterministic production feasibility, resource cost, first-commitment time budget, and matchup-adjusted strength against the empirical opponent snapshots in each budget report. Do not combine packages or invent a new package. A package with status `unresolved` cannot be selected. A package with status `timing_risk` is selectable only when match evidence supports the later contact window and the expected combat advantage outweighs opponent growth. Prefer a `feasible` package that reaches a favorable relative-power window and can sustain the next engagement, not merely one with more own units. Use each report's package-specific DataAgent status and query IDs; do not repeat a capability claim contradicted by verified data. A partial packet may provide valid costs or unit attributes, but its missing relation remains unknown and must not be invented. Do not select a package that requires strategy.md to create, reserve, replenish, split, transfer, or merge a custom fixed-composition army detachment; the executor owns main-force and reinforcement membership. Treat such a package as unsupported even when its production timing is feasible, and select another executable package.
 
 Strategy: {strategy_name}
 Race: {race}
@@ -830,6 +897,7 @@ Program-calculated package budgets:
 Return JSON only. Copy the selected package's hypothesis and plan without changing its package contents:
 {{
   "selected_package_id":"P1",
+  "data_agent_assessment":{{"considered_query_ids":["PKG_P1_REQ","PKG_P1_MATCHUP"],"supporting_findings":["verified fact that supports selection"],"contradicted_claims":["proposal claim contradicted by data"],"rejected_package_ids":["P2"],"limitations":["remaining unavailable fact"]}},
   "mechanism_prediction":{{"expected_change":"observable behavior change","minimum_material_change":"minimum trajectory-level realization","outcome_prediction":"expected match effect","combat_success_measure":"combat or continuation measure","disproof_condition":"what result falsifies this package"}},
   "next_action":"propose_strategy_patch|inspect_runtime",
   "action_reason":"why this package has the best evidence-to-budget tradeoff",

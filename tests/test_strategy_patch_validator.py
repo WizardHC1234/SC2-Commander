@@ -295,6 +295,8 @@ def test_validator_prompt_is_limited_to_hard_execution_errors() -> None:
     assert "missing mandatory" in prompt
     assert "above 200 supply" in prompt
     assert "similarity to history is non-blocking" in prompt
+    assert "custom detachment" not in prompt
+    assert "fixed-composition" not in prompt
     assert "production_target_audit" not in prompt
 
 

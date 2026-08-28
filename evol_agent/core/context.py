@@ -62,35 +62,51 @@ def render_knowledge_results(runs: list[dict[str, Any]]) -> str:
             "hypothesis_scope": str(run.get("hypothesis_scope") or "").strip(),
             "ok": bool(run.get("ok")),
         }
-        if row["ok"]:
-            row["answer"] = str(run.get("answer") or "").strip()
-            packets: list[dict[str, Any]] = []
-            for evidence in run.get("dataset_evidence") or []:
-                if not isinstance(evidence, dict):
-                    continue
-                packet = evidence.get("result")
-                if not isinstance(packet, dict):
-                    continue
-                packets.append(
-                    {
-                        key: packet.get(key)
-                        for key in (
-                            "schema",
-                            "coverage",
-                            "action_facts",
-                            "entity_facts",
-                            "production",
-                            "control_effects",
-                            "relations",
-                            "calculations",
-                            "missing",
-                        )
-                        if packet.get(key) not in (None, [], {})
-                    }
+        packets: list[dict[str, Any]] = []
+        for evidence in run.get("dataset_evidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            packet = evidence.get("result")
+            if not isinstance(packet, dict):
+                continue
+            entity_facts = [
+                {
+                    key: fact.get(key)
+                    for key in (
+                        "section",
+                        "name",
+                        "race",
+                        "cost",
+                        "stats",
+                        "weapons",
+                        "tech_chain",
+                        "ability",
+                    )
+                    if fact.get(key) not in (None, "", [], {})
+                }
+                for fact in (packet.get("entity_facts") or [])
+                if isinstance(fact, dict)
+            ]
+            compact_packet = {
+                key: packet.get(key)
+                for key in (
+                    "schema",
+                    "coverage",
+                    "action_facts",
+                    "production",
+                    "control_effects",
+                    "relations",
+                    "calculations",
+                    "missing",
                 )
-            if packets:
-                row["verified_packets"] = packets
-        else:
+                if packet.get(key) not in (None, [], {})
+            }
+            if entity_facts:
+                compact_packet["entity_facts"] = entity_facts
+            packets.append(compact_packet)
+        if packets:
+            row["verified_packets" if row["ok"] else "partial_packets"] = packets
+        if not row["ok"]:
             row["error"] = str(run.get("error") or "knowledge query failed").strip()
         rows.append(row)
     if not rows:
@@ -102,7 +118,79 @@ def render_retrieval_evidence(packet: dict[str, Any]) -> str:
     """Render deterministic record/history query results as one evidence packet."""
     if not isinstance(packet, dict) or not packet:
         return "{}"
-    return json_compact_block(packet)
+
+    def value_at(value: Any, index: int) -> Any:
+        return value[index] if isinstance(value, list) and len(value) > index else None
+
+    def compact_row(row: dict[str, Any]) -> dict[str, Any]:
+        army = row.get("army")
+        enemy = row.get("enemy")
+        truth = row.get("opponent_truth_after_match")
+        technology = row.get("technology")
+        orders = [
+            item
+            for item in (row.get("orders") or [])
+            if isinstance(item, list) and item
+        ][:6]
+        compact = {
+            "time_s": row.get("time_s"),
+            "trigger": row.get("trigger"),
+            "own_army": value_at(army, 2),
+            "own_pending_army": value_at(army, 3),
+            "own_upgrades": value_at(technology, 0),
+            "enemy_observed_army": value_at(enemy, 3),
+            "enemy_truth_army": value_at(truth, 4),
+            "enemy_truth_upgrades": value_at(truth, 7),
+            "orders": orders,
+        }
+        return {
+            key: value
+            for key, value in compact.items()
+            if value not in (None, "", [], {})
+        }
+
+    match_evidence = packet.get("match_record_evidence") or {}
+    compact_queries: list[dict[str, Any]] = []
+    for query in match_evidence.get("queries") or []:
+        if not isinstance(query, dict):
+            continue
+        compact_queries.append(
+            {
+                "query_id": query.get("query_id"),
+                "query_reason": query.get("query_reason"),
+                "results": [
+                    {
+                        "game_index": result.get("game_index"),
+                        "start_s": result.get("start_s"),
+                        "end_s": result.get("end_s"),
+                        "reference": result.get("reference"),
+                        "timeline_rows": [
+                            compact_row(row)
+                            for row in (result.get("timeline_rows") or [])
+                            if isinstance(row, dict)
+                        ],
+                        "interaction_check": result.get("interaction_check"),
+                    }
+                    for result in (query.get("results") or [])
+                    if isinstance(result, dict)
+                ],
+            }
+        )
+    compact_packet = {
+        "schema": packet.get("schema"),
+        "match_record_evidence": {
+            "source": match_evidence.get("source"),
+            "query_count": match_evidence.get("query_count"),
+            "reference_count": match_evidence.get("reference_count"),
+            "queries": compact_queries,
+            "errors": list(match_evidence.get("errors") or []),
+        },
+        "historical_experience_evidence": packet.get(
+            "historical_experience_evidence"
+        )
+        or {},
+    }
+    return json_compact_block(compact_packet)
 
 
 def render_optimizer_decision(decision: dict[str, Any]) -> str:

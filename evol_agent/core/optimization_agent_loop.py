@@ -175,6 +175,11 @@ def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[
             if isinstance(raw.get("selected_engagement_assessment"), dict)
             else {}
         ),
+        "data_agent_assessment": (
+            dict(raw.get("data_agent_assessment"))
+            if isinstance(raw.get("data_agent_assessment"), dict)
+            else {}
+        ),
         "package_budget_reports": [
             dict(item)
             for item in (raw.get("package_budget_reports") or [])
@@ -603,6 +608,9 @@ def _candidate_rationale(
         "selected_package_budget": dict(decision.get("selected_package_budget") or {}),
         "selected_engagement_assessment": dict(
             decision.get("selected_engagement_assessment") or {}
+        ),
+        "data_agent_assessment": dict(
+            decision.get("data_agent_assessment") or {}
         ),
         "candidate_package_evaluations": [
             dict(item)

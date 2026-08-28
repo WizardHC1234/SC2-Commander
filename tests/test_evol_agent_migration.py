@@ -1375,6 +1375,17 @@ def test_knowledge_question_fields_and_text_fallback_resolve_the_same_entities()
     ]
 
 
+def test_yamato_alias_resolves_to_battlecruiser_specialization_upgrade() -> None:
+    resolved = resolve_knowledge_entities(
+        "Verify Yamato Cannon research.",
+        ["Yamato Cannon", "Battlecruiser Specializations"],
+    )
+
+    assert [row["name"] for row in resolved] == [
+        "BattlecruiserEnableSpecializations"
+    ]
+
+
 def test_deterministic_knowledge_returns_only_requested_categories_with_descriptions() -> None:
     requirements = run_knowledge_query(
         {

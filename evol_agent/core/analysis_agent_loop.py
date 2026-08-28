@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
 from functools import partial
 from pathlib import Path
+import hashlib
 import re
 from typing import Any
 
@@ -13,11 +14,13 @@ from .checkpoint import (
     stage_reached,
 )
 from .config import (
+    CONTACT_TIMING_EXTRACTION_ENABLE_REASONING,
     CROSS_MATCH_DECISION_ENABLE_REASONING,
     CROSS_MATCH_DISCOVERY_ENABLE_REASONING,
     DEFAULT_ANALYSIS_MODEL,
     MAX_CONCURRENT_MATCH_SUBAGENTS,
     MAX_KNOWLEDGE_QUERIES,
+    PARENT_TIMING_PACKAGE_EXTRACTION_ENABLE_REASONING,
 )
 from .llm import call_json_llm
 from .loop_helpers import (
@@ -35,6 +38,7 @@ from .prompts import (
     build_cross_match_decision_prompt,
     build_cross_match_discovery_prompt,
     build_optimization_package_prompt,
+    build_parent_timing_package_prompt,
 )
 from .terran_build_order_simulator import simulate_terran_first_commitment
 from .types import AnalysisPipelineResult, BattleAnalysis, GameDigest, ToolObservation
@@ -213,12 +217,31 @@ def _normalize_knowledge_questions(raw: Any) -> list[dict[str, Any]]:
             continue
         question = str(item.get("question") or "").strip()
         entities = _clean_strings(item.get("entities"), limit=6)
+        actions = _clean_strings(item.get("actions"), limit=8)
         needs = [
             need.lower()
             for need in _clean_strings(item.get("needs"), limit=4)
             if need.lower() in _KNOWLEDGE_NEEDS
         ]
-        if not question or not entities or not needs:
+        folded_question = question.casefold()
+        if any(
+            term in folded_question
+            for term in (
+                "cost",
+                "build time",
+                "production time",
+                "research time",
+                "prerequisite",
+                "producer",
+                "成本",
+                "建造时间",
+                "生产时间",
+                "研究时间",
+                "前置",
+            )
+        ) and "requirements" not in needs:
+            needs.append("requirements")
+        if not question or not (entities or actions) or not needs:
             continue
         calculations: list[dict[str, Any]] = []
         for calculation in item.get("calculations") or []:
@@ -252,6 +275,7 @@ def _normalize_knowledge_questions(raw: Any) -> list[dict[str, Any]]:
                 "id": f"Q{len(questions) + 1}",
                 "question": question,
                 "entities": entities,
+                "actions": actions,
                 "needs": list(dict.fromkeys(needs)),
                 "query_reason": str(
                     item.get("query_reason") or item.get("reason") or question
@@ -733,6 +757,40 @@ def _optional_nonnegative_number(value: Any) -> float | None:
     return number if number >= 0 else None
 
 
+def _coerce_positive_slots(raw: Any, *, default: int = 1) -> int:
+    """Coerce model slot fields to a positive int.
+
+    Models often emit parallel_slots=0 or a dict of producer counts instead of a
+    queue-capacity integer. Dropping those rows silently empties setup_actions
+    and then fails requirement_coverage against the missing names.
+    """
+    if isinstance(raw, dict):
+        total = 0
+        for value in raw.values():
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                total += parsed
+        return total if total > 0 else default
+    if isinstance(raw, (list, tuple)):
+        total = 0
+        for value in raw:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                total += parsed
+        return total if total > 0 else default
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _normalize_timing_components(
     raw: Any,
     *,
@@ -747,9 +805,9 @@ def _normalize_timing_components(
         action = str(item.get("action") or "").strip()
         try:
             quantity = int(item.get("quantity") or 0)
-            slots = int(item.get(slot_key) or 0)
         except (TypeError, ValueError):
             continue
+        slots = _coerce_positive_slots(item.get(slot_key), default=1)
         if action and quantity > 0 and slots > 0:
             rows.append({"action": action, "quantity": quantity, slot_key: slots})
     return rows[:16]
@@ -789,8 +847,195 @@ def _normalize_timing_package(raw: Any) -> tuple[dict[str, Any] | None, str]:
     }, ""
 
 
+def _normalized_evidence_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _normalized_requirement_key(value: Any) -> str:
+    """Normalize a strategy bullet or model excerpt for coverage matching.
+
+    Models often copy the bullet body without the leading Markdown list marker.
+    """
+    text = _normalized_evidence_text(value)
+    return re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", text).strip()
+
+
+def _strategy_requirement_lines(strategy_text: str) -> list[str]:
+    """Return complete Markdown requirement bullets for model-owned classification."""
+    return [
+        line.strip()
+        for line in str(strategy_text or "").splitlines()
+        if re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", line)
+    ]
+
+
+def _normalize_parent_timing_package_extraction(
+    raw: Any,
+    *,
+    strategy_text: str,
+) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(raw, dict):
+        return None, "parent timing extraction returned no JSON object"
+    package_raw = raw.get("parent_timing_package")
+    if not isinstance(package_raw, dict):
+        return None, "parent timing extraction requires parent_timing_package"
+
+    normalized_strategy = _normalized_evidence_text(strategy_text)
+    economy_raw = (
+        package_raw.get("economy")
+        if isinstance(package_raw.get("economy"), dict)
+        else {}
+    )
+    economy_evidence = (
+        economy_raw.get("evidence")
+        if isinstance(economy_raw.get("evidence"), dict)
+        else {}
+    )
+    for field in (
+        "worker_target_before_commitment",
+        "base_target_before_commitment",
+        "gas_workers_before_commitment",
+    ):
+        if economy_raw.get(field) in (None, ""):
+            continue
+        excerpt = str(economy_evidence.get(field) or "").strip()
+        if not excerpt or _normalized_evidence_text(excerpt) not in normalized_strategy:
+            return None, (
+                f"{field} requires a verbatim strategy_excerpt from current strategy.md"
+            )
+
+    for section in ("gate_components", "setup_actions"):
+        items = package_raw.get(section)
+        if not isinstance(items, list):
+            return None, f"parent timing extraction requires {section} as a list"
+        kept_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                return None, f"{section} items must be objects"
+            action = str(item.get("action") or "").strip()
+            try:
+                quantity = int(item.get("quantity"))
+            except (TypeError, ValueError):
+                quantity = 0
+            # Zero / null quantities are absence. Skip them before excerpt checks so
+            # models can emit "0 Refineries" or invented null supply rows without
+            # hard-failing the whole extraction.
+            if quantity <= 0:
+                continue
+            excerpt = str(item.get("strategy_excerpt") or "").strip()
+            if not excerpt or _normalized_evidence_text(excerpt) not in normalized_strategy:
+                # Soft-drop hallucinated positive rows rather than aborting.
+                continue
+            kept_items.append(item)
+        package_raw = {**package_raw, section: kept_items}
+
+    package, error = _normalize_timing_package(package_raw)
+    if package is None:
+        return None, error
+
+    allowed_mappings = {
+        f"economy.{field}"
+        for field in (
+            "worker_target_before_commitment",
+            "base_target_before_commitment",
+            "gas_workers_before_commitment",
+        )
+        if package["economy"].get(field) is not None
+    }
+    allowed_mappings.update(
+        f"{section}.{item['action']}"
+        for section in ("gate_components", "setup_actions")
+        for item in package.get(section) or []
+    )
+    coverage_raw = raw.get("requirement_coverage")
+    if not isinstance(coverage_raw, list):
+        return None, "parent timing extraction requires requirement_coverage"
+    coverage_by_excerpt: dict[str, dict[str, Any]] = {}
+    valid_classes = {
+        "mapped_pre_commitment",
+        "behavioral_pre_commitment",
+        "post_commitment",
+        "mixed",
+    }
+    for item in coverage_raw:
+        if not isinstance(item, dict):
+            return None, "requirement_coverage items must be objects"
+        excerpt = str(item.get("strategy_excerpt") or "").strip()
+        normalized_excerpt = _normalized_evidence_text(excerpt)
+        coverage_key = _normalized_requirement_key(excerpt)
+        if not excerpt or normalized_excerpt not in normalized_strategy:
+            return None, "requirement_coverage requires a verbatim strategy bullet"
+        classification = str(item.get("classification") or "").strip()
+        if classification not in valid_classes:
+            return None, f"requirement_coverage has invalid classification: {classification}"
+        mappings = [
+            str(value or "").strip()
+            for value in (item.get("mapped_to") or [])
+            if str(value or "").strip()
+        ]
+        # Keep coverage aligned with the extracted package. Models often map
+        # "0 Refineries" / mineral-only wording onto setup_actions.build_gas even
+        # when the package correctly omits gas; drop those dangling names.
+        # Also downgrade empty mapped/mixed bullets (Scouting/Scans) that have no
+        # simulator quantity instead of hard-failing the whole extraction.
+        unknown = [value for value in mappings if value not in allowed_mappings]
+        mappings = [value for value in mappings if value in allowed_mappings]
+        if classification in {"mapped_pre_commitment", "mixed"} and not mappings:
+            prior_reason = str(item.get("reason") or "").strip()
+            if unknown:
+                note = (
+                    "Dropped mapped_to entries absent from the extracted package "
+                    f"({', '.join(unknown)}); treating the bullet as behavioral."
+                )
+            else:
+                note = (
+                    "No quantitative package fields for this bullet; treating it as "
+                    "behavioral_pre_commitment."
+                )
+            classification = "behavioral_pre_commitment"
+            item = {
+                **item,
+                "classification": classification,
+                "mapped_to": [],
+                "reason": f"{prior_reason} {note}".strip() if prior_reason else note,
+            }
+        else:
+            item = {**item, "mapped_to": mappings, "classification": classification}
+            if unknown:
+                prior_reason = str(item.get("reason") or "").strip()
+                note = (
+                    "Ignored mapped_to entries absent from the extracted package: "
+                    + ", ".join(unknown)
+                )
+                item["reason"] = f"{prior_reason} {note}".strip() if prior_reason else note
+        if classification in {"mapped_pre_commitment", "mixed"} and not mappings:
+            return None, (
+                f"{classification} requirement must map to extracted package fields: "
+                f"{excerpt}"
+            )
+        if classification in {"behavioral_pre_commitment", "post_commitment"}:
+            if not str(item.get("reason") or "").strip():
+                return None, f"{classification} requirement requires a reason: {excerpt}"
+        coverage_by_excerpt[coverage_key] = item
+
+    missing_lines = [
+        line
+        for line in _strategy_requirement_lines(strategy_text)
+        if _normalized_requirement_key(line) not in coverage_by_excerpt
+    ]
+    if missing_lines:
+        return None, (
+            "requirement_coverage omitted strategy bullets: "
+            + " | ".join(missing_lines[:3])
+        )
+
+    return package, ""
+
+
 def _normalize_candidate_package_proposal(
     raw: dict[str, Any],
+    *,
+    parent_timing_package: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(raw, dict):
         return None, "optimization package proposal returned no JSON object"
@@ -803,9 +1048,14 @@ def _normalize_candidate_package_proposal(
     failure_mode, _failure_error = _normalize_failure_mode_analysis(
         raw.get("failure_mode_analysis")
     )
-    parent_timing_package, parent_error = _normalize_timing_package(
-        raw.get("parent_timing_package")
-    )
+    if parent_timing_package is None:
+        normalized_parent, parent_error = _normalize_timing_package(
+            raw.get("parent_timing_package")
+        )
+    else:
+        normalized_parent, parent_error = _normalize_timing_package(
+            parent_timing_package
+        )
     common = {
         "strengths_to_preserve": _normalize_pattern_items(
             raw.get("strengths_to_preserve") or raw.get("strengths")
@@ -820,9 +1070,9 @@ def _normalize_candidate_package_proposal(
         return {
             **common,
             "candidate_packages": [],
-            "parent_timing_package": parent_timing_package or {},
+            "parent_timing_package": normalized_parent or {},
         }, ""
-    if parent_error or parent_timing_package is None:
+    if parent_error or normalized_parent is None:
         return None, (
             "evaluate_candidate_packages requires a usable parent_timing_package: "
             + parent_error
@@ -898,7 +1148,7 @@ def _normalize_candidate_package_proposal(
         )
     return {
         **common,
-        "parent_timing_package": parent_timing_package,
+        "parent_timing_package": normalized_parent,
         "candidate_packages": packages,
     }, ""
 
@@ -1056,15 +1306,27 @@ def _evaluate_candidate_package_budgets(
             if isinstance(candidate.get("total_cost"), dict)
             else {}
         )
-        complete = bool(parent.get("complete") and candidate.get("complete"))
-        within_budget = complete and latest_ok is not False and delay_ok is not False
+        parent_complete = bool(parent.get("complete"))
+        candidate_complete = bool(candidate.get("complete"))
+        complete = candidate_complete
+        within_budget = (
+            candidate_complete
+            and latest_ok is not False
+            and delay_ok is not False
+        )
+        if not candidate_complete:
+            status = "unresolved"
+        elif within_budget:
+            status = "feasible"
+        else:
+            status = "timing_risk"
         reports.append(
             {
                 "id": item.get("id"),
-                "status": (
-                    "within_budget" if within_budget else "over_or_unresolved_budget"
-                ),
+                "status": status,
                 "complete": complete,
+                "parent_complete": parent_complete,
+                "candidate_complete": candidate_complete,
                 "parent_earliest_feasible_time_seconds": parent_time,
                 "candidate_earliest_feasible_time_seconds": candidate_time,
                 "earliest_feasible_timing_delta_seconds": (
@@ -1102,6 +1364,192 @@ def _evaluate_candidate_package_budgets(
             }
         )
     return reports
+
+
+def _candidate_package_knowledge_questions(
+    proposal: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Create deterministic, package-specific queries after hypotheses exist."""
+    questions: list[dict[str, Any]] = []
+    for package in proposal.get("candidate_packages") or []:
+        if not isinstance(package, dict):
+            continue
+        package_id = str(package.get("id") or "").strip().upper()
+        timing = package.get("timing_budget") or {}
+        timing_package = timing.get("package") or {}
+        components = [
+            item
+            for field in ("gate_components", "setup_actions")
+            for item in (timing_package.get(field) or [])
+            if isinstance(item, dict) and str(item.get("action") or "").strip()
+        ]
+        actions = list(
+            dict.fromkeys(str(item.get("action") or "").strip() for item in components)
+        )
+        calculation_requests: list[dict[str, Any]] = []
+        for item in components:
+            action = str(item.get("action") or "").strip()
+            quantity = item.get("quantity")
+            slots = item.get("production_slots") or item.get("parallel_slots")
+            if action and quantity and slots:
+                calculation_requests.append(
+                    {
+                        "type": "parallel_production",
+                        "action": action,
+                        "quantity": quantity,
+                        "production_slots": slots,
+                    }
+                )
+            if action.startswith("train_") and slots:
+                calculation_requests.append(
+                    {
+                        "type": "resource_demand_per_minute",
+                        "action": action,
+                        "production_slots": slots,
+                    }
+                )
+            if len(calculation_requests) >= 6:
+                break
+        if actions:
+            questions.append(
+                {
+                    "id": f"PKG_{package_id}_REQ",
+                    "question": (
+                        f"Verify costs, production or research times, producers, "
+                        f"prerequisites, throughput, and sustained resource demand "
+                        f"for optimization package {package_id}."
+                    ),
+                    "entities": [],
+                    "actions": actions,
+                    "needs": ["requirements"],
+                    "query_reason": (
+                        f"Package {package_id} must be feasible before it can be selected."
+                    ),
+                    "evidence_refs": list(timing.get("budget_basis") or [])[:4],
+                    "hypothesis_scope": "candidate_package_requirements",
+                    "plan_ids": [package_id],
+                    "calculations": calculation_requests,
+                }
+            )
+
+        engagement = package.get("engagement_assessment") or {}
+        entity_text = " ".join(
+            [
+                *actions,
+                *(
+                    str(engagement.get(key) or "")
+                    for key in (
+                        "own_package_role",
+                        "observed_opponent_package",
+                        "counter_and_upgrade_relationship",
+                    )
+                ),
+            ]
+        )
+        try:
+            resolved = resolve_knowledge_entities(entity_text)
+        except (OSError, ValueError):
+            resolved = []
+        unit_names = list(
+            dict.fromkeys(
+                str(item.get("name") or "").strip()
+                for item in resolved
+                if isinstance(item, dict)
+                and item.get("section") == "Unit"
+                and str(item.get("name") or "").strip()
+            )
+        )[:6]
+        upgrade_names = list(
+            dict.fromkeys(
+                str(item.get("name") or "").strip()
+                for item in resolved
+                if isinstance(item, dict)
+                and item.get("section") == "Upgrade"
+                and str(item.get("name") or "").strip()
+            )
+        )[:4]
+        if len(unit_names) >= 2:
+            questions.append(
+                {
+                    "id": f"PKG_{package_id}_MATCHUP",
+                    "question": (
+                        f"Verify static counter relationships among the own and enemy "
+                        f"units relevant to optimization package {package_id}; do not "
+                        f"estimate a dynamic battle outcome or an exact winning count."
+                    ),
+                    "entities": unit_names,
+                    "actions": [],
+                    "needs": ["counters"],
+                    "query_reason": (
+                        f"Package {package_id} changes or relies on the combat package "
+                        f"used near the recorded contact window."
+                    ),
+                    "evidence_refs": list(timing.get("budget_basis") or [])[:4],
+                    "hypothesis_scope": "candidate_package_matchup",
+                    "plan_ids": [package_id],
+                    "calculations": [],
+                }
+            )
+        if upgrade_names:
+            questions.append(
+                {
+                    "id": f"PKG_{package_id}_UPGRADE",
+                    "question": (
+                        f"Verify the effects, costs, research times, and prerequisites "
+                        f"of upgrades relevant to optimization package {package_id}."
+                    ),
+                    "entities": upgrade_names,
+                    "actions": [],
+                    "needs": ["effects", "requirements"],
+                    "query_reason": (
+                        f"Package {package_id} must account for both the combat benefit "
+                        f"and timing cost of its upgrades."
+                    ),
+                    "evidence_refs": list(timing.get("budget_basis") or [])[:4],
+                    "hypothesis_scope": "candidate_package_upgrade",
+                    "plan_ids": [package_id],
+                    "calculations": [],
+                }
+            )
+        if len(questions) >= 12:
+            break
+    return questions[:12]
+
+
+def _annotate_package_knowledge(
+    reports: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
+) -> None:
+    for report in reports:
+        package_id = str(report.get("id") or "").strip().upper()
+        related = [
+            run
+            for run in runs
+            if package_id in {
+                str(value).strip().upper() for value in (run.get("plan_ids") or [])
+            }
+        ]
+        failed = [run for run in related if not is_knowledge_run_verified(run)]
+        blocking = [
+            run
+            for run in failed
+            if str(run.get("hypothesis_scope") or "")
+            == "candidate_package_requirements"
+        ]
+        report["knowledge_query_ids"] = [
+            str(run.get("question_id") or "") for run in related
+        ]
+        report["knowledge_errors"] = [
+            find_knowledge_run_error(run) or str(run.get("error") or "")
+            for run in failed
+        ]
+        if blocking:
+            report["knowledge_status"] = "unresolved"
+            report["status"] = "unresolved"
+        elif failed:
+            report["knowledge_status"] = "partial"
+        else:
+            report["knowledge_status"] = "verified" if related else "not_required"
 
 
 def _normalize_failure_mode_analysis(
@@ -1682,6 +2130,32 @@ def _normalize_package_selection(
         ),
         {},
     )
+    if str(selected_report.get("status") or "") == "unresolved":
+        return None, (
+            "selected_package_id cannot name a package with unresolved "
+            "production dependencies or required DataAgent facts"
+        )
+    data_agent_raw = (
+        raw.get("data_agent_assessment")
+        if isinstance(raw.get("data_agent_assessment"), dict)
+        else {}
+    )
+    considered_query_ids = _clean_strings(
+        data_agent_raw.get("considered_query_ids"), limit=20
+    )
+    required_query_ids = _clean_strings(
+        selected_report.get("knowledge_query_ids"), limit=20
+    )
+    missing_query_ids = [
+        query_id
+        for query_id in required_query_ids
+        if query_id not in considered_query_ids
+    ]
+    if missing_query_ids:
+        return None, (
+            "data_agent_assessment must consider the selected package queries: "
+            + ", ".join(missing_query_ids)
+        )
     merged = {
         **raw,
         "strengths_to_preserve": proposal.get("strengths_to_preserve") or [],
@@ -1701,11 +2175,27 @@ def _normalize_package_selection(
     payload["selected_package_id"] = selected_id
     payload["candidate_packages"] = list(proposal.get("candidate_packages") or [])
     payload["package_budget_reports"] = list(package_budget_reports)
+    payload["parent_timing_package"] = dict(
+        proposal.get("parent_timing_package") or {}
+    )
     payload["selected_package_budget"] = dict(selected_report)
     payload["selected_timing_budget"] = dict(selected.get("timing_budget") or {})
     payload["selected_engagement_assessment"] = dict(
         selected.get("engagement_assessment") or {}
     )
+    payload["data_agent_assessment"] = {
+        "considered_query_ids": considered_query_ids,
+        "supporting_findings": _clean_strings(
+            data_agent_raw.get("supporting_findings"), limit=8
+        ),
+        "contradicted_claims": _clean_strings(
+            data_agent_raw.get("contradicted_claims"), limit=8
+        ),
+        "rejected_package_ids": _clean_strings(
+            data_agent_raw.get("rejected_package_ids"), limit=8
+        ),
+        "limitations": _clean_strings(data_agent_raw.get("limitations"), limit=8),
+    }
     payload["expected_effect"] = str(selected.get("expected_effect") or "").strip()
     payload["main_risk"] = str(selected.get("main_risk") or "").strip()
     return payload, ""
@@ -1824,11 +2314,73 @@ def _run_cross_match_decision(
     prior_experiences: list[Any] | None,
     capability_manifest: dict[str, Any] | None,
     discovery: dict[str, Any],
+    knowledge_questions: list[dict[str, Any]],
     knowledge_runs: list[dict[str, Any]],
     retrieval_evidence: dict[str, Any],
+    checkpoint: EvolCheckpoint | None,
     events: list[dict[str, Any]],
     prefix: str,
 ) -> tuple[dict[str, Any] | None, list[str], int]:
+    strategy_text = str(skill_texts.get("strategy.md") or "").strip()
+    strategy_hash = hashlib.sha256(strategy_text.encode("utf-8")).hexdigest()
+    cached_parent = (
+        checkpoint.load_parent_timing_package(strategy_hash=strategy_hash)
+        if checkpoint is not None
+        else None
+    )
+    if cached_parent is not None:
+        parent_timing_package, parent_error = _normalize_timing_package(cached_parent)
+        if parent_timing_package is None:
+            cached_parent = None
+        else:
+            extraction_errors = []
+            extraction_calls = 0
+            print(
+                f"{prefix}AnalysisAgent: reusing parent first-commitment package",
+                flush=True,
+            )
+    if cached_parent is None:
+        print(
+            f"{prefix}AnalysisAgent: extracting parent first-commitment package",
+            flush=True,
+        )
+        parent_timing_package, extraction_errors, extraction_calls = _run_analysis_json(
+            build_prompt=lambda schema_errors: build_parent_timing_package_prompt(
+                strategy_name=strategy_name,
+                race=race,
+                strategy_text=strategy_text,
+                validation_errors=schema_errors,
+                capability_manifest=capability_manifest or {},
+            ),
+            model=model,
+            normalizer=lambda raw: _normalize_parent_timing_package_extraction(
+                raw,
+                strategy_text=strategy_text,
+            ),
+            events=events,
+            label="parent_timing_package_extraction",
+            is_reasoning=PARENT_TIMING_PACKAGE_EXTRACTION_ENABLE_REASONING,
+        )
+    if parent_timing_package is None:
+        return None, extraction_errors, extraction_calls
+    if checkpoint is not None and cached_parent is None:
+        checkpoint.save_parent_timing_package(
+            strategy_hash=strategy_hash,
+            package=parent_timing_package,
+        )
+    print(
+        f"{prefix}AnalysisAgent: parent package "
+        f"gate_components={len(parent_timing_package.get('gate_components') or [])} "
+        f"setup_actions={len(parent_timing_package.get('setup_actions') or [])}",
+        flush=True,
+    )
+    events.append(
+        {
+            "action": "parent_timing_package_extraction",
+            "parent_timing_package": parent_timing_package,
+        }
+    )
+
     print(f"{prefix}AnalysisAgent: generating optimization packages", flush=True)
     proposal, proposal_errors, proposal_calls = _run_analysis_json(
         build_prompt=lambda schema_errors: build_optimization_package_prompt(
@@ -1841,16 +2393,24 @@ def _run_cross_match_decision(
             discovery=discovery,
             knowledge_runs=knowledge_runs,
             retrieval_evidence=retrieval_evidence,
+            parent_timing_package=parent_timing_package,
             capability_manifest=capability_manifest or {},
         ),
         model=model,
-        normalizer=_normalize_candidate_package_proposal,
+        normalizer=lambda raw: _normalize_candidate_package_proposal(
+            raw,
+            parent_timing_package=parent_timing_package,
+        ),
         events=events,
         label="optimization_package_generation",
         is_reasoning=CROSS_MATCH_DECISION_ENABLE_REASONING,
     )
     if proposal is None:
-        return None, proposal_errors, proposal_calls
+        return (
+            None,
+            [*extraction_errors, *proposal_errors],
+            extraction_calls + proposal_calls,
+        )
     if proposal.get("next_action") == "inspect_runtime":
         payload = {
             "strategy_name": strategy_name,
@@ -1868,11 +2428,16 @@ def _run_cross_match_decision(
             "plan": None,
             "candidate_packages": [],
             "package_budget_reports": [],
+            "parent_timing_package": parent_timing_package,
             "next_action": "inspect_runtime",
             "action_reason": proposal.get("action_reason") or "Runtime inspection required.",
             "evidence_limits": proposal.get("evidence_limits") or [],
         }
-        return payload, proposal_errors, proposal_calls
+        return (
+            payload,
+            [*extraction_errors, *proposal_errors],
+            extraction_calls + proposal_calls,
+        )
 
     print(
         f"{prefix}DataAgent: preflighting "
@@ -1900,6 +2465,79 @@ def _run_cross_match_decision(
             "reports": budget_reports,
         }
     )
+
+    if knowledge_mode == "enabled":
+        package_questions = _candidate_package_knowledge_questions(proposal)
+        if package_questions:
+            print(
+                f"{prefix}DataAgent: resolving {len(package_questions)} "
+                "candidate-package knowledge question(s)",
+                flush=True,
+            )
+            knowledge_questions.extend(package_questions)
+            package_runs = _run_knowledge_queries(
+                package_questions,
+                race=race,
+                checkpoint=checkpoint,
+                prefix=prefix,
+            )
+            knowledge_runs.extend(package_runs)
+            _annotate_package_knowledge(budget_reports, package_runs)
+            events.append(
+                {
+                    "action": "candidate_package_knowledge",
+                    "question_count": len(package_questions),
+                    "verified_count": sum(
+                        1
+                        for run in package_runs
+                        if is_knowledge_run_verified(run)
+                    ),
+                    "failed_question_ids": [
+                        str(run.get("question_id") or "")
+                        for run in package_runs
+                        if not is_knowledge_run_verified(run)
+                    ],
+                }
+            )
+
+    selectable_reports = [
+        report
+        for report in budget_reports
+        if str(report.get("status") or "") != "unresolved"
+    ]
+    if not selectable_reports:
+        payload = {
+            "strategy_name": strategy_name,
+            "strategy_contract": normalize_strategy_contract(
+                discovery.get("strategy_contract"), strategy_name=strategy_name
+            ),
+            "outcome_contrast": _normalize_outcome_contrast(
+                discovery.get("outcome_contrast")
+            ),
+            "strengths_to_preserve": proposal.get("strengths_to_preserve") or [],
+            "priority_problem": proposal.get("priority_problem") or {},
+            "hypothesis": "",
+            "failure_mode_analysis": proposal.get("failure_mode_analysis") or {},
+            "mechanism_prediction": {},
+            "plan": None,
+            "candidate_packages": list(proposal.get("candidate_packages") or []),
+            "package_budget_reports": budget_reports,
+            "parent_timing_package": parent_timing_package,
+            "next_action": "inspect_runtime",
+            "action_reason": (
+                "Every proposed package has unresolved deterministic production "
+                "dependencies or required DataAgent facts; regenerate complete "
+                "packages before strategy editing."
+            ),
+            "evidence_limits": [
+                "No candidate package passed deterministic dependency resolution."
+            ],
+        }
+        return (
+            payload,
+            [*extraction_errors, *proposal_errors],
+            extraction_calls + proposal_calls,
+        )
 
     print(f"{prefix}AnalysisAgent: selecting optimization package", flush=True)
     payload, selection_errors, selection_calls = _run_analysis_json(
@@ -1946,8 +2584,8 @@ def _run_cross_match_decision(
         )
     return (
         payload,
-        [*proposal_errors, *selection_errors],
-        proposal_calls + selection_calls,
+        [*extraction_errors, *proposal_errors, *selection_errors],
+        extraction_calls + proposal_calls + selection_calls,
     )
 
 
@@ -2496,7 +3134,6 @@ def run_analysis_agent_loop(
                 checkpoint=checkpoint,
                 prefix=prefix,
             )
-            observations = _observations_from_runs(runs, prefix=prefix)
 
         payload, decision_errors, decision_calls = _run_cross_match_decision(
             strategy_name=strategy_name,
@@ -2508,11 +3145,14 @@ def run_analysis_agent_loop(
             prior_experiences=prior_experiences,
             capability_manifest=capability_manifest,
             discovery=discovery,
+            knowledge_questions=questions,
             knowledge_runs=runs,
             retrieval_evidence=retrieval_evidence,
+            checkpoint=checkpoint,
             events=analysis_events,
             prefix=prefix,
         )
+        observations = _observations_from_runs(runs, prefix=prefix)
         llm_cross_match_calls += decision_calls
         errors.extend(f"decision: {item}" for item in decision_errors)
 

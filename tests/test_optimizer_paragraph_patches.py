@@ -313,6 +313,8 @@ def test_optimizer_prompt_does_not_select_a_plan() -> None:
     assert "contact" in prompt and "own and enemy composition" in prompt
     assert "Current Champion strategy.md" in prompt
     assert "do not fill audit forms" in prompt
+    assert "Do not invent a fixed-composition defensive squad" in prompt
+    assert "executor, not strategy.md, owns membership" in prompt
     assert "Independent factual match summaries" not in prompt
 
 

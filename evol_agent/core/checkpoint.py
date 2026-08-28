@@ -204,6 +204,39 @@ class EvolCheckpoint:
     def has_cross_match_discovery(self) -> bool:
         return (self.run_dir / "cross_match_discovery.json").is_file()
 
+    def save_parent_timing_package(
+        self,
+        *,
+        strategy_hash: str,
+        package: dict[str, Any],
+    ) -> None:
+        _write_json(
+            self.run_dir / "parent_timing_package.json",
+            {
+                "extraction_schema": 2,
+                "strategy_hash": str(strategy_hash),
+                "parent_timing_package": package,
+            },
+        )
+
+    def load_parent_timing_package(
+        self,
+        *,
+        strategy_hash: str,
+    ) -> dict[str, Any] | None:
+        path = self.run_dir / "parent_timing_package.json"
+        if not path.is_file():
+            return None
+        data = _read_json(path)
+        if not isinstance(data, dict):
+            return None
+        if data.get("extraction_schema") != 2:
+            return None
+        if str(data.get("strategy_hash") or "") != str(strategy_hash):
+            return None
+        package = data.get("parent_timing_package")
+        return dict(package) if isinstance(package, dict) else None
+
     def save_batch_analysis(self, analysis: dict[str, Any]) -> None:
         _write_json(self.run_dir / "batch_analysis.json", analysis)
         self.set_stage("batch_analysis")
