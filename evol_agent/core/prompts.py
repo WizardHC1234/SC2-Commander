@@ -188,10 +188,13 @@ record supports them:
   contact and whether the force held, broke through, withdrew, or was destroyed.
   When a runtime auto-retreat appears, record the force at the last pre-contact row,
   the configured retreat_ratio and local own/enemy power ratio at the trigger, and
-  the force after retreat when available. State whether most losses happened before
-  or after the trigger and whether the surviving force later regrouped or re-engaged.
-  Never describe auto-retreat as the cause of the collapse when the recorded force
-  had already collapsed before it fired.
+  the force after retreat when available. Trace the command transition separately:
+  record the advancing command before the override, the first Commander command
+  after it, whether the blocked objective resumed, whether the opening attack gate
+  was reapplied after commitment, regroup delay, and the next re-engagement time.
+  State whether most losses happened before or after the trigger. Losses before the
+  trigger mean it did not cause the initial collapse, but a later hold/full-rebuild
+  command may still cause a distinct continuity failure.
 
 Do not infer an attack merely because the opponent owned an army. If the record
 does not establish pressure or a major engagement, return an empty list.
@@ -231,9 +234,15 @@ Return one JSON object with exactly these top-level fields:
       "own_force_after": "next recorded post-contact force",
       "own_reinforcement_after": "new combat units or regrouping recorded after contact",
       "production_context_before": "recorded producers, resources, supply block, or empty",
+      "offensive_command_before": "last advancing mode and final strategic objective before the override, or empty",
       "runtime_override": "auto-retreat trigger and force at trigger, or empty",
       "retreat_policy": "configured retreat_ratio, local power ratio at trigger, and later regroup/re-engagement, or empty",
       "loss_timing": "losses_before_override|override_before_losses|not_observed",
+      "command_after_override": "first recorded Commander mode and objective after the override, or empty",
+      "blocked_offensive_resumed": "true|false|unknown",
+      "opening_gate_reapplied_after_commitment": "true|false|unknown",
+      "regroup_delay_seconds": "recorded seconds from withdrawal to resumed advance, or null",
+      "reengagement_time_s": "recorded next engagement time, or null",
       "outcome": "breakthrough|held|withdrawal|army_broken|unclear"
     }}
   ]{probe_schema}
@@ -1058,27 +1067,23 @@ stalled reinforcement, stale objectives, and failure to scout or scan for surviv
 structures. Any information change must remain non-blocking for an already-ready
 attack and must directly support target selection or timely cleanup.
 
-Use that failure stage to declare two narrow permissions in plan. They are false
-by default and are not general recommendations:
-- composition_change_allowed may be true only when repeated match evidence shows
-  that the completed fighting package is itself inadequate at the relevant contact,
-  or that a composition change is the necessary survival dependency before the
-  core mechanism. A final enemy roster alone is insufficient.
-- retreat_change_allowed may be true only when repeated main-force evidence links
-  the configured retreat threshold or recovery behavior to the decisive outcome.
-  Use loss_timing, retained force, regroup delay, and re-engagement evidence.
-  Runtime auto-retreat fires when the local own/enemy power ratio falls below
-  retreat_ratio (default 0.6): a higher value retreats earlier, while a lower
-  value stays committed longer. Neither direction is inherently an improvement.
-- Main Attack Gate and Recovery and Cleanup belong to different stages. A change to
-  first-attack timing never requires a numerical or semantic recovery change for
-  "consistency." When retreat_change_allowed is false, Recovery and Cleanup must be
-  copied unchanged into the candidate.
-If failure occurs before the core mechanism and neither condition is supported,
-preserve both the unit concept and retreat policy and repair the earlier enabling
-link. If the first engagement is viable but continuation fails, composition or
-retreat may change only when the post-contact evidence supports that exact lever.
-Do not enable both merely to give the Optimizer more freedom.
+Use the failure stage to decide which strategy areas are causally relevant; do not
+pre-lock unit composition or retreat and recovery behind permission flags. Economy,
+production, technology, composition, attack readiness, reinforcement, retreat,
+recovery, cleanup, and the wording of the goal may all change when the selected
+hypothesis and match evidence require them. A final enemy roster alone is not enough
+to justify a composition change. A retreat change must be evaluated with loss timing,
+retained force, regroup delay, and re-engagement evidence. Runtime auto-retreat fires
+when the local own/enemy power ratio falls below retreat_ratio (default 0.6): a higher
+value retreats earlier, while a lower value stays committed longer; neither direction
+is inherently an improvement.
+
+Main Attack Gate and Recovery and Cleanup belong to different stages. A change to
+first-attack timing must not be copied into recovery merely for numerical or textual
+"consistency." Recovery may still change when it is part of the selected causal
+intervention, including when post-contact evidence shows a retreat-and-full-rebuild
+loop interrupting a viable offensive. Explain every changed area in strategy_area_audit
+and preserve unrelated behavior.
 
 Strategy identity is primarily the intended combat style and advantage-creation
 window, not an immutable unit roster. Units, upgrades, production structures,
@@ -1146,22 +1151,25 @@ tests of the same mechanism, select a different causal direction. After an
 adequately implemented experiment is contradicted, do not repeat that mechanism.
 Judge semantically equivalent names from the concrete history rather than spelling.
 
-Use structured engagement timing as a hard causal constraint. When an engagement
-has loss_timing=losses_before_override, an auto-retreat or other runtime override
-may be recorded as a consequence but cannot be selected as the cause of that
-collapse. A runtime override may be causal only when evidence shows
-override_before_losses.
+Use structured engagement timing as a causal constraint. When an engagement has
+loss_timing=losses_before_override, the auto-retreat trigger cannot be selected as
+the cause of the initial collapse. Continue tracing the post-trigger command chain:
+if the Commander replaces a recoverable offensive with hold/regroup, reapplies the
+opening gate, or fails to resume despite retained force and reinforcements, that is
+a separate post-contact continuity problem and may still be strategy-fixable or a
+runtime issue. A trigger itself may be causal to the initial loss only when evidence
+shows override_before_losses.
 
 Attribute every auto-retreat to the exact army group that triggered it. The global
 living army inventory is not the affected force. A reinforcement group retreating
 with one or a few units is expected survival behavior and is not evidence that the
-main force was auto-retreated. Before choosing inspect_runtime for auto-retreat,
-cite at least two distinct failed matches whose evidence identifies main_force or
-group_0 at the trigger and explicitly states loss_timing=override_before_losses.
-Write that timing token verbatim in priority_problem.evidence and
-failure_mode_analysis.covered_failures. If group attribution or causal ordering is
-missing, request more evidence or choose a supported strategy-fixable contributor;
-do not escalate a runtime defect.
+main force was auto-retreated. Before choosing inspect_runtime for an auto-retreat
+trigger that allegedly caused the initial collapse, cite repeated evidence that
+identifies main_force or group_0 and establishes override_before_losses. For a
+post-trigger continuity defect, instead cite the blocked offensive, the subsequent
+Commander command, whether the objective resumed, and the regroup/re-engagement
+delay. If group attribution or causal ordering is missing, request more evidence or
+choose a supported strategy-fixable contributor; do not escalate a runtime defect.
 
 Treat retreat_ratio as a tunable engagement threshold, not as a universally good
 direction. A higher value preserves units but can abandon a favorable breakthrough;
@@ -1352,10 +1360,8 @@ Return one JSON object only:
       "production_tradeoffs":["resource or production capacity taken from the Champion's winning chain, or empty"],
       "window_tradeoff_evidence":["Game N @ Ts evidence justifying a later window, or empty"],
       "why_window_remains_favorable":"why the proposed package preserves or improves relative power at contact",
-      "composition_change_allowed":false,
-      "retreat_change_allowed":false,
-      "stage_scope_evidence":["Game N @ Ts evidence supporting every true permission, or empty"],
-      "stage_scope_reason":"why these permissions match failure_stage and the selected hypothesis",
+      "stage_scope_evidence":["Game N @ Ts evidence supporting the selected intervention scope, or empty"],
+      "stage_scope_reason":"why the changed strategy areas match failure_stage and the selected hypothesis",
       "strategy_area_audit":[
         {{"area":"goal_identity|economy_expansion|production_order_capacity|technology_composition|attack_timing_objective|reinforcement_retreat_cleanup","decision":"preserve|revise","finding":"what the complete trajectories show in this area","required_change":"coordinated change when decision is revise, otherwise empty","evidence":["Game N @ Ts: supporting observation"]}}
       ],

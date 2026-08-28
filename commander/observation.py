@@ -357,6 +357,12 @@ def build_full_observation(
             ),
         },
         "army_control": {
+            "first_offensive_started": bool(
+                army.get("first_offensive_started", False)
+            ),
+            "first_offensive_started_at": army.get(
+                "first_offensive_started_at"
+            ),
             "groups": groups,
             "zones": zones,
             "current_commands": current_commands,
@@ -1126,7 +1132,15 @@ def _scan_lines(capabilities: Dict[str, Any]) -> List[str]:
 def _combat_execution_lines(army_control: Dict[str, Any]) -> List[str]:
     """Command progress for army decisions (analogous to Macro Execution)."""
     groups = [_dict(group) for group in _list(army_control.get("groups"))]
-    lines: List[str] = ["[Combat Execution]"]
+    lines: List[str] = [
+        "[Combat Execution]",
+        (
+            "first_offensive_started="
+            f"{_value(bool(army_control.get('first_offensive_started')))}; "
+            "first_offensive_started_at="
+            f"{_value(army_control.get('first_offensive_started_at'))}"
+        ),
+    ]
     if not groups:
         lines.append("active_army_commands=none")
         return lines
@@ -1155,6 +1169,11 @@ def _combat_execution_lines(army_control: Dict[str, Any]) -> List[str]:
             bits.append(f"override={_value(group.get('policy_state'))}")
             if group.get("blocked_mode"):
                 bits.append(f"blocked_mode={_value(group.get('blocked_mode'))}")
+            if group.get("blocked_destination_zone_id"):
+                bits.append(
+                    "blocked_destination="
+                    f"{_value(group.get('blocked_destination_zone_id'))}"
+                )
             if group.get("policy_detail"):
                 bits.append(f"detail={_value(group.get('policy_detail'))}")
         if group.get("search_target_zone_id"):

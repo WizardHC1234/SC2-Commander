@@ -1,11 +1,37 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
 
 from ..core.config import SKILL_ROOT, canonical_strategy_folder
 from ..validation import validate_strategy_markdown
+
+
+def canonical_strategy_text(content: str) -> str:
+    """Normalize formatting that does not change a strategy's instructions."""
+
+    text = (
+        str(content or "")
+        .lstrip("\ufeff")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
+    lines = [line.rstrip() for line in text.split("\n")]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def strategy_content_hash(content: str) -> str:
+    """Return a stable hash unaffected by BOM, line endings, or trailing spaces."""
+
+    return hashlib.sha256(
+        canonical_strategy_text(content).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def output_dir_for_strategy(

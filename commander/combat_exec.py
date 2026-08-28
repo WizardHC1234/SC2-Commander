@@ -32,6 +32,7 @@ from commander.retreat_policy import (
     STATE_RETREATING,
     GroupRetreatState,
     effective_retreat_ratio,
+    preserve_blocked_offensive_command,
     retreat_confirmation_ready,
 )
 
@@ -91,6 +92,8 @@ class CombatControlAct(ActBase):
         self._last_scan_result_time: Optional[float] = None
         # Per-group auto-retreat machine states (see retreat_policy.py).
         self._retreat_states: Dict[str, GroupRetreatState] = {}
+        self._first_offensive_started = False
+        self._first_offensive_started_at: Optional[float] = None
 
     async def start(self, knowledge):
         await super().start(knowledge)
@@ -172,6 +175,9 @@ class CombatControlAct(ActBase):
                     move_type=MOVE_TYPE_BY_MOVEMENT_MODE[source.movement_mode],
                     retreat_ratio=source.retreat_ratio,
                 )
+            main_command = preserve_blocked_offensive_command(
+                self._retreat_states.get(main_id), main_command
+            )
             synced.append(main_command)
             follow = main_command
         else:
@@ -366,6 +372,7 @@ class CombatControlAct(ActBase):
             None,
         )
         if search_command is not None:
+            self._mark_offensive_started(search_command)
             # Endgame sweep: auto-retreat overrides do not apply.
             self._retreat_states.clear()
             self._execute_search_and_destroy(search_command)
@@ -376,6 +383,7 @@ class CombatControlAct(ActBase):
             units = self._current_groups.get(command.group_id)
             if units is None or not units.exists:
                 continue
+            self._mark_offensive_started(command)
             effective = self._advance_retreat_state(command, units)
             if effective.movement_mode == "regroup":
                 target = self._resolve_regroup_target(
@@ -437,6 +445,20 @@ class CombatControlAct(ActBase):
                 ),
             }
 
+    def _mark_offensive_started(self, command: ArmyGroupCommand) -> None:
+        """Persist that the main force has received its first offensive order."""
+
+        main_id = self._main_group_id or self.MAIN_GROUP_ID
+        if (
+            self._first_offensive_started
+            or command.group_id != main_id
+            or command.movement_mode
+            not in {*RETREAT_WATCHED_MODES, "search_and_destroy"}
+        ):
+            return
+        self._first_offensive_started = True
+        self._first_offensive_started_at = float(getattr(self.ai, "time", 0.0))
+
     # ------------------------------------------------------------------
     # auto-retreat state machine (native PlanZoneAttack-style: front-runner
     # local ratio, arrival-stop, hysteresis + time-based recovery). The
@@ -450,6 +472,24 @@ class CombatControlAct(ActBase):
     ) -> ArmyGroupCommand:
         """Advance one group's retreat machine and return the command to run."""
         group_id = command.group_id
+        incoming_command = command
+        existing_state = self._retreat_states.get(group_id)
+        command = preserve_blocked_offensive_command(existing_state, command)
+        if (
+            existing_state is not None
+            and existing_state.state == STATE_ACTIVE
+            and existing_state.original_command is not None
+            and command is incoming_command
+            and command.movement_mode in RETREAT_WATCHED_MODES
+            and (
+                command.movement_mode
+                != existing_state.original_command.movement_mode
+                or command.destination_zone_id
+                != existing_state.original_command.destination_zone_id
+            )
+        ):
+            # A new advancing objective deliberately replaces the recovered one.
+            existing_state.original_command = None
         if command.movement_mode not in RETREAT_WATCHED_MODES:
             self._retreat_states.pop(group_id, None)
             return command
@@ -505,7 +545,6 @@ class CombatControlAct(ActBase):
             timed_out = now - state.since >= RETREAT_TIME_CAP_SECONDS
             if local_ratio >= recover_ratio or timed_out:
                 state.state = STATE_ACTIVE
-                state.original_command = None
                 state.detail = ""
                 state.below_threshold_since = None
             else:
@@ -892,6 +931,9 @@ class CombatControlAct(ActBase):
                 if policy_state.original_command is not None:
                     state["blocked_mode"] = (
                         policy_state.original_command.movement_mode
+                    )
+                    state["blocked_destination_zone_id"] = (
+                        policy_state.original_command.destination_zone_id
                     )
             states.append(state)
         return states

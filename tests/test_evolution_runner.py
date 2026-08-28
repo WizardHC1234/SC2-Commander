@@ -18,6 +18,7 @@ from evolution.runner import (
 from evol_agent.core.types import EvolImprovement, EvolRunResult
 from evol_agent.core.checkpoint import CHECKPOINT_SCHEMA, PIPELINE_VERSION, EvolCheckpoint
 from evol_agent.core.types import BattleAnalysis, GameDigest
+from evol_agent.optimization.snapshot import strategy_content_hash
 
 
 def _batch(strategy: str, difficulty: str, wins: int, root: Path) -> BatchResult:
@@ -1175,6 +1176,143 @@ def test_policy_rejected_candidate_is_removed_only_from_run_strategies(
     outside.mkdir()
     assert not runner._discard_policy_rejected_candidate(outside)
     assert outside.exists()
+
+
+def test_strategy_content_hash_ignores_line_endings_and_trailing_spaces() -> None:
+    windows = "# Strategy\r\n\r\n- Attack with 20 Marines.  \r\n"
+    unix = "# Strategy\n\n- Attack with 20 Marines.\n"
+
+    assert strategy_content_hash(windows) == strategy_content_hash(unix)
+
+
+def test_historical_strategy_duplicate_is_rejected_before_matches(
+    tmp_path: Path,
+) -> None:
+    attempts = 0
+    runner: EvolutionRunner
+
+    def evolve(
+        champion: str,
+        batch: BatchResult,
+        experiences: list[object],
+    ) -> EvolRunResult:
+        nonlocal attempts
+        attempts += 1
+        candidate = runner.strategies_dir / f"marine_opt{attempts}"
+        candidate.mkdir(parents=True)
+        content = (
+            "# Marine\n\n- Attack with 20 Marines.\n"
+            if attempts == 1
+            else "# Marine\n\n- Attack with 16 Marines.\n"
+        )
+        (candidate / "strategy.md").write_text(content, encoding="utf-8")
+        return EvolRunResult(
+            ok=True,
+            message="OK",
+            output_dir=candidate,
+            candidate_hash=strategy_content_hash(content),
+        )
+
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="marine",
+            commander_model="model",
+            difficulties=("cheatvision",),
+            candidate_generation_retries=1,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=lambda *_args: _batch(
+            "marine", "cheatvision", 6, tmp_path
+        ),
+        candidate_generator=evolve,
+    )
+    historical_dir = tmp_path / "historical_marine"
+    historical_dir.mkdir()
+    (historical_dir / "strategy.md").write_bytes(
+        b"# Marine\r\n\r\n- Attack with 20 Marines.  \r\n"
+    )
+    historical = BatchResult(
+        name="historical_marine",
+        path=historical_dir,
+        strategy="marine",
+        difficulty="cheatvision",
+        wins=6,
+        draws=0,
+        losses=4,
+    )
+    state = runner._new_state()
+    runner._register_evidence(state, historical)
+
+    assert runner._analyze_champion(
+        state, "cheatvision", "marine", historical
+    )
+
+    assert attempts == 2
+    assert not (runner.strategies_dir / "marine_opt1").exists()
+    assert state["pending_candidate"]["strategy"] == "marine_opt2"
+    failure = state["candidate_generation_failures"][0]
+    assert failure["failure_reason"] == "historical_strategy_duplicate"
+    assert failure["duplicate_matches"][0]["strategy"] == "marine"
+    assert failure["duplicate_matches"][0]["win_rate"] == pytest.approx(0.6)
+
+
+def test_resumed_unplayed_historical_duplicate_is_rejected(
+    tmp_path: Path,
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="marine",
+            commander_model="model",
+            difficulties=("cheatvision",),
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    historical_dir = tmp_path / "historical_marine"
+    historical_dir.mkdir()
+    strategy_text = "# Marine\n\n- Attack with 20 Marines.\n"
+    (historical_dir / "strategy.md").write_text(
+        strategy_text, encoding="utf-8"
+    )
+    historical = BatchResult(
+        name="historical_marine",
+        path=historical_dir,
+        strategy="marine",
+        difficulty="cheatvision",
+        wins=6,
+        draws=0,
+        losses=4,
+    )
+    candidate = runner.strategies_dir / "marine_opt3"
+    candidate.mkdir()
+    (candidate / "strategy.md").write_text(strategy_text, encoding="utf-8")
+    state = runner._new_state()
+    state["champion_batch"] = historical.to_dict()
+    runner._register_evidence(state, historical)
+    pending = {
+        "strategy": "marine_opt3",
+        "strategy_dir": str(candidate),
+        "mutation_parent": "marine_opt1",
+        "comparison_champion": "marine_opt1",
+        "analysis_checkpoint_dir": "",
+    }
+    state["champion"] = "marine_opt1"
+    state["pending_candidate"] = pending
+
+    assert runner._reject_unplayed_pending_historical_duplicate(
+        state,
+        pending=pending,
+        difficulty="cheatvision",
+        champion="marine_opt1",
+    )
+
+    assert not candidate.exists()
+    assert state["pending_candidate"] is None
+    assert state["generation"] == 0
+    assert state["generation_search_restarts"][0]["source_action"] == (
+        "historical_strategy_duplicate"
+    )
 
 
 def test_completed_record_count_ignores_autosaves(tmp_path: Path) -> None:

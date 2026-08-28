@@ -46,6 +46,12 @@ STATE_ACTIVE = "active"
 STATE_RETREATING = "retreating"
 STATE_HOLDING = "holding"
 
+# These modes are also the runtime's own temporary retreat postures. If the LLM
+# repeats one of them while an automatic retreat is active, it must not silently
+# replace the recoverable offensive command. An explicit defensive_retreat or
+# panic_retreat still cancels the offensive normally.
+TRANSIENT_OVERRIDE_MODES = frozenset({"hold", "regroup"})
+
 
 @dataclass
 class GroupRetreatState:
@@ -65,6 +71,29 @@ class GroupRetreatState:
     support_power: float = 0.0
     enemy_power: float = 0.0
     observed_command_signature: str = ""
+
+
+def preserve_blocked_offensive_command(
+    state: Optional[GroupRetreatState],
+    incoming: ArmyGroupCommand,
+) -> ArmyGroupCommand:
+    """Keep a recoverable offensive through an automatic retreat.
+
+    Commander decisions are event driven, so a model may echo the observed
+    temporary hold/regroup posture after the runtime wakes it. Treating that echo
+    as a new strategic command discarded ``original_command`` and converted a
+    short tactical withdrawal into an indefinite rebuild loop. Preserve the
+    command through recovery until an advancing command selects a new objective or
+    an existing explicit retreat mode cancels the offensive intentionally.
+    """
+
+    if (
+        state is not None
+        and state.original_command is not None
+        and incoming.movement_mode in TRANSIENT_OVERRIDE_MODES
+    ):
+        return state.original_command
+    return incoming
 
 
 def clamp_retreat_ratio(value: float) -> float:

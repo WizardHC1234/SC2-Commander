@@ -166,9 +166,15 @@ def _normalize_summary_payload(
             "own_force_after",
             "own_reinforcement_after",
             "production_context_before",
+            "offensive_command_before",
             "runtime_override",
             "retreat_policy",
             "loss_timing",
+            "command_after_override",
+            "blocked_offensive_resumed",
+            "opening_gate_reapplied_after_commitment",
+            "regroup_delay_seconds",
+            "reengagement_time_s",
             "outcome",
         )
         major_engagements = [

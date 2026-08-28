@@ -133,14 +133,14 @@ def test_semantic_validation_allows_missing_winning_mechanism_audit() -> None:
     assert errors == []
 
 
-def test_failure_stage_scope_blocks_unselected_composition_change() -> None:
+def test_failure_stage_scope_allows_causally_selected_composition_change() -> None:
     payload = _semantic_payload()
     payload["failure_stage_scope_audit"] = {
         "failure_stage": "before_core_mechanism",
         "composition_changed": True,
-        "composition_change_allowed": False,
+        "composition_change_relation": "necessary_dependency",
         "retreat_policy_changed": False,
-        "retreat_change_allowed": False,
+        "retreat_change_relation": "none",
         "stage_scope_aligned": True,
         "reason": "The candidate adds a new unit before the selected failure is repaired.",
     }
@@ -150,13 +150,11 @@ def test_failure_stage_scope_blocks_unselected_composition_change() -> None:
         decision=_decision(
             plan={
                 "direction": "repair production timing",
-                "composition_change_allowed": False,
-                "retreat_change_allowed": False,
             }
         ),
     )
 
-    assert any("composition_change_allowed is false" in error for error in errors)
+    assert not any("composition scope" in error for error in errors)
 
 
 def test_failure_stage_scope_audit_is_advisory_for_new_scoped_decisions() -> None:
@@ -168,8 +166,6 @@ def test_failure_stage_scope_audit_is_advisory_for_new_scoped_decisions() -> Non
             },
             plan={
                 "direction": "repair production timing",
-                "composition_change_allowed": False,
-                "retreat_change_allowed": False,
                 "stage_scope_reason": "The selected mechanism does not change either lever.",
             },
         ),
@@ -178,14 +174,14 @@ def test_failure_stage_scope_audit_is_advisory_for_new_scoped_decisions() -> Non
     assert errors == []
 
 
-def test_failure_stage_scope_blocks_unselected_retreat_change() -> None:
+def test_failure_stage_scope_blocks_unrelated_retreat_change() -> None:
     payload = _semantic_payload()
     payload["failure_stage_scope_audit"] = {
         "failure_stage": "during_commitment_or_engagement",
         "composition_changed": False,
-        "composition_change_allowed": False,
+        "composition_change_relation": "none",
         "retreat_policy_changed": True,
-        "retreat_change_allowed": False,
+        "retreat_change_relation": "unrelated",
         "stage_scope_aligned": True,
         "reason": "The selected mechanism concerns production, not force preservation.",
     }
@@ -195,13 +191,11 @@ def test_failure_stage_scope_blocks_unselected_retreat_change() -> None:
         decision=_decision(
             plan={
                 "direction": "repair production timing",
-                "composition_change_allowed": False,
-                "retreat_change_allowed": False,
             }
         ),
     )
 
-    assert any("retreat_change_allowed is false" in error for error in errors)
+    assert any("without a causal role" in error for error in errors)
 
 
 def test_failure_stage_scope_allows_evidence_selected_composition_and_retreat_change() -> None:
@@ -209,9 +203,9 @@ def test_failure_stage_scope_allows_evidence_selected_composition_and_retreat_ch
     payload["failure_stage_scope_audit"] = {
         "failure_stage": "during_commitment_or_engagement",
         "composition_changed": True,
-        "composition_change_allowed": True,
+        "composition_change_relation": "implements_selected_hypothesis",
         "retreat_policy_changed": True,
-        "retreat_change_allowed": True,
+        "retreat_change_relation": "necessary_dependency",
         "stage_scope_aligned": True,
         "reason": "Repeated contact evidence selects both package and force-retention changes.",
     }
@@ -221,8 +215,6 @@ def test_failure_stage_scope_allows_evidence_selected_composition_and_retreat_ch
         decision=_decision(
             plan={
                 "direction": "repair the decisive engagement package",
-                "composition_change_allowed": True,
-                "retreat_change_allowed": True,
             }
         ),
     )
@@ -306,7 +298,6 @@ def test_empty_patches_are_rejected() -> None:
         decision=_decision(
             plan={
                 "direction": "Test a coordinated retreat revision.",
-                "retreat_change_allowed": True,
             }
         ),
         patches=[],
@@ -329,6 +320,28 @@ def test_unknown_paragraph_is_rejected() -> None:
         parent_document=document,
     )
     assert any("unknown strategy paragraph: fake_section" in item for item in errors)
+
+
+def test_goal_wording_is_not_structurally_locked() -> None:
+    document = StrategyDocument.parse(
+        "# Summary\nA concentrated timing attack.\n\n"
+        "# Details\n- Strategy Style: Use a concentrated timing attack.\n"
+        "- Main Attack Gate: Attack with a gathered force.\n"
+    )
+    errors = validate_strategy_patch_structure(
+        decision=_decision(),
+        patches=[
+            _patch(
+                document,
+                "strategy_style",
+                "Use a concentrated Marine-Tank timing attack with sustained reinforcements.",
+                "The selected hypothesis clarifies how the existing combat style continues after contact.",
+            )
+        ],
+        parent_document=document,
+    )
+
+    assert errors == []
 
 
 def test_duplicate_target_is_rejected() -> None:
@@ -424,7 +437,6 @@ def test_five_or_more_necessary_patches_are_allowed() -> None:
         decision=_decision(
             plan={
                 "direction": "Test a coordinated retreat revision.",
-                "retreat_change_allowed": True,
             }
         ),
         patches=patches,
@@ -457,34 +469,23 @@ def test_unrelated_scouting_patch_is_rejected(monkeypatch) -> None:
     assert any("scouting and scanning behavior is Commander-owned" in item for item in errors)
 
 
-def test_first_attack_change_cannot_synchronize_recovery_without_permission() -> None:
-    document = StrategyDocument.parse(TANK_STRATEGY)
-    patches = [
-        _patch(
-            document,
-            "main_attack_gate",
-            "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
-            "This paragraph defines the readiness threshold being tested.",
-        ),
-        _patch(
-            document,
-            "recovery_and_cleanup",
-            "If progress stalls, withdraw and rebuild to 36 Marines and 8 Siege Tanks.",
-            "This paragraph repeats the old readiness threshold and must stay consistent.",
-        ),
-        _patch(
-            document,
-            "production",
-            "Before the first attack, prioritize Factories and Siege Tanks needed for the revised gate.",
-            "Production priority must support the new readiness rule.",
-        ),
-    ]
-    errors = validate_strategy_patch_structure(
-        decision=_decision(),
-        patches=patches,
-        parent_document=document,
-    )
-    assert any("post-engagement behavior may change only" in item for item in errors)
+def test_first_attack_gate_cannot_be_copied_into_recovery_without_evidence() -> None:
+    payload = _semantic_payload()
+    payload["failure_stage_scope_audit"] = {
+        "failure_stage": "before_core_mechanism",
+        "composition_changed": False,
+        "composition_change_relation": "none",
+        "retreat_policy_changed": True,
+        "retreat_change_relation": "unrelated",
+        "opening_gate_reused_as_recovery_gate": True,
+        "opening_gate_reuse_supported": False,
+        "stage_scope_aligned": True,
+        "reason": "The candidate copied a larger opening count into recovery only for consistency.",
+    }
+
+    errors = _blocking_semantic_errors(payload, decision=_decision())
+
+    assert any("reuses the first-attack gate" in item for item in errors)
 
 
 def test_conflicting_readiness_thresholds_are_rejected(monkeypatch) -> None:
@@ -888,7 +889,19 @@ def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
         nonlocal optimizer_calls
         calls.append(prompt)
         if "You are validating a strategy patch" in prompt:
-            return _semantic_payload()
+            if optimizer_calls == 1:
+                return {
+                    "valid": False,
+                    "errors": [
+                        {
+                            "type": "internal_inconsistency",
+                            "location": "Recovery and Cleanup",
+                            "description": "candidate reuses the first-attack gate as a recovery gate without post-contact evidence",
+                            "severity": "blocking",
+                        }
+                    ],
+                }
+            return {"valid": True, "errors": []}
         optimizer_calls += 1
         patches = [
             _patch(
@@ -908,7 +921,7 @@ def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
                 )
             )
         else:
-            assert "post-engagement behavior may change only" in prompt
+            assert "reuses the first-attack gate" in prompt
         return {
             "action": "draft_candidate" if optimizer_calls == 1 else "revise_candidate",
             "patches": patches,
@@ -928,7 +941,7 @@ def test_validator_errors_drive_optimizer_retry(monkeypatch) -> None:
     )
     assert result.ok
     assert improvement is not None
-    assert any(item.get("action") == "strategy_patch_structure" for item in events)
+    assert any(item.get("action") == "strategy_patch_semantics" for item in events)
     assert "36 Marines and 8 Siege Tanks" in next(
         item.value
         for item in StrategyDocument.parse(improvement.files["strategy.md"]).details

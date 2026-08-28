@@ -1012,7 +1012,7 @@ def _auto_retreat_runtime_decision(evidence: list[str]) -> dict:
     }
 
 
-def test_auto_retreat_runtime_action_rejects_global_or_reinforcement_attribution() -> None:
+def test_auto_retreat_runtime_action_uses_semantic_attribution_without_token_gate() -> None:
     payload, error = _normalize_cross_match_decision(
         _auto_retreat_runtime_decision(
             [
@@ -1023,12 +1023,12 @@ def test_auto_retreat_runtime_action_rejects_global_or_reinforcement_attribution
         strategy_name="tank",
     )
 
-    assert payload is None
-    assert "main force/group_0" in error
-    assert "override_before_losses" in error
+    assert error == ""
+    assert payload is not None
+    assert payload["next_action"] == "inspect_runtime"
 
 
-def test_coerced_auto_retreat_runtime_action_cannot_bypass_attribution_gate() -> None:
+def test_coerced_auto_retreat_runtime_action_does_not_require_exact_tokens() -> None:
     decision = _auto_retreat_runtime_decision(
         [
             "Game 2 @ 430s: global army inventory changed during group_1 retreat",
@@ -1040,8 +1040,9 @@ def test_coerced_auto_retreat_runtime_action_cannot_bypass_attribution_gate() ->
 
     payload, error = _normalize_cross_match_decision(decision, strategy_name="tank")
 
-    assert payload is None
-    assert "main force/group_0" in error
+    assert error == ""
+    assert payload is not None
+    assert payload["next_action"] == "inspect_runtime"
 
 
 def test_auto_retreat_runtime_action_accepts_repeated_main_force_causal_evidence() -> None:

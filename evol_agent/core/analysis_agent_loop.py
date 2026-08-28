@@ -619,8 +619,6 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
         window_tradeoff_evidence: list[str] = []
         why_window_remains_favorable = ""
         preservation_checks: list[dict[str, Any]] = []
-        composition_change_allowed = False
-        retreat_change_allowed = False
         stage_scope_evidence: list[str] = []
         stage_scope_reason = ""
         strategy_area_audit: list[dict[str, Any]] = []
@@ -665,8 +663,6 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
         why_window_remains_favorable = str(
             raw.get("why_window_remains_favorable") or ""
         ).strip()
-        composition_change_allowed = bool(raw.get("composition_change_allowed"))
-        retreat_change_allowed = bool(raw.get("retreat_change_allowed"))
         stage_scope_evidence = _clean_strings(
             raw.get("stage_scope_evidence"), limit=6
         )
@@ -739,8 +735,6 @@ def _normalize_plan(raw: Any) -> tuple[dict[str, Any] | None, str]:
         "window_tradeoff_evidence": window_tradeoff_evidence,
         "why_window_remains_favorable": why_window_remains_favorable,
         "preservation_checks": preservation_checks,
-        "composition_change_allowed": composition_change_allowed,
-        "retreat_change_allowed": retreat_change_allowed,
         "stage_scope_evidence": stage_scope_evidence,
         "stage_scope_reason": stage_scope_reason,
         "strategy_area_audit": strategy_area_audit,
@@ -1716,41 +1710,23 @@ def _runtime_attribution_error(
     hypothesis: str,
     failure_mode_analysis: dict[str, Any] | None,
 ) -> str:
-    """Require group-level causal evidence before escalating auto-retreat."""
-    if next_action != "inspect_runtime":
-        return ""
-    evidence = _clean_strings((priority or {}).get("evidence"), limit=20)
-    covered = _clean_strings(
-        (failure_mode_analysis or {}).get("covered_failures"), limit=20
-    )
-    combined = " ".join([action_reason, hypothesis, *evidence, *covered]).casefold()
-    if "auto-retreat" not in combined and "auto retreat" not in combined:
-        return ""
+    """Leave causal attribution to the structured semantic analysis.
 
-    causal_items: list[str] = []
-    for item in [*evidence, *covered]:
-        folded = item.casefold()
-        identifies_main_force = (
-            "main_force" in folded
-            or "main force" in folded
-            or "group_0" in folded
-        )
-        establishes_order = (
-            "loss_timing=override_before_losses" in folded
-            or "override_before_losses" in folded
-            or "retreat before losses" in folded
-            or "retreat preceded losses" in folded
-        )
-        if identifies_main_force and establishes_order:
-            causal_items.append(item)
-    if len({item.casefold() for item in causal_items}) < 2:
-        return (
-            "inspect_runtime based on auto-retreat requires at least two distinct "
-            "match evidence items that identify the affected main force/group_0 "
-            "and explicitly establish loss_timing=override_before_losses; a "
-            "reinforcement-group retreat or a global army inventory at the same "
-            "timestamp does not establish a runtime-caused main-force collapse"
-        )
+    Older versions searched free-form evidence for exact tokens such as
+    ``group_0`` and ``override_before_losses``. Equivalent descriptions were
+    rejected even when the trajectory established the same causal sequence, and
+    post-retreat continuity failures could never pass the gate. The prompts and
+    match-summary schema now require structured group, timing, command-transition,
+    and re-engagement evidence, so a character-level permission gate is both
+    redundant and brittle.
+    """
+    del (
+        next_action,
+        action_reason,
+        priority,
+        hypothesis,
+        failure_mode_analysis,
+    )
     return ""
 
 
@@ -2000,24 +1976,7 @@ def _normalize_cross_match_decision(
         elif require_outcome_contract and not plan.get("stage_scope_reason"):
             return None, (
                 "propose_strategy_patch requires plan.stage_scope_reason for "
-                "composition and retreat permissions"
-            )
-        elif (
-            require_outcome_contract
-            and (
-                plan.get("composition_change_allowed")
-                or plan.get("retreat_change_allowed")
-            )
-        ) and len(
-            {
-                str(item).strip().casefold()
-                for item in (plan.get("stage_scope_evidence") or [])
-                if str(item).strip()
-            }
-        ) < 2:
-            return None, (
-                "composition or retreat changes require at least two distinct "
-                "plan.stage_scope_evidence references"
+                "the selected intervention's causal scope"
             )
         elif require_outcome_contract and not outcome_contrast.get("preservation_rule"):
             return None, (

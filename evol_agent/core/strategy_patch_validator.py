@@ -217,9 +217,17 @@ def build_strategy_patch_validation_prompt(
     prior_experiences: list[Any] | None = None,
     contact_timing_report: dict[str, Any] | None = None,
 ) -> str:
-    return f"""You are validating a strategy patch as a narrow hard-error reviewer for an SC2 natural-language strategy. Do not judge whether the strategy is optimal, whether its explanation is detailed enough, or whether it resembles a prior experiment.
+    return f"""You are validating a strategy patch represented as a complete SC2 natural-language strategy revision. Act as a narrow semantic and executability reviewer. Do not re-rank hypotheses, propose a better strategy, require extra detail, or reject a candidate merely because it changes goal wording, unit composition, or retreat behavior.
 
 {HARD_VALIDATION_POLICY}
+
+The selected evidence-supported intervention is authoritative:
+{render_optimizer_decision(decision)}
+
+Apply three additional consistency checks only:
+- Every material change must implement the selected hypothesis or be a necessary dependency of it; an unrelated second objective is blocking.
+- The overall timing and manner of gaining advantage must remain the selected combat style unless the intervention explicitly and evidentially revises it. Exact goal wording, unit roster, quantities, production, and retreat rules are not protected fields.
+- Main Attack Gate is only for the first planned commitment. Recovery and Cleanup may change when post-contact evidence or the selected hypothesis requires it, but copying or strengthening the opening gate in recovery merely for numerical or textual consistency is a blocking internal inconsistency.
 
 Runtime capabilities:
 {json_compact_block(capability_manifest or {})}
@@ -236,7 +244,7 @@ Candidate strategy.md:
 Return JSON only:
 {{"valid":true,"errors":[{{"type":"unsupported_action|missing_dependency|internal_inconsistency|supply_cap","location":"strategy paragraph","description":"hard non-executable error","severity":"blocking"}}]}}
 
-Use an empty errors list when the candidate is executable. Strategic uncertainty, missing audit fields, a debatable unit choice, a timing tradeoff, or similarity to history is non-blocking.
+Use an empty errors list when the candidate is executable and is a coherent implementation of the selected intervention. Strategic uncertainty, missing audit fields, a debatable unit choice, a supported timing tradeoff, or similarity to history is non-blocking.
 """
     compact_patches = [
         {
@@ -325,14 +333,14 @@ Information gathering may support a named attack or cleanup decision but must no
 become a hidden prerequisite for an otherwise ready force.
 
 Perform a failure-stage scope audit. Compare failure_mode_analysis.failure_stage,
-plan.composition_change_allowed, plan.retreat_change_allowed, the complete parent,
-and the complete candidate. A unit may be introduced, removed, or made a materially
-different share only when composition permission is true. An explicit retreat rule
-or any Recovery and Cleanup behavior may change only when retreat permission is true. Quantity changes
-that keep the same unit concept are not automatically composition changes. Reject
-an unauthorized change even when it sounds generally useful. When permission is
-true, verify that the change implements the selected hypothesis rather than adding
-a second objective.
+plan.strategy_area_audit, the selected hypothesis, the complete parent, and the
+complete candidate. Composition and retreat/recovery are ordinary evolvable strategy
+areas: do not require a separate permission flag. For each material change, decide
+whether it implements the selected hypothesis, is a necessary dependency of that
+hypothesis, or is an unrelated second objective. Reject only unrelated or
+stage-inconsistent changes. In particular, detect when a first-attack gate is copied
+into Recovery and Cleanup without post-contact evidence; do not infer that matching
+numbers across those stages is inherently consistent.
 
 Perform a contact-window comparison using the deterministic timing report and the
 recorded contact evidence. The program reports the earliest resource-feasible time
@@ -464,9 +472,11 @@ Return JSON only:
   "failure_stage_scope_audit": {{
     "failure_stage": "before_core_mechanism|during_commitment_or_engagement|after_successful_engagement|mixed",
     "composition_changed": false,
-    "composition_change_allowed": false,
+    "composition_change_relation": "none|implements_selected_hypothesis|necessary_dependency|unrelated",
     "retreat_policy_changed": false,
-    "retreat_change_allowed": false,
+    "retreat_change_relation": "none|implements_selected_hypothesis|necessary_dependency|unrelated",
+    "opening_gate_reused_as_recovery_gate": false,
+    "opening_gate_reuse_supported": true,
     "stage_scope_aligned": true,
     "reason": "semantic parent-candidate comparison against the selected failure stage"
   }},
@@ -734,9 +744,6 @@ def validate_strategy_patch_structure(
         errors.append("cross-match hypothesis is missing")
 
     detail_ids = {item.id for item in parent_document.details}
-    plan = decision.get("plan") if isinstance(decision.get("plan"), dict) else {}
-    retreat_change_allowed = bool(plan.get("retreat_change_allowed"))
-    protected_goal_fields = {"strategy_style", "core_objective", "key_principle"}
     seen: set[str] = set()
     for patch in patches:
         if not isinstance(patch, dict):
@@ -757,15 +764,6 @@ def validate_strategy_patch_structure(
             )
         if target not in detail_ids and target != "summary":
             errors.append(f"unknown strategy paragraph: {target}")
-        if target in protected_goal_fields:
-            errors.append(
-                f"{target}: Goal fields define strategy identity and must remain unchanged"
-            )
-        if target == "recovery_and_cleanup" and not retreat_change_allowed:
-            errors.append(
-                "recovery_and_cleanup: post-engagement behavior may change only when "
-                "plan.retreat_change_allowed is true"
-            )
         if target in seen:
             errors.append(f"duplicate patch target: {target}")
         seen.add(target)
@@ -940,27 +938,38 @@ def _style_and_history_contract_errors(
             )
 
     scope = payload.get("failure_stage_scope_audit")
-    plan = (decision or {}).get("plan") or {}
     failure_mode = (decision or {}).get("failure_mode_analysis") or {}
     expected_stage = str(failure_mode.get("failure_stage") or "").strip().lower()
     if isinstance(scope, dict):
-        composition_allowed = bool(plan.get("composition_change_allowed"))
-        retreat_allowed = bool(plan.get("retreat_change_allowed"))
         reported_stage = str(scope.get("failure_stage") or "").strip().lower()
         if expected_stage and reported_stage and reported_stage != expected_stage:
             errors.append(
                 "decision_grounding — failure-stage scope — semantic audit used a "
                 "different failure stage from the Cross-match Decision"
             )
-        if bool(scope.get("composition_changed")) and not composition_allowed:
+        composition_relation = str(
+            scope.get("composition_change_relation") or "none"
+        ).strip().lower()
+        if bool(scope.get("composition_changed")) and composition_relation == "unrelated":
             errors.append(
                 "unrelated_patch — composition scope — candidate changes the unit "
-                "concept although composition_change_allowed is false"
+                "concept without a causal role in the selected hypothesis"
             )
-        if bool(scope.get("retreat_policy_changed")) and not retreat_allowed:
+        retreat_relation = str(
+            scope.get("retreat_change_relation") or "none"
+        ).strip().lower()
+        if bool(scope.get("retreat_policy_changed")) and retreat_relation == "unrelated":
             errors.append(
                 "unrelated_patch — retreat scope — candidate changes retreat policy "
-                "although retreat_change_allowed is false"
+                "without a causal role in the selected hypothesis"
+            )
+        if (
+            scope.get("opening_gate_reused_as_recovery_gate") is True
+            and scope.get("opening_gate_reuse_supported") is not True
+        ):
+            errors.append(
+                "internal_inconsistency — recovery scope — candidate reuses the "
+                "first-attack gate as a recovery gate without post-contact evidence"
             )
         if scope.get("stage_scope_aligned") is False:
             errors.append(

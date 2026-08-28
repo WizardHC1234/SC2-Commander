@@ -23,7 +23,11 @@ from .run_recorder import reset_run_events
 from .types import EvolRunRequest, EvolRunResult, ValidationResult
 from ..analysis.record_reader import find_record_jsons, group_records_by_strategy, load_skill_texts
 from ..optimization.logs import save_evol_logs
-from ..optimization.snapshot import output_dir_for_strategy, save_snapshot
+from ..optimization.snapshot import (
+    output_dir_for_strategy,
+    save_snapshot,
+    strategy_content_hash,
+)
 
 
 _ANALYSIS_REPLAN_ERROR_MARKERS = (
@@ -584,9 +588,7 @@ class EvolAgent:
             )
         else:
             out_dir = output_dir_for_strategy(strategy_name, race)
-        candidate_hash = hashlib.sha256(
-            improvement.files["strategy.md"].encode("utf-8")
-        ).hexdigest()[:16]
+        candidate_hash = strategy_content_hash(improvement.files["strategy.md"])
         validation_fallback = improvement.analysis.get("validation_fallback")
         allow_validation_warning = bool(
             isinstance(validation_fallback, dict)

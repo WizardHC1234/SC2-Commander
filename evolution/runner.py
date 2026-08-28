@@ -17,7 +17,10 @@ from evol_agent.core.checkpoint import PIPELINE_VERSION, load_checkpoint, stage_
 from evol_agent.core.config import STRATEGY_ROOT_ENV, canonical_strategy_folder, resolve_skill_dir
 from evol_agent.core.experiment_audit import audit_experiment
 from evol_agent.core.types import EvolRunRequest, EvolRunResult
-from evol_agent.optimization.snapshot import output_dir_for_strategy
+from evol_agent.optimization.snapshot import (
+    output_dir_for_strategy,
+    strategy_content_hash,
+)
 from .feedback import (
     combine_batch_evidence,
     compare_batch_evidence,
@@ -1666,6 +1669,136 @@ class EvolutionRunner:
             candidate_dir.unlink()
         return True
 
+    def _historical_strategy_duplicate(
+        self,
+        state: dict[str, Any],
+        *,
+        candidate_dir: Path,
+        current_difficulty: str,
+    ) -> dict[str, Any] | None:
+        """Find an evaluated historical strategy with identical normalized text."""
+
+        candidate_path = Path(candidate_dir) / "strategy.md"
+        if not candidate_path.is_file():
+            return None
+        candidate_hash = strategy_content_hash(
+            candidate_path.read_text(encoding="utf-8-sig")
+        )
+        matches: list[dict[str, Any]] = []
+        pool = state.get("evidence_pool") or {}
+        for difficulty, by_strategy in pool.items():
+            if not isinstance(by_strategy, dict):
+                continue
+            for strategy, raw_entries in by_strategy.items():
+                entries = [item for item in raw_entries if isinstance(item, dict)]
+                if not entries:
+                    continue
+                batch_dirs = [Path(str(item.get("path") or "")) for item in entries]
+                try:
+                    historical_text = self._read_strategy_text(
+                        str(strategy), batch_dirs=batch_dirs
+                    )
+                except (OSError, ValueError):
+                    continue
+                if strategy_content_hash(historical_text) != candidate_hash:
+                    continue
+                wins = sum(int(item.get("wins") or 0) for item in entries)
+                draws = sum(int(item.get("draws") or 0) for item in entries)
+                losses = sum(int(item.get("losses") or 0) for item in entries)
+                games = wins + draws + losses
+                matches.append(
+                    {
+                        "strategy": str(strategy),
+                        "difficulty": str(difficulty),
+                        "wins": wins,
+                        "draws": draws,
+                        "losses": losses,
+                        "games": games,
+                        "win_rate": wins / games if games else 0.0,
+                    }
+                )
+        if not matches:
+            return None
+        matches.sort(
+            key=lambda item: (
+                str(item.get("difficulty") or "") != current_difficulty,
+                str(item.get("strategy") or ""),
+            )
+        )
+        return {"candidate_hash": candidate_hash, "matches": matches}
+
+    @staticmethod
+    def _historical_duplicate_feedback(duplicate: dict[str, Any]) -> str:
+        closest = duplicate["matches"][0]
+        return (
+            "analysis_replan_required: generated strategy duplicates the "
+            f"evaluated historical strategy {closest['strategy']} "
+            f"(difficulty={closest['difficulty']}, result="
+            f"{closest['wins']}-{closest['draws']}-{closest['losses']}, "
+            f"win_rate={closest['win_rate']:.3f}). Select a genuinely different "
+            "evidence-supported intervention; do not restore an earlier complete "
+            "strategy document."
+        )
+
+    def _reject_unplayed_pending_historical_duplicate(
+        self,
+        state: dict[str, Any],
+        *,
+        pending: dict[str, Any],
+        difficulty: str,
+        champion: str,
+    ) -> bool:
+        """Reject a duplicate restored from state only when no match has begun."""
+
+        candidate = str(pending.get("strategy") or "")
+        if not candidate or self._analysis_games(
+            state, difficulty=difficulty, strategy=candidate
+        ):
+            return False
+        candidate_batch_dir = self.records_root / self._batch_name(
+            int(state.get("generation") or 0), "cand", difficulty
+        )
+        if completed_record_count(candidate_batch_dir, strategy=candidate):
+            return False
+        candidate_dir = Path(str(pending.get("strategy_dir") or ""))
+        duplicate = self._historical_strategy_duplicate(
+            state,
+            candidate_dir=candidate_dir,
+            current_difficulty=difficulty,
+        )
+        if duplicate is None:
+            return False
+        message = self._historical_duplicate_feedback(duplicate)
+        removed = self._discard_policy_rejected_candidate(candidate_dir)
+        state.setdefault("candidate_generation_failures", []).append(
+            {
+                "kind": "candidate_generation_failure",
+                "failure_reason": "historical_strategy_duplicate",
+                "generation": int(state.get("generation") or 0),
+                "attempt": 0,
+                "max_attempts": self.config.candidate_generation_retries + 1,
+                "difficulty": difficulty,
+                "parent": str(pending.get("mutation_parent") or champion),
+                "comparison_champion": champion,
+                "message": message,
+                "candidate_hash": duplicate["candidate_hash"],
+                "duplicate_matches": duplicate["matches"],
+                "candidate_removed": removed,
+                "checkpoint_dir": str(
+                    pending.get("analysis_checkpoint_dir") or ""
+                ),
+                "created_at": datetime.now().isoformat(),
+            }
+        )
+        return self._restart_generation_search(
+            state,
+            difficulty=difficulty,
+            champion=champion,
+            reason=message,
+            source_action="historical_strategy_duplicate",
+            checkpoint_dir=pending.get("analysis_checkpoint_dir"),
+        )
+
     def _batch_name(self, generation: int, role: str, difficulty: str = "") -> str:
         # Include difficulty so a mastered champion baseline is not reused as
         # the next curriculum level (same generation/role, different AI).
@@ -2171,6 +2304,13 @@ class EvolutionRunner:
                 if not self._analyze_champion(state, difficulty, champion, champion_batch):
                     break
                 continue
+            if self._reject_unplayed_pending_historical_duplicate(
+                state,
+                pending=pending,
+                difficulty=difficulty,
+                champion=champion,
+            ):
+                continue
 
             self._evaluate_and_commit_experiment(
                 state,
@@ -2272,6 +2412,57 @@ class EvolutionRunner:
                 checkpoint_dir=candidate_result.checkpoint_dir,
             )
             if candidate_result.ok and candidate_result.output_dir is not None:
+                duplicate = self._historical_strategy_duplicate(
+                    state,
+                    candidate_dir=candidate_result.output_dir,
+                    current_difficulty=difficulty,
+                )
+                if duplicate is not None:
+                    closest = duplicate["matches"][0]
+                    message = self._historical_duplicate_feedback(duplicate)
+                    removed = self._discard_policy_rejected_candidate(
+                        candidate_result.output_dir
+                    )
+                    failure = {
+                        "kind": "candidate_generation_failure",
+                        "failure_reason": "historical_strategy_duplicate",
+                        "generation": int(state["generation"]),
+                        "attempt": attempt,
+                        "max_attempts": total_attempts,
+                        "difficulty": difficulty,
+                        "parent": search_parent,
+                        "comparison_champion": champion,
+                        "message": message,
+                        "candidate_hash": duplicate["candidate_hash"],
+                        "duplicate_matches": duplicate["matches"],
+                        "candidate_removed": removed,
+                        "checkpoint_dir": str(candidate_result.checkpoint_dir or ""),
+                        "created_at": datetime.now().isoformat(),
+                    }
+                    state.setdefault("candidate_generation_failures", []).append(
+                        failure
+                    )
+                    checkpoint_value = str(candidate_result.checkpoint_dir or resume_value)
+                    state["candidate_resume_dir"] = checkpoint_value
+                    retry_feedback.append(message)
+                    self._save_state(state)
+                    print(
+                        "EvolAgent rejected an unplayed historical-strategy duplicate; "
+                        f"regenerating ({attempt}/{total_attempts}): "
+                        f"{closest['strategy']} at {closest['difficulty']}",
+                        flush=True,
+                    )
+                    if attempt < total_attempts:
+                        resume_value = checkpoint_value
+                        continue
+                    candidate_result = EvolRunResult(
+                        ok=False,
+                        message=message,
+                        checkpoint_dir=candidate_result.checkpoint_dir,
+                        strategy_name=search_parent,
+                        race=self.config.race,
+                    )
+                    break
                 state["candidate_resume_dir"] = None
                 break
             if (

@@ -2,13 +2,20 @@
 
 from commander.retreat_policy import (
     DEFAULT_RETREAT_RATIO,
+    GroupRetreatState,
     RECOVER_MARGIN,
     RETREAT_MAX,
     RETREAT_MIN,
+    STATE_ACTIVE,
+    STATE_RETREATING,
     clamp_retreat_ratio,
     effective_retreat_ratio,
+    preserve_blocked_offensive_command,
     retreat_confirmation_ready,
 )
+from commander.combat_policy import ArmyGroupCommand
+from commander.combat_policy import ArmyControlPolicy
+from commander.combat_exec import CombatControlAct
 from commander.tools import apply_tool_calls, _parse_retreat_ratio
 
 
@@ -161,3 +168,85 @@ def test_catastrophic_ratio_retreats_immediately():
         below_threshold_since=100.0,
         effective_ratio_value=0.1,
     ) is True
+
+
+def _army_command(mode: str, zone: str = "zone_15") -> ArmyGroupCommand:
+    move_type = {
+        "assault": "Assault",
+        "push": "Push",
+        "hold": "Hold",
+        "regroup": "ReGroup",
+        "defensive_retreat": "DefensiveRetreat",
+    }[mode]
+    return ArmyGroupCommand(
+        group_id="group_0",
+        destination_zone_id=zone,
+        movement_mode=mode,
+        move_type=move_type,
+    )
+
+
+def test_temporary_hold_does_not_replace_blocked_offensive() -> None:
+    original = _army_command("assault")
+    state = GroupRetreatState(
+        state=STATE_RETREATING,
+        original_command=original,
+    )
+
+    assert preserve_blocked_offensive_command(
+        state, _army_command("hold", "zone_1")
+    ) is original
+
+
+def test_cached_regroup_does_not_replace_offensive_after_recovery() -> None:
+    original = _army_command("assault")
+    state = GroupRetreatState(
+        state=STATE_ACTIVE,
+        original_command=original,
+    )
+
+    assert preserve_blocked_offensive_command(
+        state, _army_command("regroup", "zone_1")
+    ) is original
+
+
+def test_explicit_retreat_can_cancel_blocked_offensive() -> None:
+    original = _army_command("assault")
+    explicit = _army_command("defensive_retreat", "zone_1")
+    state = GroupRetreatState(
+        state=STATE_RETREATING,
+        original_command=original,
+    )
+
+    assert preserve_blocked_offensive_command(state, explicit) is explicit
+
+
+def test_policy_sync_keeps_reinforcements_on_blocked_offensive() -> None:
+    original = _army_command("assault")
+    act = object.__new__(CombatControlAct)
+    act._current_groups = {"group_0": object(), "group_1": object()}
+    act._main_group_id = "group_0"
+    act._retreat_states = {
+        "group_0": GroupRetreatState(
+            state=STATE_RETREATING,
+            original_command=original,
+        )
+    }
+    incoming = ArmyControlPolicy(
+        commands=[
+            _army_command("hold", "zone_1"),
+            ArmyGroupCommand(
+                group_id="group_1",
+                destination_zone_id="zone_1",
+                movement_mode="regroup",
+                move_type="ReGroup",
+            ),
+        ]
+    )
+
+    synced = act._sync_policy_with_groups(incoming)
+
+    assert [(item.group_id, item.movement_mode, item.destination_zone_id) for item in synced.commands] == [
+        ("group_0", "assault", "zone_15"),
+        ("group_1", "assault", "zone_15"),
+    ]

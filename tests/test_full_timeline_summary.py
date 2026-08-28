@@ -998,8 +998,6 @@ def _propose_decision(**overrides) -> dict:
                     "evidence": ["Game 1 @ 620s"],
                 }
             ],
-            "composition_change_allowed": False,
-            "retreat_change_allowed": False,
             "stage_scope_evidence": [],
             "stage_scope_reason": (
                 "The failure is at first contact, but the selected mechanism changes "
@@ -1215,9 +1213,8 @@ def _verified_knowledge_run() -> dict:
     }
 
 
-def test_true_composition_or_retreat_permission_requires_repeated_stage_evidence() -> None:
+def test_intervention_scope_does_not_require_boolean_permission_or_two_references() -> None:
     decision = _propose_decision()
-    decision["plan"]["retreat_change_allowed"] = True
     decision["plan"]["stage_scope_evidence"] = [
         "Game 2 @ 430s: retreat fires after the main force is already broken"
     ]
@@ -1228,21 +1225,10 @@ def test_true_composition_or_retreat_permission_requires_repeated_stage_evidence
         require_outcome_contract=True,
     )
 
-    assert payload is None
-    assert "at least two distinct" in error
-
-    decision["plan"]["stage_scope_evidence"].append(
-        "Game 5 @ 510s: the same late retreat leaves no force to regroup"
-    )
-    payload, error = _normalize_cross_match_decision(
-        decision,
-        strategy_name="tank",
-        require_outcome_contract=True,
-    )
-
     assert error == ""
     assert payload is not None
-    assert payload["plan"]["retreat_change_allowed"] is True
+    assert "retreat_change_allowed" not in payload["plan"]
+    assert "composition_change_allowed" not in payload["plan"]
 
 
 def test_round2_prompt_reuses_discovery_findings() -> None:

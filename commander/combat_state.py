@@ -320,6 +320,12 @@ def collect_army_control_state(act: Any) -> Dict[str, Any]:
         "army_advantage": _advantage_label(power_ratio, enemy_power),
         "army_nearest_zone": nearest_zone,
         "army_position": _point_text(army_position),
+        "first_offensive_started": bool(
+            getattr(act, "_first_offensive_started", False)
+        ),
+        "first_offensive_started_at": getattr(
+            act, "_first_offensive_started_at", None
+        ),
         "available_zones": available_zones,
         "army_groups": army_groups,
         "own_lost_minerals": own_lost_minerals,

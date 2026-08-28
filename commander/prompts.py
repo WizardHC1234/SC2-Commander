@@ -60,7 +60,7 @@ Evidence:
 
 Attack gates vs production ceilings:
 - An attack threshold only opens the offensive; it is not the final train_*.to_count. After the gate, retain or raise the strategy's ongoing production targets. Do not invent unrelated composition.
-- Main Attack Gate applies only to the first planned attack. Once that attack has been issued, never reuse the opening threshold as a recovery gate and never invent a stricter replacement threshold from enemy composition. Follow Engagement and Reinforcement and Recovery and Cleanup for later decisions.
+- Main Attack Gate applies only while [Combat Execution] reports first_offensive_started=no. Once it becomes yes, never reuse the opening threshold as a recovery gate and never invent a stricter replacement threshold from enemy composition. Follow Engagement and Reinforcement and Recovery and Cleanup for later decisions.
 - Scouting and Scans support a named attack or cleanup decision. Execute them in parallel when possible; never let optional information postpone an attack whose explicit Main Attack Gate is already satisfied.
 - When a large bank and free supply coexist with sparse or idle queues, first restore missing strategy-required production capacity, then sustain or raise strategy-permitted core-unit targets within 200 supply.
 
@@ -99,7 +99,7 @@ move_group:
   - harass: normal Terran attack-move, not worker-hunting or enemy-army avoidance; use only for an explicit dedicated harasser.
   - defensive_retreat: withdraw toward an own zone while firing. panic_retreat: escape without stopping to fight.
   - search_and_destroy: runtime combines idle combat groups, attacks visible structures first, then sweeps expansions; it overrides other movement modes.
-- Optional retreat_ratio=0.3-1.5 (default 0.6) for assault/push/harass/contain: lower accepts more losses, higher disengages earlier. Runtime temporarily overrides a losing group and can resume its blocked offensive command after recovery. When [Combat Execution] reports source=auto_retreat with a blocked advancing mode, do not overwrite that recoverable command with explicit hold or retreat unless the strategy's observable recovery condition requires ending the offensive. After a completed recovery, do not repeat a demonstrably losing assault unchanged.
+- Optional retreat_ratio=0.3-1.5 (default 0.6) for assault/push/harass/contain: lower accepts more losses, higher disengages earlier. Runtime temporarily overrides a losing group and resumes its blocked offensive command after recovery. While [Combat Execution] reports source=auto_retreat, hold/regroup cannot replace that blocked command. If an observable strategy recovery condition requires strategically ending the offensive, issue defensive_retreat or panic_retreat explicitly. After a completed recovery, do not repeat a demonstrably losing assault unchanged.
 
 Attack readiness and objectives:
 - Before starting a planned offensive, audit every explicit attack-gate condition against the current observation and state each condition in reasoning as current/required and met/unmet. Conditions joined by "and" must all be met.
