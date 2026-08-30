@@ -9,7 +9,7 @@ from typing import Any
 from .types import GameEvidence
 
 
-MATCH_SUMMARY_FORMAT = "fixed_match_timeline_v3_engagement_transitions"
+MATCH_SUMMARY_FORMAT = "fixed_match_timeline_v4_grounded_engagements"
 
 
 class MatchSummaryCache:

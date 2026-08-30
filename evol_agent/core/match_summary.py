@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .config import MATCH_SUBAGENT_ENABLE_REASONING
@@ -116,6 +117,157 @@ def _compact_mechanism_probe(raw: Any) -> dict[str, Any] | None:
         "observations": observations,
         "evidence_limit": evidence_limit,
     }
+
+
+def _expand_fixed_array(value: Any, keys: Any) -> dict[str, Any]:
+    if not isinstance(value, list) or not isinstance(keys, list):
+        return {}
+    return {
+        str(key): value[index]
+        for index, key in enumerate(keys)
+        if index < len(value) and value[index] not in (None, "", [], {})
+    }
+
+
+def _fixed_timeline_rows(timeline: str) -> list[dict[str, Any]]:
+    schema: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
+    for line in str(timeline or "").splitlines():
+        if line.startswith("SCHEMA "):
+            try:
+                value = json.loads(line[len("SCHEMA ") :])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, dict):
+                schema = value
+            continue
+        if not line.startswith("R ") or not schema:
+            continue
+        try:
+            raw = json.loads(line[2:])
+        except (TypeError, ValueError):
+            continue
+        row = _expand_fixed_array(raw, schema.get("columns"))
+        for field in ("combat", "threat"):
+            row[field] = _expand_fixed_array(row.get(field), schema.get(field))
+        for field in ("groups", "zones", "orders"):
+            values = row.get(field)
+            row[field] = [
+                _expand_fixed_array(item, schema.get(field))
+                for item in values if isinstance(item, list)
+            ] if isinstance(values, list) else []
+        try:
+            row["time_s"] = float(row.get("time_s"))
+        except (TypeError, ValueError):
+            continue
+        rows.append(row)
+    return rows
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nearest_timeline_row(rows: list[dict[str, Any]], time_s: Any) -> dict[str, Any]:
+    target = _number(time_s)
+    if target is None:
+        return {}
+    eligible = [row for row in rows if float(row.get("time_s") or -1.0) <= target + 0.05]
+    if not eligible:
+        return {}
+    nearest = max(eligible, key=lambda row: float(row.get("time_s") or -1.0))
+    return nearest if target - float(nearest.get("time_s") or 0.0) <= 90.0 else {}
+
+
+def _pre_contact_timeline_row(
+    rows: list[dict[str, Any]],
+    time_s: Any,
+) -> dict[str, Any]:
+    row = _nearest_timeline_row(rows, time_s)
+    if str(row.get("trigger") or "").strip().lower() != "auto_retreat_triggered":
+        return row
+    row_time = _number(row.get("time_s"))
+    if row_time is None:
+        return row
+    previous = [
+        item for item in rows
+        if (_number(item.get("time_s")) or -1.0) < row_time - 0.05
+        and row_time - (_number(item.get("time_s")) or -1.0) <= 90.0
+    ]
+    return max(previous, key=lambda item: float(item.get("time_s") or -1.0)) if previous else row
+
+
+def _timeline_engagement_initiator(row: dict[str, Any], reported_owner: str) -> str:
+    groups = row.get("groups") if isinstance(row.get("groups"), list) else []
+    zones = row.get("zones") if isinstance(row.get("zones"), list) else []
+    zone_owners = {
+        str(zone.get("id") or ""): str(zone.get("owner") or "").strip().lower()
+        for zone in zones if isinstance(zone, dict)
+    }
+    assault_groups = [
+        group for group in groups
+        if isinstance(group, dict) and str(group.get("mode") or "").strip().lower() == "assault"
+    ]
+    contact_groups = [
+        group for group in assault_groups
+        if (_number(group.get("near_enemy_count")) or 0.0) > 0.0
+    ]
+    contact_owners = {
+        zone_owners.get(str(group.get("zone") or ""), "")
+        for group in contact_groups or assault_groups
+    }
+    assault_destinations = {
+        str(arguments.get("destination_zone_id") or "")
+        for order in (row.get("orders") or [])
+        if isinstance(order, dict)
+        and str(order.get("non_macro_tool") or "").strip().lower() == "move_group"
+        and isinstance((arguments := order.get("arguments")), dict)
+        and str(arguments.get("movement_mode") or "").strip().lower() == "assault"
+    }
+    contact_owners.update(
+        zone_owners.get(destination, "") for destination in assault_destinations
+    )
+    contact_owners.discard("")
+    threat = row.get("threat") if isinstance(row.get("threat"), dict) else {}
+    own_under_attack = bool(threat.get("own_zones_under_attack"))
+    owner = str(reported_owner or "").strip().lower()
+    if contact_groups and any(value in {"enemy", "neutral"} for value in contact_owners):
+        return "own"
+    if own_under_attack and ("own" in contact_owners or owner == "own"):
+        return "enemy"
+    if (assault_groups or assault_destinations) and any(
+        value in {"enemy", "neutral"} for value in contact_owners
+    ):
+        return "own"
+    if own_under_attack and not assault_groups and not assault_destinations:
+        return "enemy"
+    return "unclear"
+
+
+def _ground_summary_against_timeline(
+    payload: dict[str, Any],
+    timeline: str,
+) -> dict[str, Any]:
+    """Replace model-authored initiative/support claims with recorded facts."""
+    rows = _fixed_timeline_rows(timeline)
+    for engagement in payload.get("major_engagements") or []:
+        if not isinstance(engagement, dict):
+            continue
+        row = _pre_contact_timeline_row(rows, engagement.get("time_s"))
+        engagement["initiator"] = _timeline_engagement_initiator(
+            row,
+            str(engagement.get("zone_owner") or ""),
+        )
+        combat = row.get("combat") if isinstance(row.get("combat"), dict) else {}
+        support = combat.get("support_aware_power")
+        if isinstance(support, dict) and support:
+            engagement["support_aware_power_before"] = dict(support)
+        else:
+            engagement.pop("support_aware_power_before", None)
+    return payload
 
 
 def _normalize_summary_payload(
@@ -290,6 +442,8 @@ def run_fixed_match_summary(
         manifest=manifest,
         duration_s=duration_s,
     )
+    if payload is not None:
+        payload = _ground_summary_against_timeline(payload, timeline)
     errors: list[str] = []
     if payload is not None:
         analysis = analysis_from_json(

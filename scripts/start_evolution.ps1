@@ -23,7 +23,7 @@
 # =============================================================================
 # Config
 # =============================================================================
-$CFG_STRATEGY = "battlecruiser"
+$CFG_STRATEGY = "marine"
 $CFG_COMMANDER_MODEL = "deepseek-v4-flash"
 $CFG_EVOLUTION_MODEL = "deepseek-v4-flash"   # empty = same as commander
 $CFG_DIFFICULTIES = "harder,veryhard,cheatvision,cheatmoney,cheatinsane"

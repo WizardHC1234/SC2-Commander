@@ -174,10 +174,7 @@ Select a small number of important recorded interactions, typically 8 to 15 when
 
 Record only information explicitly present in the timeline. If a snapshot has army and economy but no buildings or technology, omit those fields. Do not invent, guess, or fill missing state.
 
-When combat.support_aware_power is present, keep its direct_power and
-support_adjusted_power distinct. The latter is a bounded Medivac-sustain estimate,
-not a simulated battle result. Copy it only as supporting context and verify its
-meaning against actual force retention and engagement outcomes.
+When combat.support_aware_power is present, copy that exact object and keep its direct_power and support_adjusted_power distinct. The latter is a bounded Medivac-sustain estimate, not a simulated battle result. When the field is absent, leave support_aware_power_before empty; never calculate, infer, rescale, or invent it from ordinary army power.
 
 Keep two enemy sources strictly separate:
 - enemy_observed is what Commander could know at that decision from the live observation.

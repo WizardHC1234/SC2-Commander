@@ -29,7 +29,11 @@ from evol_agent.core.context import (
     render_single_game_analyses,
 )
 from evol_agent.core.experiment_audit import _normalize_audit
-from evol_agent.core.match_summary import _normalize_summary_payload, run_fixed_match_summary
+from evol_agent.core.match_summary import (
+    _ground_summary_against_timeline,
+    _normalize_summary_payload,
+    run_fixed_match_summary,
+)
 from evol_agent.core.match_summary_cache import MATCH_SUMMARY_FORMAT, MatchSummaryCache
 from evol_agent.core.optimization_agent_loop import extract_final_cross_match_decision
 from evol_agent.core.prompts import (
@@ -314,7 +318,7 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
     assert isinstance(analysis.raw["events"], list)
     assert analysis.raw["events"][0]["time_s"] == 248
     assert analysis.raw["enemy_pressure_events"][0]["outcome"] == "army_broken"
-    assert analysis.raw["major_engagements"][0]["initiator"] == "enemy"
+    assert analysis.raw["major_engagements"][0]["initiator"] == "unclear"
     assert analysis.raw["major_engagements"][0]["contact_zone"] == "zone_1"
     assert analysis.raw["major_engagements"][0]["zone_owner"] == "own"
     assert "prepared Siege Tanks" in analysis.raw["major_engagements"][0][
@@ -442,6 +446,105 @@ def test_single_match_prompt_forbids_analysis() -> None:
     assert "contact_zone" in prompt
     assert "terrain_context" in prompt
     assert "does not make the decisive engagement enemy-initiated" in prompt
+
+
+def test_timeline_grounding_corrects_initiator_and_removes_invented_support() -> None:
+    timeline = "\n".join(
+        [
+            'SCHEMA {"columns":["chunk","time_s","trigger","combat","threat","groups","zones","orders"],"combat":["support_aware_power"],"threat":["own_zones_under_attack"],"groups":["id","mode","zone","near_enemy_count"],"zones":["id","owner"],"orders":["non_macro_tool","arguments"]}',
+            'R [1,300.0,"wake_fallback_timeout",[null],[[]],[["group_0","assault","zone_15",5]],[["zone_15","enemy"]],[]]',
+        ]
+    )
+    payload = {
+        "major_engagements": [
+            {
+                "time_s": 300.0,
+                "initiator": "enemy",
+                "zone_owner": "enemy",
+                "support_aware_power_before": "direct 20, support-adjusted 200",
+            }
+        ]
+    }
+
+    grounded = _ground_summary_against_timeline(payload, timeline)
+
+    assert grounded["major_engagements"][0]["initiator"] == "own"
+    assert "support_aware_power_before" not in grounded["major_engagements"][0]
+
+
+def test_timeline_grounding_copies_exact_recorded_support_object() -> None:
+    support = {
+        "direct_power": 20.0,
+        "support_adjusted_power": 24.0,
+        "support_bonus_power": 4.0,
+    }
+    timeline = "\n".join(
+        [
+            'SCHEMA {"columns":["chunk","time_s","trigger","combat","threat","groups","zones","orders"],"combat":["support_aware_power"],"threat":["own_zones_under_attack"],"groups":["id","mode","zone","near_enemy_count"],"zones":["id","owner"],"orders":["non_macro_tool","arguments"]}',
+            'R [1,420.0,"wake_event",[' + json.dumps(support) + '],[["zone_1"]],[["group_0","hold","zone_1",3]],[["zone_1","own"]],[]]',
+        ]
+    )
+    payload = {
+        "major_engagements": [
+            {
+                "time_s": 420.0,
+                "initiator": "own",
+                "zone_owner": "own",
+                "support_aware_power_before": "fabricated",
+            }
+        ]
+    }
+
+    grounded = _ground_summary_against_timeline(payload, timeline)
+
+    assert grounded["major_engagements"][0]["initiator"] == "enemy"
+    assert grounded["major_engagements"][0]["support_aware_power_before"] == support
+
+
+def test_timeline_grounding_uses_pre_retreat_assault_state() -> None:
+    timeline = "\n".join(
+        [
+            'SCHEMA {"columns":["chunk","time_s","trigger","combat","threat","groups","zones","orders"],"combat":["support_aware_power"],"threat":["own_zones_under_attack"],"groups":["id","mode","zone","near_enemy_count"],"zones":["id","owner"],"orders":["non_macro_tool","arguments"]}',
+            'R [1,681.2,"wake_fallback_timeout",[null],[[]],[["group_0","assault","zone_4",7]],[["zone_4","neutral"]],[]]',
+            'R [2,705.4,"auto_retreat_triggered",[null],[[]],[["group_0","defensive_retreat","zone_1",0]],[["zone_1","own"]],[]]',
+        ]
+    )
+    payload = {
+        "major_engagements": [
+            {
+                "time_s": 705.4,
+                "initiator": "enemy",
+                "zone_owner": "neutral",
+            }
+        ]
+    }
+
+    grounded = _ground_summary_against_timeline(payload, timeline)
+
+    assert grounded["major_engagements"][0]["initiator"] == "own"
+
+
+def test_timeline_grounding_uses_recorded_reengagement_order() -> None:
+    timeline = "\n".join(
+        [
+            'SCHEMA {"columns":["chunk","time_s","trigger","combat","threat","groups","zones","orders"],"combat":["support_aware_power"],"threat":["own_zones_under_attack"],"groups":["id","mode","zone","near_enemy_count"],"zones":["id","owner"],"orders":["non_macro_tool","arguments"]}',
+            'R [1,451.8,"wake_event",[null],[[]],[["group_0","defensive_retreat","zone_0",0]],[["zone_0","own"],["zone_15","enemy"]],[["move_group",{"destination_zone_id":"zone_15","movement_mode":"assault"}]]]',
+            'R [2,486.6,"auto_retreat_triggered",[null],[[]],[["group_0","defensive_retreat","zone_0",0]],[["zone_0","own"],["zone_15","enemy"]],[]]',
+        ]
+    )
+    payload = {
+        "major_engagements": [
+            {
+                "time_s": 486.6,
+                "initiator": "enemy",
+                "zone_owner": "neutral",
+            }
+        ]
+    }
+
+    grounded = _ground_summary_against_timeline(payload, timeline)
+
+    assert grounded["major_engagements"][0]["initiator"] == "own"
 
 
 def test_audit_focused_summary_requests_and_normalizes_mechanism_probe() -> None:
