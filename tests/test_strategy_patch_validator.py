@@ -112,10 +112,10 @@ def test_optimizer_prompt_uses_compact_evidence_driven_policy() -> None:
         decision=_decision(),
     )
 
-    assert "Learn from both outcomes" in prompt
-    assert "Separate strategy defects from execution defects" in prompt
-    assert "History is evidence, not a ban list" in prompt
-    assert "do not fill audit forms" in prompt
+    assert "analysis and package-selection stages are complete" in prompt
+    assert "implementing only the selected optimization brief" in prompt
+    assert "champion_lineage" in prompt
+    assert "fill audit forms" in prompt
 
 
 def test_semantic_validation_allows_missing_winning_mechanism_audit() -> None:
@@ -1085,6 +1085,39 @@ def test_contact_timing_report_calculates_candidate_delay_and_cost() -> None:
     }
 
 
+def test_contact_timing_report_ignores_unquantified_implicit_supply_rows() -> None:
+    package = {
+        "economy": {
+            "worker_target_before_commitment": 20,
+            "base_target_before_commitment": 1,
+            "gas_workers_before_commitment": 0,
+        },
+        "gate_components": [
+            {"action": "train_marine", "quantity": 20, "production_slots": 6}
+        ],
+        "setup_actions": [
+            {"action": "build_barracks", "quantity": 6, "parallel_slots": 6},
+            {
+                "action": "build_supply_depot",
+                "quantity": None,
+                "parallel_slots": None,
+            },
+        ],
+    }
+
+    report = _build_contact_timing_report(
+        {"parent": package, "candidate": package},
+        [_marine_timing_knowledge()],
+    )
+
+    assert report["complete"] is True
+    assert report["errors"] == []
+    assert all(
+        item.get("action") != "build_supply_depot"
+        for item in report["declared_packages"]["candidate"]["setup_actions"]
+    )
+
+
 def test_semantic_validation_exports_deterministic_feasibility_audit(monkeypatch) -> None:
     timing_model = {
         "parent": {
@@ -1326,7 +1359,7 @@ def test_mechanism_history_audit_blocks_semantic_rename() -> None:
     assert audit["verdict"] == "blocked"
 
 
-def test_semantic_validation_does_not_block_semantically_similar_history(monkeypatch) -> None:
+def test_semantic_validation_blocks_failed_semantically_equivalent_history(monkeypatch) -> None:
     experiment_id = "marine:g001:harder:marine_opt1"
     prompts: list[str] = []
 
@@ -1368,9 +1401,9 @@ def test_semantic_validation_does_not_block_semantically_similar_history(monkeyp
         audit_output=audit,
     )
 
-    assert errors == []
-    assert "mechanism_equivalence_audit" not in audit
-    assert not any("independent semantic experiment-history judge" in prompt for prompt in prompts)
+    assert any("mechanism history" in error for error in errors)
+    assert audit["mechanism_equivalence_audit"]["verdict"] == "blocked"
+    assert any("independent semantic experiment-history judge" in prompt for prompt in prompts)
 
 
 def test_prior_gate_execution_issue_blocks_another_attack_gate_edit(monkeypatch) -> None:

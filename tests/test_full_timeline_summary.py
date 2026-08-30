@@ -24,10 +24,13 @@ from evol_agent.core.checkpoint import (
     validate_analysis_seed_checkpoint,
     validate_checkpoint_fingerprint,
 )
-from evol_agent.core.context import render_single_game_analyses
+from evol_agent.core.context import (
+    render_engagement_transition_digest,
+    render_single_game_analyses,
+)
 from evol_agent.core.experiment_audit import _normalize_audit
 from evol_agent.core.match_summary import _normalize_summary_payload, run_fixed_match_summary
-from evol_agent.core.match_summary_cache import MatchSummaryCache
+from evol_agent.core.match_summary_cache import MATCH_SUMMARY_FORMAT, MatchSummaryCache
 from evol_agent.core.optimization_agent_loop import extract_final_cross_match_decision
 from evol_agent.core.prompts import (
     build_cross_match_decision_prompt,
@@ -194,6 +197,25 @@ def test_full_timeline_enters_single_match_llm(tmp_path: Path, monkeypatch) -> N
     assert "deterministic_match_features_v1" not in prompt
 
 
+def test_fixed_timeline_adds_support_aware_power_for_medivacs(tmp_path: Path) -> None:
+    observation = _observation()
+    observation["production"]["completed"]["MEDIVAC"] = 2
+    observation["combat"] = {
+        "controlled_own_army_power": 18.0,
+        "visible_enemy_army_power": 8.0,
+    }
+    record_path = _write_record(
+        tmp_path / "support.json",
+        _match_record(_commander_row(300.0, observation)),
+    )
+
+    timeline = MatchRecordReader(record_path).fixed_timeline()
+
+    assert "support_aware_power" in timeline
+    assert "bounded_medivac_sustain" in timeline
+    assert "support_adjusted_power" in timeline
+
+
 def test_one_match_makes_one_llm_call(tmp_path: Path, monkeypatch) -> None:
     record_path = _write_record(tmp_path / "match.json", _multi_row_record())
     calls: list[str] = []
@@ -243,16 +265,33 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
                 {
                     "time_s": 248,
                     "initiator": "enemy",
+                    "contact_zone": "zone_1",
+                    "zone_owner": "own",
+                    "terrain_context": "own ramp with prepared Siege Tanks",
                     "own_force_before": "28 Marines, 6 Tanks",
                     "enemy_observed": "visible ground army",
                     "enemy_truth": "larger mixed army",
                     "own_force_after": "small remnant",
+                    "enemy_force_after": "enemy withdrew with two Tanks",
                     "own_reinforcement_after": "three Marines arrive after withdrawal",
                     "production_context_before": "six Barracks, two idle queues",
                     "runtime_override": "auto-retreat fired after the army fell to a small remnant",
                     "retreat_policy": "retreat_ratio=0.6; local power ratio=0.31; no re-engagement",
                     "loss_timing": "losses_before_override",
                     "outcome": "army_broken",
+                }
+            ],
+            "defense_to_counterattack_windows": [
+                {
+                    "pressure_time_s": 248,
+                    "pressure_cleared_time_s": 270,
+                    "contact_zone": "zone_1",
+                    "own_force_after_defense": "18 Marines, 4 Tanks",
+                    "enemy_force_after_defense": "two retreating Tanks",
+                    "next_offensive_time_s": 290,
+                    "counterattack_delay_seconds": 20,
+                    "next_offensive_command": "assault enemy natural",
+                    "counterattack_outcome": "breakthrough",
                 }
             ],
             "opening_and_economy": ["should not be required"],
@@ -276,6 +315,11 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
     assert analysis.raw["events"][0]["time_s"] == 248
     assert analysis.raw["enemy_pressure_events"][0]["outcome"] == "army_broken"
     assert analysis.raw["major_engagements"][0]["initiator"] == "enemy"
+    assert analysis.raw["major_engagements"][0]["contact_zone"] == "zone_1"
+    assert analysis.raw["major_engagements"][0]["zone_owner"] == "own"
+    assert "prepared Siege Tanks" in analysis.raw["major_engagements"][0][
+        "terrain_context"
+    ]
     assert analysis.raw["major_engagements"][0]["loss_timing"] == (
         "losses_before_override"
     )
@@ -288,6 +332,12 @@ def test_summary_output_is_factual_event_timeline(tmp_path: Path, monkeypatch) -
     assert "three Marines" in analysis.raw["major_engagements"][0][
         "own_reinforcement_after"
     ]
+    assert analysis.raw["defense_to_counterattack_windows"][0][
+        "counterattack_delay_seconds"
+    ] == "20"
+    assert analysis.raw["defense_to_counterattack_windows"][0][
+        "counterattack_outcome"
+    ] == "breakthrough"
     assert "opening_and_economy" not in analysis.raw
 
 
@@ -388,6 +438,10 @@ def test_single_match_prompt_forbids_analysis() -> None:
     assert "good or bad" in lowered
     assert "opening_and_economy" not in prompt
     assert "commander_decision_summary" not in prompt
+    assert "defense_to_counterattack_windows" in prompt
+    assert "contact_zone" in prompt
+    assert "terrain_context" in prompt
+    assert "does not make the decisive engagement enemy-initiated" in prompt
 
 
 def test_audit_focused_summary_requests_and_normalizes_mechanism_probe() -> None:
@@ -545,11 +599,51 @@ def test_cross_match_prompt_keeps_complete_events() -> None:
     assert "Do not return next_action, candidate_plans, candidate_rule, or target_paragraph_id" in prompt
     assert "depends on costs, prerequisites, production time" in prompt
     assert "query_knowledge" not in prompt
-    assert "Protect the strategy's defining combat style and core win mechanism" in prompt
-    assert "the instruction to reinforce with the same composition are flexible" in prompt
+    assert "Treat the defining combat style and win mechanism as strategy identity" in prompt
+    assert "not automatic opportunities for expansion" in prompt
+    assert "who initiated the decisive engagement" in prompt
+    assert "trace every successful defense into its next counterattack window" in prompt
+    assert "engagement_initiative_patterns" in prompt
+    assert "defense_counterattack_patterns" in prompt
     assert '"time_s":431' in prompt
     assert '"enemy_observed":"visible marines"' in prompt
     assert '"enemy_truth":"hidden tanks"' in prompt
+
+
+def test_engagement_transition_digest_keeps_initiative_and_counterattack() -> None:
+    analysis = BattleAnalysis(
+        strategy_name="tank",
+        race="terran",
+        sample_size=1,
+        record_mix="1W/0L",
+        raw={
+            "result": "Victory",
+            "major_engagements": [
+                {
+                    "time_s": 420,
+                    "initiator": "enemy",
+                    "contact_zone": "zone_1",
+                    "zone_owner": "own",
+                    "terrain_context": "own ramp",
+                    "outcome": "held",
+                }
+            ],
+            "defense_to_counterattack_windows": [
+                {
+                    "pressure_time_s": 420,
+                    "counterattack_delay_seconds": 18,
+                    "counterattack_outcome": "breakthrough",
+                }
+            ],
+        },
+    )
+
+    digest = render_engagement_transition_digest([analysis])
+
+    assert '"enemy:own:held":1' in digest
+    assert '"contact_zone":"zone_1"' in digest
+    assert '"counterattack_delay_seconds":18' in digest
+    assert '"counterattack_outcome":"breakthrough"' in digest
 
 
 def test_one_failed_match_does_not_stop_the_batch(tmp_path: Path, monkeypatch) -> None:
@@ -613,7 +707,10 @@ def test_match_summary_seed_reuses_old_records_and_summarizes_only_new_records(
             race="terran",
             sample_size=1,
             record_mix="0W/1L",
-            raw={"summary": f"cached-{index}"},
+                raw={
+                    "summary": f"cached-{index}",
+                    "summary_format": MATCH_SUMMARY_FORMAT,
+                },
         )
         for index in range(1, 3)
     ]
@@ -704,14 +801,15 @@ def test_match_summary_combines_checkpoint_seed_with_persistent_audit_cache(
                 race="terran",
                 sample_size=1,
                 record_mix="0W/1L",
-                raw={
-                    "strategy_name": "tank",
-                    "race": "terran",
-                    "sample_size": 1,
-                    "record_mix": "0W/1L",
-                    "result": "Defeat",
-                    "events": [],
-                },
+                    raw={
+                        "strategy_name": "tank",
+                        "race": "terran",
+                        "sample_size": 1,
+                        "record_mix": "0W/1L",
+                        "summary_format": MATCH_SUMMARY_FORMAT,
+                        "result": "Defeat",
+                        "events": [],
+                    },
             )
             for _record in records[:2]
         ],
@@ -1162,6 +1260,19 @@ def _parent_timing_extraction() -> dict:
 def _package_selection(package_id: str = "P1") -> dict:
     return {
         "selected_package_id": package_id,
+        "candidate_diversity_assessment": {
+            "is_diverse": True,
+            "duplicate_groups": [],
+            "reason": "The packages change different causal levers.",
+        },
+        "selected_history_assessment": {
+            "semantic_relation": "new",
+            "related_experiment_ids": [],
+            "preserved_gain_ids": [],
+            "repaired_dependencies": [],
+            "reason": "No semantically equivalent historical intervention.",
+            "confidence": "high",
+        },
         "data_agent_assessment": {
             "considered_query_ids": [
                 f"PKG_{package_id}_REQ",
@@ -1280,22 +1391,22 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
         package_budget_reports=reports,
     )
     assert "Optimization-Package Planner" in proposal_prompt
-    assert "two or three genuinely different" in proposal_prompt
+    assert "two or three semantically distinct" in proposal_prompt
     assert "target_latest_first_commitment_seconds" in proposal_prompt
     assert "tank production cap" in proposal_prompt
-    assert "fixed-composition reserve or defensive squad" in proposal_prompt
-    assert "the absence of support units" in proposal_prompt
+    assert "fixed custom squads" in proposal_prompt
+    assert "Composition, production, economy, technology" in proposal_prompt
     assert "post-contact continuation" in proposal_prompt
-    assert "do not make all new packages further versions of the same timing lever" in proposal_prompt
+    assert "do not replay a failed direction" in proposal_prompt
+    assert "earliest_feasible_time" in proposal_prompt
     assert "Optimization-Package Selector" in prompt
+    assert "independent Optimization-Package Selector and semantic judge" in prompt
     assert "Program-calculated package budgets" in prompt
     assert "candidate_earliest_feasible_time_seconds" in prompt
     assert "selected_package_id" in prompt
-    assert "Do not select a package" in prompt
-    assert "custom fixed-composition army detachment" in prompt
-    assert "post-contact reinforcement and continuation" in prompt
-    assert "implemented timing intervention improved commitment timing but not outcomes" in prompt
-    assert "support-unit absence" in prompt
+    assert "regenerate_candidate_packages" in prompt
+    assert "A `timing_risk` package requires direct trajectory evidence" in prompt
+    assert "at most one material repair" in prompt
 
 
 def test_package_preflight_marks_a_missed_time_budget() -> None:
@@ -1337,6 +1448,29 @@ def test_candidate_packages_create_requirements_and_matchup_queries() -> None:
         item["hypothesis_scope"] == "candidate_package_matchup"
         for item in p1_questions
     )
+    p2_questions = [
+        item for item in questions if "P2" in (item.get("plan_ids") or [])
+    ]
+    support = next(
+        item
+        for item in p2_questions
+        if item["hypothesis_scope"] == "candidate_package_support"
+    )
+    assert support["needs"] == ["effects", "synergy"]
+
+
+def test_package_preflight_reports_medivac_support_power() -> None:
+    proposal, error = _normalize_candidate_package_proposal(_package_proposal())
+    assert error == ""
+    assert proposal is not None
+
+    reports = _evaluate_candidate_package_budgets(proposal, race="terran")
+    p1 = next(item for item in reports if item["id"] == "P1")
+    p2 = next(item for item in reports if item["id"] == "P2")
+
+    assert p1["candidate_support_aware_combat_estimate"]["support_bonus_power"] == 0
+    assert p2["candidate_support_aware_combat_estimate"]["support_bonus_power"] > 0
+    assert p2["support_aware_combat_delta"]["support_bonus_power"] > 0
 
 
 def test_failed_package_requirement_query_marks_only_that_package_unresolved() -> None:
@@ -1747,6 +1881,56 @@ def test_cross_match_generates_preflights_and_selects_packages(monkeypatch) -> N
         for item in result.events
     )
     assert any(item.get("action") == "cross_match_decision" for item in result.events)
+
+
+def test_selector_rejection_regenerates_packages_before_strategy_edit(monkeypatch) -> None:
+    planner_calls = 0
+    selector_calls = 0
+
+    def fake_llm(prompt: str, **kwargs):
+        nonlocal planner_calls, selector_calls
+        if "Cross-Match Discovery Agent" in prompt:
+            return _empty_discovery()
+        if "Parent Strategy Package Extractor" in prompt:
+            return _parent_timing_extraction()
+        if "Optimization-Package Planner" in prompt:
+            planner_calls += 1
+            return _package_proposal()
+        assert "Optimization-Package Selector" in prompt
+        selector_calls += 1
+        if selector_calls == 1:
+            return {
+                "selected_package_id": "",
+                "candidate_diversity_assessment": {
+                    "is_diverse": False,
+                    "duplicate_groups": [["P1", "P2"]],
+                    "reason": "Both packages change the same attack gate.",
+                },
+                "next_action": "regenerate_candidate_packages",
+                "action_reason": "Generate a different causal lever.",
+                "evidence_limits": [],
+            }
+        return _package_selection()
+
+    monkeypatch.setattr("evol_agent.core.analysis_agent_loop.call_json_llm", fake_llm)
+    monkeypatch.setattr(
+        "evol_agent.core.analysis_agent_loop._summarize_matches",
+        lambda **kwargs: _stub_summaries(),
+    )
+    result = run_analysis_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        records=[_record_ns(Path("match.json"))],
+        skill_texts={"strategy.md": VALID_STRATEGY},
+        knowledge_mode="disabled",
+    )
+    assert result.completed is True
+    assert planner_calls == 2
+    assert selector_calls == 2
+    assert any(
+        item.get("action") == "regenerate_candidate_packages"
+        for item in result.events
+    )
 
 
 def test_cross_match_queries_discovery_and_candidate_packages_then_decides(monkeypatch) -> None:

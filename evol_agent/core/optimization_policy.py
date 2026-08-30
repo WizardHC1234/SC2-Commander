@@ -4,30 +4,14 @@ from __future__ import annotations
 OPTIMIZATION_POLICY = """
 Use these rules as strategic guidance, not as a form-filling checklist:
 
-1. Identify the current strategy's combat style, intended power window, core army,
-   and win mechanism before proposing changes. Preserve that identity unless
-   repeated match evidence shows that the identity itself is failing.
-2. Learn from both outcomes. Preserve behavior repeatedly associated with wins and
-   repair the earliest strategy-fixable shortfall repeatedly associated with losses.
-3. Separate strategy defects from execution defects. If the strategy already states
-   an executable rule but the runtime fails to apply it, report the execution issue;
-   do not keep changing thresholds or adding duplicate prose to compensate.
-4. Optimize for winning the decisive army engagement and then the match. Economy,
-   production, upgrades, scouting, attack gates, and retreat are supporting means.
-5. Compare contact timing together with both armies' composition and growth. An
-   earlier attack may exploit a weaker enemy; a later attack is justified only when
-   the added combat value outweighs the opponent's growth and the survival risk.
-   Judge retreat and continuation from the effective fighting cluster, nearby reinforcements, losses before or after the retreat trigger, and whether the enemy force is collapsing. Do not infer a strategy defect from global inventory or one isolated reinforcement group's automatic retreat.
-6. Keep the production plan coherent across opening, first commitment, continued
-   reinforcement, and late-game completion. Account for workers, bases, gas,
-   production capacity, shared queues, upgrades, supply, and resource banking.
-7. Make every change needed by one coherent intervention, but do not rewrite
-   unrelated behavior. A complete strategy may coordinate several related sections.
-8. History is evidence, not a ban list. A previously weak direction may be repaired
-   when the new candidate explains the missing dependency or implementation change.
-9. Write concise, observable, reusable rules. Do not fit exact match timestamps,
-   opponent builds, map zone ids, hidden state, or unit-level micro.
-10. Keep army control inside the runtime boundary. Do not create persistent custom detachments, reserve exact unit counts or types for a separate mission, or require scripted split, replenishment, transfer, or merge operations. Express defense and reinforcement through high-level intent for observed runtime groups.
+1. Identify the Champion's combat style, win mechanism, useful timing window, and repeated winning behavior before proposing any change. Preserve that identity and those realized strengths unless direct evidence at the current difficulty contradicts them.
+2. Compare wins and losses to find the earliest strategy-controlled cause of the outcome. Distinguish a missing or harmful strategy instruction from a runtime failure to execute an instruction that was already sufficient.
+3. Optimize for winning the decisive engagement and then the match. Evaluate attack timing together with both armies at actual contact and the ability to reinforce or continue pressure; no unit, upgrade, producer, scouting step, or threshold is beneficial by itself.
+4. Treat earliest_feasible_time as a production lower bound. Use observed commitment and contact timing to judge whether a proposed change still reaches a useful opponent window.
+5. Preserve the Champion's core production unless match evidence supports changing it. Add support, technology, economy, or extra production only when it addresses the diagnosed loss and its timing and resource cost do not erase the winning sequence.
+6. Change one causal direction per candidate, with only the dependencies needed to realize it. Do not redesign unrelated sections or turn strategy prose into a detailed state machine.
+7. Use experiment history semantically. Preserve implemented score-improving changes, do not replay a failed direction under new wording, and allow at most one concrete repair of a failed direction before switching to a different causal lever.
+8. Write concise, observable, map-agnostic rules within the runtime boundary. Do not require hidden state, exact timestamps or zone ids, unit-level micro, fixed custom detachments, or scripted group splitting and merging.
 """.strip()
 
 

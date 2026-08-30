@@ -7,16 +7,89 @@ from evol_agent.core.optimization_agent_loop import (
     _knowledge_runs_for_optimizer,
     _normalize_optimizer_candidate,
     _patches_to_operations,
+    _verified_inheritance,
     run_optimization_agent_loop,
 )
 from evol_agent.core.capabilities import build_executor_capability_manifest
 from evol_agent.core.prompts import build_candidate_prompt
+from evol_agent.core.optimizer_prompt import _compact_optimization_brief
 from evol_agent.core.types import BattleAnalysis, ToolObservation
 from evol_agent.optimization.strategy_document import StrategyDocument, paragraph_hash
 from evol_agent.validation import validate_strategy_markdown
 
 
 TANK_STRATEGY = Path("skills/terran/tank/strategy.md").read_text(encoding="utf-8")
+
+
+def test_verified_inheritance_collects_realized_accepted_change() -> None:
+    inheritance = _verified_inheritance(
+        [
+            {
+                "experiment_id": "tank:g001:harder:tank_opt1",
+                "difficulty": "harder",
+                "decision": "accepted",
+                "implementation_verdict": "implemented",
+                "mechanism_family": "medivac_support",
+                "primary_change": "Add Medivac support and reinforcement.",
+                "lesson": "Healing improved post-contact continuation.",
+                "score_delta": 0.1,
+            }
+        ]
+    )
+
+    assert inheritance["verified_changes"] == [
+        {
+            "experiment_id": "tank:g001:harder:tank_opt1",
+            "difficulty": "harder",
+            "mechanism_family": "medivac_support",
+            "change": "Add Medivac support and reinforcement.",
+            "evidence": "Healing improved post-contact continuation.",
+            "score_delta": 0.1,
+        }
+    ]
+
+
+def test_verified_inheritance_follows_current_champion_ancestry() -> None:
+    inheritance = _verified_inheritance(
+        [
+            {
+                "experiment_id": "marine:g000:harder:marine_opt1",
+                "candidate": "marine_opt1",
+                "mutation_parent": "marine",
+                "difficulty": "harder",
+                "decision": "accepted",
+                "implementation_verdict": "implemented",
+                "primary_change": "Attack earlier.",
+                "score_delta": 0.1,
+            },
+            {
+                "experiment_id": "marine:g001:harder:unused_branch",
+                "candidate": "unused_branch",
+                "mutation_parent": "marine",
+                "difficulty": "harder",
+                "decision": "accepted",
+                "implementation_verdict": "implemented",
+                "primary_change": "Unrelated branch.",
+                "score_delta": 0.2,
+            },
+            {
+                "experiment_id": "marine:g002:harder:marine_opt3",
+                "candidate": "marine_opt3",
+                "mutation_parent": "marine_opt1",
+                "difficulty": "harder",
+                "decision": "accepted",
+                "implementation_verdict": "underpowered",
+                "primary_change": "Commit immediately when ready.",
+                "score_delta": 0.2,
+            },
+        ],
+        current_strategy="marine_opt3",
+    )
+    assert [
+        item["experiment_id"] for item in inheritance["verified_changes"]
+    ] == [
+        "marine:g000:harder:marine_opt1",
+    ]
 
 
 def _semantic_payload(*, valid: bool = True, errors: list | None = None) -> dict:
@@ -295,27 +368,48 @@ def test_optimizer_prompt_does_not_select_a_plan() -> None:
     assert "Select one candidate plan" not in prompt
     assert "Select exactly one self-contained candidate plan" not in prompt
     assert "selected_plan_ids" not in prompt
-    assert "Do not select among candidate plans" in prompt
+    assert "Do not select another hypothesis" in prompt
     assert "Generate the entire replacement strategy.md" in prompt
     assert '"strategy_md"' in prompt
     assert '"patches"' not in prompt.split("Return one JSON object only:")[1]
     assert "one coherent strategy" in prompt
-    assert "Learn from both outcomes" in prompt
-    assert "production plan coherent across opening" in prompt
-    assert "History is evidence, not a ban list" in prompt
+    assert "analysis and package-selection stages are complete" in prompt
+    assert "Review the complete strategy chronologically" in prompt
+    assert "champion_lineage" in prompt
     assert "Executor capability manifest" in prompt
     assert "production_target_audit" not in prompt.split("Return one JSON object only:")[1]
-    assert "staged targets when the candidate materially changes" in prompt
-    assert "Do not invent targets for unaffected units or phases" in prompt
+    assert "newly introduced or newly resumed unit" in prompt
+    assert "Do not add targets for unaffected units" in prompt
     assert "no more than 200 supply" in prompt
-    assert "workers plus every final combat and support unit" in prompt
+    assert "including workers and support units" in prompt
     assert "Compact optimization brief" in prompt
-    assert "contact" in prompt and "own and enemy composition" in prompt
+    assert "useful opponent window" in prompt and "post-commitment production" in prompt
+    assert "Treat program_preflight earliest_feasible_time_seconds as a lower bound" in prompt
+    assert "do not interrupt a favorable ongoing attack" in prompt
     assert "Current Champion strategy.md" in prompt
-    assert "do not fill audit forms" in prompt
-    assert "Do not invent a fixed-composition defensive squad" in prompt
-    assert "executor, not strategy.md, owns membership" in prompt
+    assert "fill audit forms" in prompt
+    assert "fixed-composition detachments" in prompt
+    assert "Do not copy its numerical threshold into recovery" in prompt
     assert "Independent factual match summaries" not in prompt
+
+
+def test_optimizer_brief_drops_large_empirical_preflight_windows() -> None:
+    brief = _compact_optimization_brief(
+        {
+            "selected_package_budget": {
+                "id": "P2",
+                "status": "feasible",
+                "candidate_earliest_feasible_time_seconds": 420.0,
+                "earliest_feasible_timing_delta_seconds": -35.0,
+                "empirical_opponent_windows": [{"large": "trajectory payload"}],
+                "declared_candidate_package": {"large": "dependency payload"},
+            }
+        }
+    )
+    preflight = brief["intervention"]["program_preflight"]
+    assert preflight["candidate_earliest_feasible_time_seconds"] == 420.0
+    assert "empirical_opponent_windows" not in preflight
+    assert "declared_candidate_package" not in preflight
 
 
 def test_normalize_allows_five_hypothesis_patches() -> None:
@@ -429,17 +523,27 @@ def test_normalize_requires_why_required() -> None:
     assert "why_required" in error
 
 
-def test_retry_can_add_a_dependency_patch(monkeypatch) -> None:
+def test_semantic_rejection_can_trigger_whole_strategy_retry(monkeypatch) -> None:
     document = StrategyDocument.parse(TANK_STRATEGY)
     gate = next(item for item in document.details if item.id == "main_attack_gate")
     recovery = next(item for item in document.details if item.id == "recovery_and_cleanup")
     calls: list[str] = []
     optimizer_calls = 0
+    validator_calls = 0
 
     def fake_llm(prompt: str, **kwargs):
-        nonlocal optimizer_calls
+        nonlocal optimizer_calls, validator_calls
         calls.append(prompt)
         if "You are validating a strategy patch" in prompt:
+            validator_calls += 1
+            if validator_calls == 1:
+                return _semantic_payload(
+                    valid=False,
+                    errors=[
+                        "post-engagement behavior may change only when the "
+                        "cross-match evidence identifies it as causal"
+                    ],
+                )
             return _semantic_payload()
         optimizer_calls += 1
         patches = [

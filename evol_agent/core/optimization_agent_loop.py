@@ -180,6 +180,11 @@ def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[
             if isinstance(raw.get("data_agent_assessment"), dict)
             else {}
         ),
+        "selected_history_assessment": (
+            dict(raw.get("selected_history_assessment"))
+            if isinstance(raw.get("selected_history_assessment"), dict)
+            else {}
+        ),
         "package_budget_reports": [
             dict(item)
             for item in (raw.get("package_budget_reports") or [])
@@ -560,6 +565,94 @@ def _fallback_is_safe(*, failure_stage: str, errors: list[str]) -> bool:
     )
 
 
+def _verified_inheritance(
+    prior_experiences: list[Any] | None,
+    *,
+    current_strategy: str = "",
+) -> dict[str, Any]:
+    """Collect score-improving changes on the current Champion ancestry only."""
+    experiments = [
+        item
+        for item in (prior_experiences or [])
+        if isinstance(item, dict)
+        and str(item.get("experiment_id") or "").strip()
+    ]
+    by_candidate = {
+        str(item.get("candidate") or "").strip(): item
+        for item in experiments
+        if str(item.get("candidate") or "").strip()
+        and str(item.get("decision") or "").strip().lower() == "accepted"
+    }
+    lineage_ids: set[str] = set()
+    cursor = str(current_strategy or "").strip()
+    restrict_to_lineage = bool(cursor)
+    visited: set[str] = set()
+    while cursor and cursor not in visited:
+        visited.add(cursor)
+        experiment = by_candidate.get(cursor)
+        if experiment is None:
+            break
+        lineage_ids.add(str(experiment.get("experiment_id") or "").strip())
+        cursor = str(
+            experiment.get("mutation_parent") or experiment.get("parent") or ""
+        ).strip()
+
+    verified: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in experiments:
+        experiment_id = str(item.get("experiment_id") or "").strip()
+        if restrict_to_lineage and experiment_id not in lineage_ids:
+            continue
+        ledger = item.get("inheritance")
+        if isinstance(ledger, dict):
+            for change in ledger.get("verified_changes") or []:
+                if not isinstance(change, dict):
+                    continue
+                key = str(change.get("experiment_id") or change.get("change") or "").strip()
+                if key and key not in seen:
+                    verified.append(dict(change))
+                    seen.add(key)
+        try:
+            score_delta = float(item.get("score_delta"))
+        except (TypeError, ValueError):
+            score_delta = 0.0
+        implementation = str(
+            item.get("implementation_verdict") or "unknown"
+        ).strip().lower()
+        if (
+            str(item.get("decision") or "").strip().lower() == "accepted"
+            and score_delta > 0.0
+            and implementation == "implemented"
+        ):
+            key = experiment_id or str(item.get("primary_change") or "").strip()
+            if key and key not in seen:
+                verified.append(
+                    {
+                        "experiment_id": experiment_id,
+                        "difficulty": str(item.get("difficulty") or ""),
+                        "mechanism_family": str(item.get("mechanism_family") or ""),
+                        "change": str(
+                            item.get("primary_change")
+                            or item.get("plan_direction")
+                            or item.get("hypothesis")
+                            or ""
+                        ),
+                        "evidence": str(item.get("lesson") or ""),
+                        "score_delta": score_delta,
+                    }
+                )
+                seen.add(key)
+    if not verified:
+        return {}
+    return {
+        "verified_changes": verified[-12:],
+        "preservation_rule": (
+            "Preserve each trajectory-realized Champion improvement unless current "
+            "cross-match evidence directly supports revising it."
+        ),
+    }
+
+
 def _candidate_rationale(
     *,
     decision: dict[str, Any],
@@ -592,6 +685,7 @@ def _candidate_rationale(
         "strategy_contract": dict(decision.get("strategy_contract") or {}),
         "outcome_contrast": dict(decision.get("outcome_contrast") or {}),
         "strengths_to_preserve": list(decision.get("strengths_to_preserve") or []),
+        "inheritance": dict(decision.get("inheritance") or {}),
         "priority_problem": (
             dict(priority) if isinstance(priority, dict) else {"problem": problem}
         ),
@@ -611,6 +705,9 @@ def _candidate_rationale(
         ),
         "data_agent_assessment": dict(
             decision.get("data_agent_assessment") or {}
+        ),
+        "selected_history_assessment": dict(
+            decision.get("selected_history_assessment") or {}
         ),
         "candidate_package_evaluations": [
             dict(item)
@@ -676,6 +773,12 @@ def run_optimization_agent_loop(
         return ValidationResult(ok=False, error=error), None, observations, [error], events
 
     decision = extract_final_cross_match_decision(battle_analysis)
+    inheritance = _verified_inheritance(
+        prior_experiences,
+        current_strategy=strategy_name,
+    )
+    if inheritance:
+        decision = {**decision, "inheritance": inheritance}
     if not decision["hypothesis"] or not str((decision.get("plan") or {}).get("direction") or "").strip():
         error = "Optimizer requires a Cross-match hypothesis and plan.direction"
         return ValidationResult(ok=False, error=error), None, observations, [error], events
@@ -931,6 +1034,7 @@ def run_optimization_agent_loop(
             patches=normalized["patches"],
             capability_manifest=capability_manifest,
             knowledge_runs=knowledge_runs,
+            inheritance=inheritance,
             prior_experiences=prior_experiences,
             audit_output=semantic_audit,
             race=race,
@@ -1058,6 +1162,14 @@ def run_optimization_agent_loop(
                     f"{prefix}OptimizationAgent: candidate semantics failed; "
                     f"retrying ({attempt}/{MAX_VALIDATION_RETRIES}): {error}",
                     flush=True,
+                )
+            if any("mechanism history" in item.lower() for item in semantic_errors):
+                return (
+                    ValidationResult(ok=False, error=error),
+                    None,
+                    observations,
+                    validation_errors,
+                    events,
                 )
             continue
 

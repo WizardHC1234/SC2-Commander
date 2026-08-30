@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1157,6 +1158,73 @@ def test_stale_policy_rejection_is_not_returned_after_block_is_relaxed(
     assert experiences[0]["decision"] == "accepted"
 
 
+def test_prior_experiences_keep_durable_history_beyond_recent_window(
+    tmp_path: Path,
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(strategy="tank", commander_model="model"),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    state = runner._new_state()
+    state["experiment_history"] = [
+        {
+            "experiment_id": "tank:g001:veryhard:tank_opt1",
+            "difficulty": "veryhard",
+            "decision": "accepted",
+            "implementation_verdict": "implemented",
+            "hypothesis_verdict": "supported",
+        },
+        {
+            "experiment_id": "tank:g002:harder:tank_opt2",
+            "difficulty": "harder",
+            "decision": "rejected",
+            "implementation_verdict": "implemented",
+            "hypothesis_verdict": "contradicted",
+        },
+        *[
+            {
+                "experiment_id": f"tank:g{index:03d}:harder:tank_opt{index}",
+                "difficulty": "harder",
+                "decision": "rejected",
+                "implementation_verdict": "underpowered",
+                "hypothesis_verdict": "inconclusive",
+            }
+            for index in range(3, 14)
+        ],
+    ]
+
+    experiences = runner._prior_experiences(state, difficulty="harder")
+    ids = {item.get("experiment_id") for item in experiences}
+
+    assert "tank:g001:veryhard:tank_opt1" in ids
+    assert "tank:g002:harder:tank_opt2" in ids
+    assert "tank:g003:harder:tank_opt3" not in ids
+    assert "tank:g013:harder:tank_opt13" in ids
+
+
+def test_experiment_spec_keeps_semantic_history_audit(tmp_path: Path) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(strategy="tank", commander_model="model"),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    rationale = {
+        "hypothesis": "Add sustainable reinforcement.",
+        "deterministic_feasibility_audit": {
+            "mechanism_equivalence_audit": {
+                "semantic_relation": "new",
+                "related_experiment_ids": [],
+                "verdict": "allowed",
+            }
+        },
+    }
+
+    spec = runner._experiment_spec_from_rationale(rationale)
+
+    assert spec["mechanism_equivalence_audit"]["semantic_relation"] == "new"
+
+
 def test_policy_rejected_candidate_is_removed_only_from_run_strategies(
     tmp_path: Path,
 ) -> None:
@@ -1623,8 +1691,9 @@ def test_underpowered_retry_rebuilds_from_champion_without_failed_edit_inheritan
         candidate_name = f"tank_opt{len(mutation_parents)}"
         candidate = tmp_path / "skills" / "terran" / candidate_name
         candidate.mkdir(parents=True, exist_ok=True)
+        candidate_text = f"{candidate_name} rebuilt from {champion}"
         (candidate / "strategy.md").write_text(
-            f"candidate inherited from {champion}", encoding="utf-8"
+            candidate_text, encoding="utf-8"
         )
         improvement = EvolImprovement(
             analysis={
@@ -1633,7 +1702,7 @@ def test_underpowered_retry_rebuilds_from_champion_without_failed_edit_inheritan
                 "expected_effect": "more combat power survives first contact",
                 "main_risk": "the timing may become slower",
             },
-            files={"strategy.md": f"candidate inherited from {champion}"},
+            files={"strategy.md": candidate_text},
         )
         return EvolRunResult(
             ok=True,
@@ -2074,6 +2143,80 @@ def test_run_batch_uses_configured_records_directory(
     output_flag = "-OUTPUT_BASE_DIR" if "-OUTPUT_BASE_DIR" in command else "--output-base-dir"
     assert Path(command[command.index(output_flag) + 1]) == batch_dir.parent
     assert result.path == batch_dir
+
+
+def test_run_batch_retries_only_missing_matches_after_partial_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="battlecruiser",
+            commander_model="model",
+            difficulties=("harder",),
+            matches_per_batch=10,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    batch_dir = (
+        tmp_path
+        / "game_records"
+        / runner._batch_name(0, "champ", "harder")
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        rendered = [str(item) for item in command]
+        calls.append(rendered)
+        if len(calls) == 1:
+            for index in (*range(4), *range(5, 10)):
+                match = batch_dir / f"test_match_r{index}"
+                match.mkdir(parents=True)
+                (match / "final.json").write_text(
+                    json.dumps(
+                        {
+                            "metadata": {
+                                "strategy_id": "battlecruiser",
+                                "save_reason": "match_runner_finally",
+                                "result": "Victory",
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            return SimpleNamespace(returncode=1)
+        match = batch_dir / "test_match_r4"
+        match.mkdir(parents=True)
+        (match / "final.json").write_text(
+            json.dumps(
+                {
+                    "metadata": {
+                        "strategy_id": "battlecruiser",
+                        "save_reason": "match_runner_finally",
+                        "result": "Victory",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("evolution.runner.subprocess.run", fake_run)
+
+    result = runner.run_batch(
+        "battlecruiser",
+        "harder",
+        generation=0,
+        role="champ",
+        target_games=10,
+    )
+
+    assert result.games == 10
+    assert len(calls) == 2
+    total_flag = "-TOTAL_MATCHES" if "-TOTAL_MATCHES" in calls[1] else "--total-matches"
+    start_flag = "-START_INDEX" if "-START_INDEX" in calls[1] else "--start-index"
+    assert calls[1][calls[1].index(total_flag) + 1] == "1"
+    assert calls[1][calls[1].index(start_flag) + 1] == "4"
 
 
 def _write_completed_matches(

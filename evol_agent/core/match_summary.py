@@ -5,6 +5,7 @@ from typing import Any
 from .config import MATCH_SUBAGENT_ENABLE_REASONING
 from .llm import call_json_llm
 from .loop_helpers import analysis_from_json, evidence_digest
+from .match_summary_cache import MATCH_SUMMARY_FORMAT
 from .prompts import build_fixed_match_summary_prompt
 from .types import BattleAnalysis, GameDigest
 from ..analysis.match_record import MatchRecordReader
@@ -160,10 +161,15 @@ def _normalize_summary_payload(
     else:
         engagement_fields = (
             "initiator",
+            "contact_zone",
+            "zone_owner",
+            "terrain_context",
             "own_force_before",
             "enemy_observed",
             "enemy_truth",
             "own_force_after",
+            "enemy_force_after",
+            "support_aware_power_before",
             "own_reinforcement_after",
             "production_context_before",
             "offensive_command_before",
@@ -182,6 +188,28 @@ def _normalize_summary_payload(
             for raw in engagements_raw
             if (item := _compact_evidence_row(raw, engagement_fields))
         ]
+    counterattack_raw = result.get("defense_to_counterattack_windows")
+    if counterattack_raw is None:
+        counterattack_windows: list[dict[str, Any]] = []
+    elif not isinstance(counterattack_raw, list):
+        return None
+    else:
+        counterattack_fields = (
+            "pressure_time_s",
+            "pressure_cleared_time_s",
+            "contact_zone",
+            "own_force_after_defense",
+            "enemy_force_after_defense",
+            "next_offensive_time_s",
+            "counterattack_delay_seconds",
+            "next_offensive_command",
+            "counterattack_outcome",
+        )
+        counterattack_windows = [
+            item
+            for raw in counterattack_raw
+            if (item := _compact_evidence_row(raw, counterattack_fields))
+        ]
     payload_duration = result.get("duration_s")
     try:
         normalized_duration = float(payload_duration)
@@ -190,11 +218,13 @@ def _normalize_summary_payload(
     except (TypeError, ValueError):
         normalized_duration = duration_s
     payload = {
+        "summary_format": MATCH_SUMMARY_FORMAT,
         "result": str(result.get("result") or manifest.get("result") or "").strip(),
         "duration_s": normalized_duration,
         "events": events,
         "enemy_pressure_events": pressure_events,
         "major_engagements": major_engagements,
+        "defense_to_counterattack_windows": counterattack_windows,
     }
     mechanism_probe = _compact_mechanism_probe(result.get("mechanism_probe"))
     if mechanism_probe is not None:
@@ -209,11 +239,13 @@ def _degraded_payload(
     duration_s: int | float | None,
 ) -> dict[str, Any]:
     return {
+        "summary_format": MATCH_SUMMARY_FORMAT,
         "result": str(manifest.get("result") or "unknown"),
         "duration_s": duration_s,
         "events": [],
         "enemy_pressure_events": [],
         "major_engagements": [],
+        "defense_to_counterattack_windows": [],
         "evidence_limits": [failure_reason],
         "summary_quality": "degraded",
     }

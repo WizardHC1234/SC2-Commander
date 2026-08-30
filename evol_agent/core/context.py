@@ -48,6 +48,73 @@ def render_batch_match_evidence(analyses: list[BattleAnalysis]) -> str:
     return render_single_game_analyses(analyses)
 
 
+def render_engagement_transition_digest(
+    analyses: list[BattleAnalysis],
+) -> str:
+    """Deterministically preserve initiative, location, and counterattack facts."""
+    engagements: list[dict[str, Any]] = []
+    counterattacks: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for game_index, analysis in enumerate(analyses, 1):
+        raw = analysis.raw if isinstance(analysis.raw, dict) else {}
+        result = str(raw.get("result") or "unknown")
+        for item in raw.get("major_engagements") or []:
+            if not isinstance(item, dict):
+                continue
+            row = {
+                "game": game_index,
+                "match_result": result,
+                **{
+                    key: item.get(key)
+                    for key in (
+                        "time_s",
+                        "initiator",
+                        "contact_zone",
+                        "zone_owner",
+                        "terrain_context",
+                        "own_force_before",
+                        "enemy_observed",
+                        "enemy_truth",
+                        "own_force_after",
+                        "enemy_force_after",
+                        "offensive_command_before",
+                        "outcome",
+                    )
+                    if item.get(key) not in (None, "", [], {})
+                },
+            }
+            engagements.append(row)
+            key = ":".join(
+                (
+                    str(item.get("initiator") or "unclear"),
+                    str(item.get("zone_owner") or "unknown"),
+                    str(item.get("outcome") or "unclear"),
+                )
+            )
+            counts[key] = counts.get(key, 0) + 1
+        for item in raw.get("defense_to_counterattack_windows") or []:
+            if not isinstance(item, dict):
+                continue
+            counterattacks.append(
+                {
+                    "game": game_index,
+                    "match_result": result,
+                    **{
+                        key: value
+                        for key, value in item.items()
+                        if value not in (None, "", [], {})
+                    },
+                }
+            )
+    return json_compact_block(
+        {
+            "initiative_location_outcome_counts": counts,
+            "engagements": engagements[:48],
+            "defense_to_counterattack_windows": counterattacks[:24],
+        }
+    )
+
+
 def render_knowledge_results(runs: list[dict[str, Any]]) -> str:
     """Compact knowledge answers for Cross-match Decision, without tool traces."""
     rows: list[dict[str, Any]] = []
@@ -206,6 +273,11 @@ def render_optimizer_decision(decision: dict[str, Any]) -> str:
             else {}
         ),
         "strengths_to_preserve": decision.get("strengths_to_preserve") or [],
+        "inheritance": (
+            dict(decision.get("inheritance"))
+            if isinstance(decision.get("inheritance"), dict)
+            else {}
+        ),
         "outcome_contrast": (
             dict(decision.get("outcome_contrast"))
             if isinstance(decision.get("outcome_contrast"), dict)
@@ -272,6 +344,8 @@ def render_discovery_findings(discovery: dict[str, Any]) -> str:
         "weaknesses": discovery.get("weaknesses") or [],
         "unknowns": discovery.get("unknowns") or [],
         "opponent_pressure_patterns": discovery.get("opponent_pressure_patterns") or [],
+        "engagement_initiative_patterns": discovery.get("engagement_initiative_patterns") or [],
+        "defense_counterattack_patterns": discovery.get("defense_counterattack_patterns") or [],
         "matchup_patterns": discovery.get("matchup_patterns") or [],
         "query_plan": discovery.get("query_plan") or {},
     }
@@ -313,6 +387,7 @@ __all__ = [
     "json_compact_block",
     "render_battle_analysis",
     "render_batch_match_evidence",
+    "render_engagement_transition_digest",
     "render_discovery_findings",
     "render_knowledge_results",
     "render_optimizer_decision",

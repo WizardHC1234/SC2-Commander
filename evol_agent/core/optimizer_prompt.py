@@ -4,8 +4,35 @@ import json
 from typing import Any
 
 from .context import render_knowledge_results
-from .optimization_policy import OPTIMIZATION_POLICY
 from .types import BattleAnalysis, ToolObservation
+
+
+def _compact_program_preflight(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value.get(key)
+        for key in (
+            "id",
+            "status",
+            "parent_earliest_feasible_time_seconds",
+            "candidate_earliest_feasible_time_seconds",
+            "earliest_feasible_timing_delta_seconds",
+            "target_latest_first_commitment_seconds",
+            "maximum_added_feasibility_seconds",
+            "target_latest_satisfied",
+            "maximum_added_delay_satisfied",
+            "gate_cost_delta",
+            "parent_support_aware_combat_estimate",
+            "candidate_support_aware_combat_estimate",
+            "support_aware_combat_delta",
+            "bottlenecks",
+            "warnings",
+            "errors",
+            "knowledge_status",
+        )
+        if value.get(key) not in (None, "", [], {})
+    }
 
 
 def _compact_optimization_brief(decision: dict[str, Any]) -> dict[str, Any]:
@@ -17,6 +44,7 @@ def _compact_optimization_brief(decision: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "strategy_core": dict(decision.get("strategy_contract") or {}),
+        "champion_lineage": dict(decision.get("inheritance") or {}),
         "strengths_to_preserve": list(decision.get("strengths_to_preserve") or []),
         "win_loss_contrast": dict(decision.get("outcome_contrast") or {}),
         "priority_problem": dict(decision.get("priority_problem") or {}),
@@ -49,14 +77,17 @@ def _compact_optimization_brief(decision: dict[str, Any]) -> dict[str, Any]:
             "declared_time_budget": dict(
                 decision.get("selected_timing_budget") or {}
             ),
-            "program_preflight": dict(
-                decision.get("selected_package_budget") or {}
+            "program_preflight": _compact_program_preflight(
+                decision.get("selected_package_budget")
             ),
             "engagement_assessment": dict(
                 decision.get("selected_engagement_assessment") or {}
             ),
             "data_agent_assessment": dict(
                 decision.get("data_agent_assessment") or {}
+            ),
+            "history_assessment": dict(
+                decision.get("selected_history_assessment") or {}
             ),
         },
         "evidence_limits": list(decision.get("evidence_limits") or []),
@@ -93,7 +124,7 @@ def build_candidate_prompt(
     revision_context = ""
     if validation_errors:
         revision_context = f"""
-The previous candidate needs one correction pass. Regenerate the whole strategy.md, keep its evidence-supported idea, fix the concrete issues below, and return the complete strategy again.
+The previous candidate needs a correction. Regenerate the whole strategy.md, preserve the selected intervention and every already-valid paragraph, and fix only the concrete issues below. Do not reopen hypothesis selection or add a compensating second mechanism.
 
 Issues or timing feedback:
 {chr(10).join(f'- {item}' for item in validation_errors)}
@@ -103,22 +134,16 @@ Previous candidate:
 """
 
     action = "revise_candidate" if validation_errors else "draft_candidate"
-    return f"""You are EvolAgent's Strategy Optimizer for StarCraft II. Analyze the supplied compact evidence and Generate the entire replacement strategy.md. You may coordinate changes across economy, production, technology, army composition, attack timing, reinforcement, retreat, and cleanup when they support the same causal improvement. Inspect every part of the strategy, but preserve unrelated behavior and do not fill audit forms. Do not select among candidate plans; implement the evidence-supported optimization brief as one coherent strategy.
+    return f"""You are EvolAgent's Strategy Optimizer for StarCraft II. The analysis and package-selection stages are complete. Generate the entire replacement strategy.md as one coherent strategy by implementing only the selected optimization brief. Do not select another hypothesis, repeat the match analysis, combine rejected packages, or fill audit forms.
 
-{OPTIMIZATION_POLICY}
-
-Important implementation guidance:
-- Preserve the Champion's successful behavior unless the evidence brief explicitly supports revising it.
-- Implement the selected optimization package rather than combining it with rejected packages. Correct an internally inconsistent wording detail when necessary, but preserve the selected hypothesis, coordinated changes, and program-calculated time budget.
-- Units and production facilities should have practical staged targets when the candidate materially changes their production. Do not invent targets for unaffected units or phases.
-- Keep every explicit final army feasible at no more than 200 supply, counting workers plus every final combat and support unit.
-- A support unit or upgrade is part of the first-attack gate only when the candidate intentionally makes it a mandatory prerequisite. Otherwise it may join as available reinforcement.
-- Keep attack timing, own and enemy composition at contact, production opportunity cost, post-contact reinforcement, and the 1800-second match limit connected to the final win plan.
-- The selected package's earliest-feasible preflight and latest useful commitment bound are a budget for the generated strategy. Do not silently add first-attack prerequisites that push the actual generated strategy beyond that budget.
-- If the evidence identifies a runtime execution failure rather than a strategy defect, do not disguise it as another strategy threshold change.
-- Use only supported runtime controls. The strategy may specify high-level macro targets and army objectives, but not coordinates, unit tags, manual abilities, formation, transport loading, or unit-level micro.
-- Do not invent a fixed-composition defensive squad or any other custom detachment. The executor, not strategy.md, owns membership of the persistent main group and reinforcement group; strategy.md cannot reserve exact units, automatically replenish a subgroup, or script its later split or merge. Express defense as high-level posture for an observed runtime group or revise executable economy, production, composition, technology, and attack-readiness targets.
-- Return concise strategy text. Prefer one observable instruction over repeated warnings and narrow exceptions.
+Rewrite procedure:
+1. Start from the Current Champion. Treat champion_lineage and strengths_to_preserve as winning evidence, and copy unrelated sections without redesigning them.
+2. Implement only the selected material behavior change and its necessary dependencies. Preserve cited gains, make a reversal genuinely reverse the failed behavior, and make a material repair address only its named missing dependency.
+3. Review the complete strategy chronologically across economy, production, technology, composition, attack timing, reinforcement, and recovery. Treat program_preflight earliest_feasible_time_seconds as a lower bound, keep the selected useful opponent window, and ensure post-commitment production continues without displacing a preserved priority.
+4. If the intervention changes the first attack, state one observable gate and attack when it is met. Do not copy its numerical threshold into recovery, and do not interrupt a favorable ongoing attack merely to rebuild the opening gate.
+5. Give every newly introduced or newly resumed unit or production facility a practical stage target and a final cap when production continues. Do not add targets for unaffected units. Keep the explicit final composition at no more than 200 supply including workers and support units.
+6. Use only supported high-level macro and army objectives. Do not require hidden state, coordinates, unit tags, fixed-composition detachments, or scripted group splitting and merging.
+7. Keep the strategy concise and internally consistent. Do not add a second optimization mechanism, duplicate warnings, or prose that behaves like a detailed state machine.
 
 {revision_context}
 

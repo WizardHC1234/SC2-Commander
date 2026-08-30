@@ -101,6 +101,33 @@ def test_history_query_returns_failed_interventions_as_negative_evidence() -> No
     assert packet["results"][0]["experience"]["decision"] == "rejected"
 
 
+def test_history_query_compacts_strategy_text_and_timing_snapshots() -> None:
+    packet = query_experiment_history(
+        [
+            {
+                "experiment_id": "tank:g005:harder:tank_opt6",
+                "hypothesis": "add Marauders to break heavy armor",
+                "decision": "rejected",
+                "score_delta": -0.2,
+                "patches": [{"target": "production", "replacement": "very long strategy text"}],
+                "first_commitment_timing": {
+                    "earliest_feasible_timing_delta_seconds": 34.0,
+                    "empirical_opponent_windows": [{"large": "trajectory payload"}],
+                },
+            }
+        ],
+        {
+            "query_reason": "heavy armor engagement",
+            "failure_signature": ["Marauders did not improve outcomes"],
+        },
+    )
+    experience = packet["results"][0]["experience"]
+    assert "patches" not in experience
+    assert experience["first_commitment_timing"] == {
+        "earliest_feasible_timing_delta_seconds": 34.0
+    }
+
+
 def test_parallel_production_and_resource_demand_are_deterministic() -> None:
     packet = build_strategy_knowledge(
         {

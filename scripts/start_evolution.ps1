@@ -23,9 +23,9 @@
 # =============================================================================
 # Config
 # =============================================================================
-$CFG_STRATEGY = "marine"
-$CFG_COMMANDER_MODEL = "kimi-k2.5"
-$CFG_EVOLUTION_MODEL = "kimi-k2.5"   # empty = same as commander
+$CFG_STRATEGY = "battlecruiser"
+$CFG_COMMANDER_MODEL = "deepseek-v4-flash"
+$CFG_EVOLUTION_MODEL = "deepseek-v4-flash"   # empty = same as commander
 $CFG_DIFFICULTIES = "harder,veryhard,cheatvision,cheatmoney,cheatinsane"
 $CFG_MATCHES = 10
 $CFG_CANDIDATE_MATCHES = 10
@@ -35,9 +35,9 @@ $CFG_CONCURRENCY = 5
 $CFG_MAX_GENERATIONS = 10
 $CFG_MAX_GENERATIONS_PER_DIFFICULTY = 10
 $CFG_MASTERY_SCORE_THRESHOLD = 0.90
-$CFG_RUN_DIR = "evolution_runs\marine\20260825_175700"                       # resume: evolution_runs\...
+$CFG_RUN_DIR = ""                       # resume: evolution_runs\...
 $CFG_BASELINE_BATCH_DIR = ""  # reuse the retained 10-game tank baseline
-$CFG_RECORDS_DIR = "game_records"
+$CFG_RECORDS_DIR = "game_records_tank_evol"
 # =============================================================================
 
 $ErrorActionPreference = "Stop"

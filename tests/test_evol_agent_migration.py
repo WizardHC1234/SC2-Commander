@@ -375,7 +375,7 @@ def test_prompts_offer_multiple_evidenced_plans_for_one_candidate() -> None:
     assert "Generate the entire replacement strategy.md" in candidate_prompt
     assert '"strategy_md"' in candidate_prompt
     assert "one coherent strategy" in candidate_prompt
-    assert "Learn from both outcomes" in candidate_prompt
+    assert "champion_lineage and strengths_to_preserve" in candidate_prompt
     assert "# Summary" in candidate_prompt and "# Details" in candidate_prompt
     assert "why_required" not in candidate_prompt.split("Return one JSON object only:")[1]
     assert "Independent factual match summaries" not in candidate_prompt
@@ -588,6 +588,20 @@ def test_discovery_does_not_require_a_plan() -> None:
                     "confidence": "high",
                 }
             ],
+            "engagement_initiative_patterns": [
+                {
+                    "pattern": "own assaults into enemy-held ramps fail while enemy assaults into the natural are held",
+                    "evidence": ["Game 2 @ 430s", "Game 4 @ 510s"],
+                    "confidence": "high",
+                }
+            ],
+            "defense_counterattack_patterns": [
+                {
+                    "pattern": "counterattacks soon after a held defense convert into breakthroughs",
+                    "evidence": ["Game 3 @ 460s"],
+                    "confidence": "medium",
+                }
+            ],
             "matchup_patterns": [
                 {
                     "pattern": "the incomplete own package loses the first engagement",
@@ -614,6 +628,9 @@ def test_discovery_does_not_require_a_plan() -> None:
     assert "plan_ids" not in payload["knowledge_questions"][0]
     assert payload["knowledge_questions"][0]["id"] == "Q1"
     assert payload["opponent_pressure_patterns"][0]["confidence"] == "high"
+    assert payload["engagement_initiative_patterns"][0]["confidence"] == "high"
+    assert len(payload["engagement_initiative_patterns"][0]["evidence"]) == 2
+    assert payload["defense_counterattack_patterns"][0]["confidence"] == "medium"
     assert len(payload["matchup_patterns"][0]["evidence"]) == 2
 
 

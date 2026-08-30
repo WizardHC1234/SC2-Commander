@@ -42,6 +42,7 @@ DEFAULT_DIFFICULTIES = (
     "cheatinsane",
 )
 MAX_SEARCH_RESTARTS_PER_GENERATION = 3
+MAX_BATCH_EXECUTION_ATTEMPTS = 3
 HISTORY_FIELDS = (
     "strategy_style",
     "generation",
@@ -325,6 +326,33 @@ def completed_record_count(batch_dir: Path, *, strategy: str) -> int:
         if not recorded_strategy or recorded_strategy == strategy:
             completed += 1
     return completed
+
+
+def completed_record_indices(batch_dir: Path, *, strategy: str) -> set[int]:
+    """Return batch run indices that have a completed record.
+
+    Current match directories end in ``_rN``.  Older/imported records may not
+    expose a run index; callers must therefore compare the returned set with the
+    completed-record count before relying on it to identify holes.
+    """
+    indices: set[int] = set()
+    if not batch_dir.exists():
+        return indices
+    for path in find_record_jsons(batch_dir):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not is_completed_match_record(data):
+            continue
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        recorded_strategy = str(metadata.get("strategy_id") or "")
+        if recorded_strategy and recorded_strategy != strategy:
+            continue
+        match = re.search(r"_r(\d+)$", path.parent.name)
+        if match:
+            indices.add(int(match.group(1)))
+    return indices
 
 
 class EvolutionRunner:
@@ -1246,16 +1274,37 @@ class EvolutionRunner:
             for item in history
             if str(item.get("difficulty") or "") in {"", difficulty}
         ]
-        # History is compact outcome evidence, never a pre-match ban list. Keep
-        # recent experiments and only the latest generation failure reason so a
-        # malformed attempt can be repaired without turning history into policy.
+        durable = [
+            item
+            for item in history
+            if str(item.get("decision") or "").strip().lower() == "accepted"
+            or (
+                str(item.get("difficulty") or "") in {"", difficulty}
+                and (
+                    str(item.get("hypothesis_verdict") or "").strip().lower()
+                    == "contradicted"
+                    or str(item.get("implementation_verdict") or "").strip().lower()
+                    == "execution_invalid"
+                    or item.get("underpowered_retry_exhausted") is True
+                )
+            )
+        ]
+        # Preserve all accepted Champion improvements and terminal failed causal
+        # directions, then add recent same-difficulty experiments for local context.
+        selected: list[dict[str, Any]] = []
+        selected_ids: set[str] = set()
+        for item in [*durable, *related[-8:]]:
+            key = str(item.get("experiment_id") or "").strip() or str(id(item))
+            if key not in selected_ids:
+                selected.append(item)
+                selected_ids.add(key)
         latest_restart = [
             item
             for item in (state.get("generation_search_restarts") or [])
             if isinstance(item, dict)
             and str(item.get("difficulty") or "") in {"", difficulty}
         ][-1:]
-        return related[-8:] + latest_restart
+        return selected + latest_restart
 
     def _blocked_mechanism_families(
         self,
@@ -1538,6 +1587,13 @@ class EvolutionRunner:
         if "candidate_package_evaluations" not in spec:
             evaluations = rationale.get("candidate_package_evaluations")
             spec["candidate_package_evaluations"] = _dict_list(evaluations)
+        if "selected_history_assessment" not in spec:
+            selected_history = rationale.get("selected_history_assessment")
+            spec["selected_history_assessment"] = (
+                dict(selected_history)
+                if isinstance(selected_history, dict)
+                else {}
+            )
         if "first_commitment_timing" not in spec:
             feasibility = rationale.get("deterministic_feasibility_audit")
             timing = (
@@ -1547,6 +1603,15 @@ class EvolutionRunner:
                 else {}
             )
             spec["first_commitment_timing"] = dict(timing)
+        if "mechanism_equivalence_audit" not in spec:
+            feasibility = rationale.get("deterministic_feasibility_audit")
+            audit = (
+                feasibility.get("mechanism_equivalence_audit")
+                if isinstance(feasibility, dict)
+                and isinstance(feasibility.get("mechanism_equivalence_audit"), dict)
+                else {}
+            )
+            spec["mechanism_equivalence_audit"] = dict(audit)
         spec.setdefault(
             "plan_direction",
             str(
@@ -1935,13 +2000,61 @@ class EvolutionRunner:
             ]
             if self.config.bot_instruct:
                 command.extend(["--bot-instruct", self.config.bot_instruct])
-        subprocess.run(
-            command,
-            cwd=self.project_root,
-            check=True,
-            env=self._strategy_env(),
-        )
-        self._copy_strategy_sidecar(strategy, batch_dir)
+        total_flag = "-TOTAL_MATCHES" if os.name == "nt" else "--total-matches"
+        start_flag = "-START_INDEX" if os.name == "nt" else "--start-index"
+        last_return_code = 0
+        for batch_attempt in range(1, MAX_BATCH_EXECUTION_ATTEMPTS + 1):
+            completed_indices = completed_record_indices(
+                batch_dir, strategy=strategy
+            )
+            indices_are_complete = len(completed_indices) == completed
+            if completed > 0 and indices_are_complete:
+                missing_indices = [
+                    index
+                    for index in range(expected_games)
+                    if index not in completed_indices
+                ]
+                invocations = [(index, 1) for index in missing_indices]
+            else:
+                # Compatibility with imported records that predate run-indexed
+                # match directories. Such records are assumed to form a prefix.
+                invocations = [(completed, expected_games - completed)]
+
+            for start_index, total_matches in invocations:
+                command[command.index(total_flag) + 1] = str(total_matches)
+                command[command.index(start_flag) + 1] = str(start_index)
+                process = subprocess.run(
+                    command,
+                    cwd=self.project_root,
+                    check=False,
+                    env=self._strategy_env(),
+                )
+                last_return_code = int(getattr(process, "returncode", 0) or 0)
+                self._copy_strategy_sidecar(strategy, batch_dir)
+            observed = completed_record_count(batch_dir, strategy=strategy)
+            if observed == expected_games:
+                completed = observed
+                break
+            if observed > expected_games:
+                raise RuntimeError(
+                    f"batch {batch_name} has {observed} completed records, more than "
+                    f"the requested {expected_games}"
+                )
+            if observed <= completed and last_return_code == 0:
+                raise RuntimeError(
+                    f"batch {batch_name} reported success but produced no new "
+                    "completed match record"
+                )
+            completed = observed
+            if batch_attempt < MAX_BATCH_EXECUTION_ATTEMPTS:
+                print(
+                    f"Batch {batch_name} completed {completed}/{expected_games} "
+                    "matches; retrying only the missing matches "
+                    f"({batch_attempt + 1}/{MAX_BATCH_EXECUTION_ATTEMPTS}).",
+                    flush=True,
+                )
+        if completed != expected_games:
+            raise subprocess.CalledProcessError(last_return_code or 1, command)
         return read_batch_result(
             batch_dir,
             name=batch_name,
@@ -2492,6 +2605,14 @@ class EvolutionRunner:
             state.setdefault("candidate_generation_failures", []).append(failure)
             checkpoint_value = str(candidate_result.checkpoint_dir or resume_value)
             state["candidate_resume_dir"] = checkpoint_value
+            if "mechanism history" in message.casefold():
+                self._save_state(state)
+                print(
+                    "EvolAgent rejected a semantically repeated failed mechanism; "
+                    "restarting cross-match package selection without playing matches.",
+                    flush=True,
+                )
+                break
             if attempt >= total_attempts:
                 break
 
@@ -2537,10 +2658,9 @@ class EvolutionRunner:
             else {}
         )
         experiment_spec = self._experiment_spec_from_rationale(rationale)
-        # Historical experiments are supplied to the analysis model as evidence.
-        # Do not classify a new candidate by mechanism labels or text signatures
-        # before matches; the realized behavior and outcome audit decide whether
-        # the direction was genuinely repeated, repaired, or different.
+        # Historical experiments are supplied as causal evidence. A separate
+        # semantic judge may reject an unchanged failed direction before matches;
+        # mechanism labels and exact wording never decide equivalence by themselves.
         state["pending_candidate"] = {
             "strategy": candidate_result.output_dir.name,
             "strategy_dir": str(candidate_result.output_dir),
@@ -2577,6 +2697,16 @@ class EvolutionRunner:
             "intervention_package": (
                 dict(rationale.get("intervention_package"))
                 if isinstance(rationale.get("intervention_package"), dict)
+                else {}
+            ),
+            "inheritance": (
+                dict(rationale.get("inheritance"))
+                if isinstance(rationale.get("inheritance"), dict)
+                else {}
+            ),
+            "selected_history_assessment": (
+                dict(rationale.get("selected_history_assessment"))
+                if isinstance(rationale.get("selected_history_assessment"), dict)
                 else {}
             ),
             "document_changes": _dict_list(rationale.get("document_changes")),
@@ -3097,6 +3227,49 @@ class EvolutionRunner:
             # not accumulate across generations.
             search_parent_after = champion
             streak_after = 0 if base_outcome == "rejected" else streak_before
+        experiment_id = self._experiment_id(
+            style=str(state.get("style") or self.config.strategy),
+            generation=int(state["generation"]),
+            difficulty=difficulty,
+            candidate=candidate,
+        )
+        decision_inheritance = (
+            dict(pending.get("inheritance"))
+            if isinstance(pending.get("inheritance"), dict)
+            else {}
+        )
+        if accepted and implementation_verdict == "implemented":
+            verified_changes = [
+                dict(item)
+                for item in (decision_inheritance.get("verified_changes") or [])
+                if isinstance(item, dict)
+            ]
+            if not any(
+                str(item.get("experiment_id") or "") == experiment_id
+                for item in verified_changes
+            ):
+                verified_changes.append(
+                    {
+                        "experiment_id": experiment_id,
+                        "difficulty": difficulty,
+                        "mechanism_family": mechanism_family,
+                        "change": str(
+                            pending.get("primary_change")
+                            or experiment_spec.get("plan_direction")
+                            or experiment_spec.get("hypothesis")
+                            or ""
+                        ),
+                        "evidence": str(mechanism_audit.get("lesson") or ""),
+                        "score_delta": score_delta,
+                    }
+                )
+            decision_inheritance = {
+                "verified_changes": verified_changes[-12:],
+                "preservation_rule": (
+                    "Preserve each trajectory-realized Champion improvement unless "
+                    "current cross-match evidence directly supports revising it."
+                ),
+            }
         decision = {
             "generation": state["generation"],
             "difficulty": difficulty,
@@ -3246,6 +3419,13 @@ class EvolutionRunner:
                 else {}
             ),
             "plan_direction": str(experiment_spec.get("plan_direction") or ""),
+            "selected_history_assessment": (
+                dict(experiment_spec.get("selected_history_assessment"))
+                if isinstance(
+                    experiment_spec.get("selected_history_assessment"), dict
+                )
+                else {}
+            ),
             "patches": _dict_list(experiment_spec.get("patches")),
             "primary_lever": str(pending.get("primary_lever") or ""),
             "predictions": _string_list(pending.get("predictions")),
@@ -3256,9 +3436,7 @@ class EvolutionRunner:
                 else {}
             ),
             "inheritance": (
-                dict(pending.get("inheritance"))
-                if isinstance(pending.get("inheritance"), dict)
-                else {}
+                decision_inheritance
             ),
             "semantic_validation": (
                 dict(pending.get("semantic_validation"))
@@ -3326,12 +3504,7 @@ class EvolutionRunner:
         if audit_lesson:
             lesson = audit_lesson
         experience = {
-            "experiment_id": self._experiment_id(
-                style=str(state.get("style") or self.config.strategy),
-                generation=int(state["generation"]),
-                difficulty=difficulty,
-                candidate=candidate,
-            ),
+            "experiment_id": experiment_id,
             "generation": int(state["generation"]),
             "difficulty": difficulty,
             "parent": mutation_parent,
@@ -3409,6 +3582,11 @@ class EvolutionRunner:
             "causal_result": hypothesis_verdict,
             "performance_gain_cause": performance_gain_cause,
             "plan_direction": str(decision.get("plan_direction") or ""),
+            "selected_history_assessment": (
+                dict(decision.get("selected_history_assessment"))
+                if isinstance(decision.get("selected_history_assessment"), dict)
+                else {}
+            ),
             "patches": _dict_list(decision.get("patches")),
             "decision": outcome,
             "base_decision": base_outcome,
@@ -3508,6 +3686,9 @@ class EvolutionRunner:
                         )
                     ),
                     "inheritance": dict(experience.get("inheritance") or {}),
+                    "selected_history_assessment": dict(
+                        experience.get("selected_history_assessment") or {}
+                    ),
                     "base_decision": base_outcome,
                     "decision": outcome,
                     "implementation_verdict": implementation_verdict,
@@ -3542,5 +3723,6 @@ __all__ = [
     "close_batch_results",
     "combine_batch_results",
     "completed_record_count",
+    "completed_record_indices",
     "read_batch_result",
 ]

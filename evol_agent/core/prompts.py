@@ -5,6 +5,7 @@ from typing import Any
 
 from .context import (
     render_discovery_findings,
+    render_engagement_transition_digest,
     render_knowledge_results,
     render_retrieval_evidence,
     render_single_game_analyses,
@@ -82,6 +83,8 @@ chain that produces it, without using a fixed category ranking.
    support, upgrades, timing, production, economy, recovery, and information are
    possible causes only when match evidence connects them to a better or more
    survivable engagement.
+
+Treat engagement initiative and position as part of that chain. Compare own-initiated assaults into enemy-held zones with enemy-initiated attacks into owned positions, including any recorded ramp, choke, contain, or prepared-siege context. After a defense holds, measure retained force, enemy remnants, delay to the next offensive command, and its outcome before deciding whether the strategy should preserve position, counterattack, or continue scaling. Do not turn these possibilities into universal rules without repeated trajectory evidence.
 
 Use strict causal ordering. When the enemy arrives before the planned gate, first
 determine why the gate was not available: production/resource delay, an excessive
@@ -171,6 +174,11 @@ Select a small number of important recorded interactions, typically 8 to 15 when
 
 Record only information explicitly present in the timeline. If a snapshot has army and economy but no buildings or technology, omit those fields. Do not invent, guess, or fill missing state.
 
+When combat.support_aware_power is present, keep its direct_power and
+support_adjusted_power distinct. The latter is a bounded Medivac-sustain estimate,
+not a simulated battle result. Copy it only as supporting context and verify its
+meaning against actual force retention and engagement outcomes.
+
 Keep two enemy sources strictly separate:
 - enemy_observed is what Commander could know at that decision from the live observation.
 - enemy_truth is post-match Replay truth from opponent_truth_after_match when that row includes it. Commander did not know this during play.
@@ -195,6 +203,9 @@ record supports them:
   State whether most losses happened before or after the trigger. Losses before the
   trigger mean it did not cause the initial collapse, but a later hold/full-rebuild
   command may still cause a distinct continuity failure.
+- defense_to_counterattack_windows: only after an enemy-initiated attack is held, trace when the threat disappears, the forces retained by both sides, the next offensive command, its delay, and its result. Keep this empty when the record does not establish that the defense was successful.
+
+For every major engagement, keep initiative and location distinct. An owned zone being attacked elsewhere does not make the decisive engagement enemy-initiated. Record the contact zone, its ownership, and only directly supported ramp, choke, high-ground, contain, or prepared-siege context. If terrain is not recorded, use "unknown" rather than inferring it from the result.
 
 Do not infer an attack merely because the opponent owned an army. If the record
 does not establish pressure or a major engagement, return an empty list.
@@ -208,7 +219,7 @@ Return one JSON object with exactly these top-level fields:
     {{
       "time_s": 0,
       "trigger": "wake_event",
-      "own_state": {{"economy": "...", "buildings": "...", "technology": "...", "army": "..."}},
+      "own_state": {{"economy": "...", "buildings": "...", "technology": "...", "army": "...", "combat_estimate": "direct/support-adjusted power when recorded"}},
       "enemy_observed": {{"army": "...", "buildings": "...", "intel": "..."}},
       "enemy_truth": {{"economy": "...", "buildings": "...", "technology": "...", "army": "..."}},
       "commands": ["recorded_action -> target"]
@@ -228,10 +239,15 @@ Return one JSON object with exactly these top-level fields:
     {{
       "time_s": 0,
       "initiator": "own|enemy|unclear",
+      "contact_zone": "zone id or semantic location, or unknown",
+      "zone_owner": "own|enemy|neutral|unknown",
+      "terrain_context": "recorded ramp, choke, high-ground, contain, prepared-siege, or unknown",
       "own_force_before": "recorded force",
       "enemy_observed": "what Commander knew",
       "enemy_truth": "Replay-only force when available",
       "own_force_after": "next recorded post-contact force",
+      "enemy_force_after": "next recorded Replay-only force, or empty",
+      "support_aware_power_before": "recorded direct and support-adjusted power, or empty",
       "own_reinforcement_after": "new combat units or regrouping recorded after contact",
       "production_context_before": "recorded producers, resources, supply block, or empty",
       "offensive_command_before": "last advancing mode and final strategic objective before the override, or empty",
@@ -244,6 +260,19 @@ Return one JSON object with exactly these top-level fields:
       "regroup_delay_seconds": "recorded seconds from withdrawal to resumed advance, or null",
       "reengagement_time_s": "recorded next engagement time, or null",
       "outcome": "breakthrough|held|withdrawal|army_broken|unclear"
+    }}
+  ],
+  "defense_to_counterattack_windows": [
+    {{
+      "pressure_time_s": 0,
+      "pressure_cleared_time_s": 0,
+      "contact_zone": "owned zone or semantic location",
+      "own_force_after_defense": "recorded retained force",
+      "enemy_force_after_defense": "recorded or Replay-only retained enemy force",
+      "next_offensive_time_s": 0,
+      "counterattack_delay_seconds": 0,
+      "next_offensive_command": "recorded mode and final objective, or none",
+      "counterattack_outcome": "breakthrough|continued_pressure|failed|not_launched|unknown"
     }}
   ]{probe_schema}
 }}
@@ -259,180 +288,188 @@ Complete fixed match timeline:
 
 
 def _format_prior_experiences(prior_experiences: list[Any] | None) -> str:
+    """Render only non-experiment continuity notes; experiments use the scorecard."""
     experience_lines: list[str] = []
     for item in prior_experiences or []:
-        if isinstance(item, dict):
-            if item.get("kind") == "parent_analysis_seed":
-                analysis = (
-                    dict(item.get("analysis") or {})
-                    if isinstance(item.get("analysis"), dict)
-                    else {}
-                )
-                compact_analysis = {
-                    key: analysis.get(key)
-                    for key in (
-                        "record_mix",
-                        "strategy_contract",
-                        "repeated_failures",
-                        "wins_to_preserve",
-                        "cross_outcome_comparison",
-                        "optimization_targets",
-                        "priority_problem",
-                        "hypothesis",
-                        "mechanism_family",
-                        "failure_mode_analysis",
-                        "priority_alignment",
-                        "intervention_package",
-                        "next_action",
-                        "action_reason",
-                        "evidence_limits",
-                    )
-                    if key in analysis
-                }
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip()
+        if kind == "parent_analysis_seed":
+            analysis = item.get("analysis") if isinstance(item.get("analysis"), dict) else {}
+            compact_analysis = {
+                key: analysis.get(key)
                 for key in (
-                    "repeated_failures",
-                    "wins_to_preserve",
-                    "cross_outcome_comparison",
-                    "optimization_targets",
-                    "evidence_limits",
-                ):
-                    if isinstance(compact_analysis.get(key), list):
-                        compact_analysis[key] = compact_analysis[key][:6]
-                experience_lines.append(
-                    json.dumps(
-                        {
-                            "kind": "parent_analysis_seed",
-                            "source_record_count": item.get("source_record_count"),
-                            "current_record_count": item.get("current_record_count"),
-                            "previous_analysis": compact_analysis,
-                        },
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
+                    "strategy_contract",
+                    "outcome_contrast",
+                    "priority_problem",
+                    "failure_mode_analysis",
+                    "next_action",
+                    "action_reason",
                 )
-                continue
-            if item.get("kind") == "mechanism_search_policy":
-                continue
-            if item.get("kind") == "generation_retry_feedback":
-                errors = [
-                    str(error).strip()
-                    for error in (item.get("errors") or [])
-                    if str(error).strip()
-                ]
-                experience_lines.append(
-                    json.dumps(
-                        {"kind": "generation_retry_feedback", "errors": errors[-4:]},
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
-                )
-                continue
-            keep = (
-                "experiment_id",
-                "generation",
-                "difficulty",
-                "mutation_parent",
-                "comparison_champion",
-                "candidate",
-                "mechanism_family",
-                "mechanism_prediction",
-                "hypothesis",
-                "implementation_verdict",
-                "hypothesis_verdict",
-                "runtime_findings",
-                "decision",
-                "comparison_champion_score",
-                "candidate_score",
-                "posterior_probability_better",
-                "score_delta",
-                "primary_change",
-                "primary_lever",
-                "lesson",
-                "reason",
-                "inheritance",
-                "salvageable_changes",
-                "failed_dependencies",
-                "combat_evidence",
-                "gate_execution_audit",
-                "first_commitment_timing",
-            )
-            compact_item = {key: item.get(key) for key in keep if key in item}
-            for key in ("hypothesis", "primary_change", "lesson"):
-                if isinstance(compact_item.get(key), str):
-                    compact_item[key] = compact_item[key][:1200]
-            prediction = compact_item.get("mechanism_prediction")
-            if isinstance(prediction, dict):
-                compact_item["mechanism_prediction"] = {
-                    key: prediction.get(key)
-                    for key in (
-                        "expected_change",
-                        "minimum_material_change",
-                        "outcome_prediction",
-                        "disproof_condition",
-                    )
-                    if prediction.get(key) not in (None, "", [], {})
-                }
-            runtime_findings = compact_item.get("runtime_findings")
-            if isinstance(runtime_findings, list):
-                compact_item["runtime_findings"] = runtime_findings[:3]
-            for list_key in (
-                "salvageable_changes",
-                "failed_dependencies",
-                "combat_evidence",
-            ):
-                if isinstance(compact_item.get(list_key), list):
-                    compact_item[list_key] = compact_item[list_key][:4]
-            tested_changes: list[dict[str, str]] = []
-            for patch in item.get("patches") or []:
-                if not isinstance(patch, dict):
-                    continue
-                target = str(patch.get("target") or "").strip()
-                replacement = str(
-                    patch.get("replacement") or patch.get("value") or ""
-                ).strip()
-                if target or replacement:
-                    tested_changes.append(
-                        {
-                            "target": target,
-                            "replacement": replacement[:500],
-                        }
-                    )
-                if len(tested_changes) >= 8:
-                    break
-            if tested_changes:
-                compact_item["tested_changes"] = tested_changes
-            evidence = item.get("experiment_evidence")
-            if isinstance(evidence, dict):
-                compact_evidence = {
-                    key: evidence.get(key)
-                    for key in (
-                        "parent_batch",
-                        "comparison_champion_batch",
-                        "candidate_batch",
-                        "candidate_minus_parent",
-                        "candidate_minus_comparison_champion",
-                    )
-                    if key in evidence
-                }
-                for batch_key in (
-                    "parent_batch",
-                    "comparison_champion_batch",
-                    "candidate_batch",
-                ):
-                    batch = compact_evidence.get(batch_key)
-                    if isinstance(batch, dict):
-                        compact_evidence[batch_key] = {
-                            key: batch.get(key)
-                            for key in ("wins", "draws", "losses", "games", "score")
-                            if key in batch
-                        }
-                compact_item["experiment_evidence"] = compact_evidence
+                if analysis.get(key) not in (None, "", [], {})
+            }
             experience_lines.append(
-                json.dumps(compact_item, ensure_ascii=False, separators=(",", ":"))
+                json.dumps(
+                    {
+                        "kind": kind,
+                        "source_record_count": item.get("source_record_count"),
+                        "current_record_count": item.get("current_record_count"),
+                        "previous_analysis": compact_analysis,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
             )
-        else:
-            experience_lines.append(str(item))
+        elif kind == "generation_retry_feedback":
+            errors = [
+                str(error).strip()
+                for error in (item.get("errors") or [])
+                if str(error).strip()
+            ]
+            experience_lines.append(
+                json.dumps(
+                    {"kind": kind, "errors": errors[-4:]},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        elif kind == "generation_search_restart":
+            experience_lines.append(
+                json.dumps(
+                    {
+                        "kind": kind,
+                        "reason": str(item.get("reason") or ""),
+                        "instruction": str(item.get("instruction") or ""),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        elif not kind and not str(item.get("experiment_id") or "").strip():
+            legacy = {
+                key: item.get(key)
+                for key in (
+                    "primary_lever",
+                    "hypothesis",
+                    "delta",
+                    "score_delta",
+                    "lesson",
+                    "implementation_verdict",
+                    "hypothesis_verdict",
+                    "experiment_evidence",
+                )
+                if item.get(key) not in (None, "", [], {})
+            }
+            if legacy:
+                experience_lines.append(
+                    json.dumps(
+                        legacy,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
     return "\n".join(f"- {item}" for item in experience_lines) or "None"
+
+
+def _experiment_history_scorecard(
+    prior_experiences: list[Any] | None,
+) -> list[dict[str, Any]]:
+    """Expose experiment outcomes as a compact factual ledger, not prose memory."""
+    rows: list[dict[str, Any]] = []
+    for item in prior_experiences or []:
+        if not isinstance(item, dict) or not str(item.get("experiment_id") or "").strip():
+            continue
+        decision = str(item.get("decision") or "").strip().lower()
+        implementation = str(item.get("implementation_verdict") or "unknown").strip().lower()
+        hypothesis_verdict = str(item.get("hypothesis_verdict") or "inconclusive").strip().lower()
+        try:
+            score_delta = float(item.get("score_delta"))
+        except (TypeError, ValueError):
+            score_delta = None
+        if (
+            decision == "accepted"
+            and score_delta is not None
+            and score_delta > 0
+            and implementation == "implemented"
+        ):
+            outcome = "proven_gain"
+        elif decision == "accepted" and score_delta is not None and score_delta > 0:
+            outcome = "performance_gain_unverified"
+        elif implementation in {"execution_invalid", "unknown"}:
+            outcome = "not_realized"
+        elif score_delta is not None and score_delta < 0:
+            outcome = "regression"
+        elif score_delta == 0:
+            outcome = "no_gain"
+        elif hypothesis_verdict == "contradicted":
+            outcome = "contradicted"
+        else:
+            outcome = "uncertain"
+        prediction = item.get("mechanism_prediction")
+        material_change = (
+            str(prediction.get("minimum_material_change") or "").strip()
+            if isinstance(prediction, dict)
+            else ""
+        )
+        timing = item.get("first_commitment_timing")
+        timing_delta = (
+            timing.get("earliest_feasible_timing_delta_seconds")
+            if isinstance(timing, dict)
+            else None
+        )
+        rows.append(
+            {
+                "experiment_id": str(item.get("experiment_id") or "").strip(),
+                "parent": str(
+                    item.get("mutation_parent") or item.get("parent") or ""
+                ).strip(),
+                "candidate": str(item.get("candidate") or "").strip(),
+                "difficulty": str(item.get("difficulty") or "").strip(),
+                "outcome": outcome,
+                "decision": decision,
+                "implementation_verdict": implementation,
+                "hypothesis_verdict": hypothesis_verdict,
+                "score_delta": score_delta,
+                "mechanism_family": str(item.get("mechanism_family") or "").strip(),
+                "primary_change": str(item.get("primary_change") or "").strip(),
+                "minimum_material_change": material_change,
+                "earliest_feasible_timing_delta_seconds": timing_delta,
+                "failed_dependencies": [
+                    str(value)
+                    for value in (item.get("failed_dependencies") or [])[:3]
+                    if str(value).strip()
+                ],
+                "salvageable_changes": [
+                    str(value)
+                    for value in (item.get("salvageable_changes") or [])[:3]
+                    if str(value).strip()
+                ],
+                "lesson": str(item.get("lesson") or "").strip(),
+            }
+        )
+    if len(rows) <= 12:
+        return rows
+    selected: list[dict[str, Any]] = []
+    selected_ids: set[str] = set()
+    for row in [
+        *[item for item in rows if item.get("outcome") == "proven_gain"][-8:],
+        *rows[-8:],
+    ]:
+        experiment_id = str(row.get("experiment_id") or "")
+        if experiment_id not in selected_ids:
+            selected.append(row)
+            selected_ids.add(experiment_id)
+    return selected
+
+
+def _format_experiment_history_scorecard(
+    prior_experiences: list[Any] | None,
+) -> str:
+    rows = _experiment_history_scorecard(prior_experiences)
+    return "\n".join(
+        f"- {json.dumps(item, ensure_ascii=False, separators=(',', ':'))}"
+        for item in rows
+    ) or "None"
 
 
 def _cross_match_shared_context(
@@ -456,13 +493,21 @@ Current strategy.md:
 Independent factual match summaries:
 {render_single_game_analyses(single_game_analyses)}
 
-Recent experiment history:
+Deterministic engagement-transition digest:
+{render_engagement_transition_digest(single_game_analyses)}
+
+Analysis continuity notes:
 {_format_prior_experiences(prior_experiences)}
+
+Experiment outcome scorecard:
+{_format_experiment_history_scorecard(prior_experiences)}
 
 Experiment-history rules:
 - score_delta and match outcomes are direct performance evidence; posterior is not a promotion gate.
-- Accepted candidates contribute strengths. Rejected and inconclusive candidates contribute tested changes, execution evidence, and causal lessons, but their strategy text is not inherited.
+- Only a score-improving candidate with implementation_verdict=implemented is a proven strategy gain. A score-improving candidate marked underpowered, unknown, or not_tested is promising performance evidence but does not prove that its stated modification caused the gain and must not be inherited as a verified mechanism.
+- Accepted implemented candidates contribute strengths. Rejected, inconclusive, and unverified candidates contribute tested changes, execution evidence, and causal lessons, but their strategy text is not inherited as a proven mechanism.
 - Compare the semantic direction, actual realization, contact timing, combat outcome, and score change. A failed direction is evidence, not a permanent ban; it may be repaired when the new version fixes a missing dependency or changes how the idea is realized.
+- Treat a scorecard row marked proven_gain as Champion lineage to preserve. Do not propose a package that merely repeats a regression or no_gain intervention. A related idea is eligible only when it reverses the failed direction or names a concrete dependency repair that changes the realized behavior.
 - A parent_analysis_seed summarizes a subset of the current records and must not be counted as another match.
 """
 
@@ -483,13 +528,13 @@ def _compact_discovery_prompt(
         else "Knowledge lookup is disabled; return no questions."
     )
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
-    return f"""You are EvolAgent's Cross-Match Discovery Agent and compact evidence analyst. Produce a factual cross-match digest before strategy optimization. Compare wins and losses, identify the strategy's core style and power window, distinguish strategy defects from runtime execution defects, and focus on contact timing, both armies at contact, production feasibility, and post-contact continuation. Do not choose the final optimization direction and do not write replacement strategy text. Use evidence references in the exact form `Game N @ Ts: observation` so deterministic record retrieval can resolve them. Do not return next_action, candidate_plans, candidate_rule, or target_paragraph_id.
+    return f"""You are EvolAgent's Cross-Match Discovery Agent and compact evidence analyst. Produce a factual cross-match digest before strategy optimization. First reconstruct the strategy's core style and the behavior repeatedly realized in wins. Then compare losses to find the earliest causal divergence, including production, actual commitment and contact timing, who initiated the decisive engagement, contact-zone ownership and recorded terrain context, both armies at contact, and continuation after the fight. Separately compare enemy-initiated defenses with own-initiated assaults and trace every successful defense into its next counterattack window. Distinguish a strategy defect from failure to execute an already-sufficient instruction. Do not call a decisive engagement enemy-initiated merely because another owned zone was under attack at the same time. Do not assume that any lower or higher gate, extra unit, upgrade, producer, scouting step, defense, retreat rule, contain, or counterattack rule is an improvement by itself. Do not choose the final optimization direction or write strategy text. Use evidence references in the exact form `Game N @ Ts: observation` so deterministic retrieval can resolve them. Do not return next_action, candidate_plans, candidate_rule, or target_paragraph_id.
 
 {OPTIMIZATION_POLICY}
 
 {knowledge_rule}
 
-Protect the strategy's defining combat style and core win mechanism, not its current implementation details. Exact producer counts, exact gate quantities, the current unit roster, the absence of support units, the current upgrade set, and the instruction to reinforce with the same composition are flexible unless repeated winning evidence shows that one is itself essential to the win mechanism. A small support-unit addition is compatible with a defining core army when it improves that army's engagement or continuation rather than replacing its style.
+Treat the defining combat style and win mechanism as strategy identity. Treat current implementation details as evidence to evaluate, not automatic constraints and not automatic opportunities for expansion.
 
 Previous schema errors:
 {errors}
@@ -504,6 +549,8 @@ Return one JSON object only:
   "weaknesses":[{{"pattern":"repeated strategy-fixable or runtime shortfall","evidence":["Game N @ Ts: observation"],"confidence":"low|medium|high"}}],
   "unknowns":[{{"unknown":"important uncertainty","why_it_matters":"decision impact","evidence":["Game N @ Ts: observation"]}}],
   "opponent_pressure_patterns":[{{"pattern":"pressure timing and package","evidence":["Game N @ Ts: observation"]}}],
+  "engagement_initiative_patterns":[{{"pattern":"outcomes conditioned on own-initiated assault versus enemy-initiated defense, including contact-zone ownership and recorded terrain","evidence":["Game N @ Ts: observation"]}}],
+  "defense_counterattack_patterns":[{{"pattern":"retained forces, delay, and outcome after a successful defense","evidence":["Game N @ Ts: observation"]}}],
   "matchup_patterns":[{{"pattern":"own and enemy packages at decisive contact","evidence":["Game N @ Ts: observation"]}}],
   "query_plan":{{"match_evidence_queries":[{{"query_reason":"recorded interaction to verify","evidence_refs":["Game N @ Ts: observation"]}}],"experience_query":{{"query_reason":"related historical change to retrieve","failure_signature":["observed failure pattern"]}},"game_knowledge_queries":[{{"id":"Q1","question":"Using the bundled SC2 dataset tools as the source of truth, ...","entities":["exact unit, structure, or upgrade name"],"needs":["requirements|effects|synergy|counters"],"query_reason":"why this fact changes the decision","evidence_refs":["Game N @ Ts: observation"],"hypothesis_scope":"bounded factual dependency","calculations":[]}}]}}
 }}
@@ -759,17 +806,19 @@ def build_optimization_package_prompt(
     capability_manifest: dict[str, Any] | None = None,
 ) -> str:
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
-    return f"""You are EvolAgent's Optimization-Package Planner. Convert the cross-match evidence into two or three genuinely different, evidence-supported optimization hypotheses. Each hypothesis must be a coherent package rather than one isolated edit. Do not select the winner and do not write strategy.md yet.
+    return f"""You are EvolAgent's Optimization-Package Planner. Convert the cross-match evidence into two or three semantically distinct, evidence-supported optimization hypotheses. Each package must change a different causal lever, not merely use different names, quantities, units, or wording for the same behavior. Do not select the winner and do not write strategy.md yet.
 
 {OPTIMIZATION_POLICY}
 
-The deterministic build-order simulator will evaluate every package before selection. The parent package below was extracted separately from the current strategy and is read-only. Do not reproduce, reinterpret, or replace it. Each candidate package must describe the complete first-commitment production package, including unchanged Champion components that remain required. Use exact runtime action identifiers from the supplied strategy and action metadata (`train_*`, `build_*`, and `research_*`). A time budget is not an LLM estimate: provide the evidence-derived latest useful first-commitment bound and allowed delay, while the program calculates earliest_feasible_time_seconds, resources, prerequisites, supply, and production queues. For each package, compare the intended own force with the enemy compositions recorded near the same time, including unit counters, upgrades, defender advantage, reinforcements, and whether continued production can sustain the attack. Do not assume that a larger but later own army is stronger after the opponent's growth.
+The deterministic build-order simulator will evaluate every package before selection. The parent package below is read-only. Each candidate must describe the complete first-commitment production package, including unchanged Champion requirements, using exact runtime action identifiers (`train_*`, `build_*`, and `research_*`). The program calculates resource feasibility and earliest_feasible_time; you provide an evidence-derived useful commitment bound. Compare the proposed contact window with opponent forces actually observed near that window. Do not treat a larger force, a counter unit, an upgrade, or an earlier attack as an improvement without trajectory evidence that it addresses the diagnosed loss.
 
-Strategy identity protects the defining combat style and core win mechanism, not exact producer counts, gate quantities, unit ratios, the absence of support units, or a fixed reinforcement roster. Those implementation choices may change when the evidence-supported hypothesis requires them. A support unit may complement the defining core army without replacing its identity; account for its production structure, resource demand, timing cost, role at contact, and value to post-contact continuation.
+Strategy identity protects the defining combat style and win mechanism, not every current number. Composition, production, economy, technology, attack timing, and continuation may change when evidence supports them, but a package must preserve the Champion behavior repeatedly associated with wins.
 
-Use experiment history to change causal direction, not merely wording. If an earlier timing or production intervention was implemented, measurably improved commitment timing, and still failed to improve outcomes, do not make all new packages further versions of the same timing lever. When the records support it, include a genuinely different package aimed at engagement quality, support balance, retained force, reinforcement throughput, or continued pressure. Do not force a support-unit package when post-contact evidence does not support one.
+Compare each package semantically with the experiment scorecard using material behavior, timing, dependencies, and causal prediction rather than labels. Do not replay a failed direction. One concrete repair is allowed only when a recorded dependency prevented the earlier behavior from being realized; after that repair fails, switch causal direction. Do not generate support, scouting, defense, technology, or composition changes merely to make the list look diverse.
 
-Every proposed package must be implementable through the current strategy controls. The executor owns membership of the persistent main group and reinforcement group. Reject before returning any hypothesis that requires a fixed-composition reserve or defensive squad, exact unit reservation for a separate mission, automatic subgroup replenishment, or scripted split, transfer, merge, or dissolution. A defensive hypothesis must instead use executable macro targets, composition, technology, attack readiness, or high-level posture for groups that actually appear in observations.
+Each package must state the one trajectory-level behavior it changes, the evidence connecting that behavior to losses, the winning behavior it preserves, and only the dependencies needed to realize the change. Account for production cost and post-contact continuation when they are causally relevant, but do not broaden a local fix into a full strategy redesign.
+
+Every package must be implementable through the current strategy controls. The executor owns main-force and reinforcement membership, so do not require fixed custom squads, exact unit reservation, or scripted split, transfer, merge, or dissolution.
 
 Read-only parent first-commitment package:
 {json.dumps(parent_timing_package or {}, ensure_ascii=False, separators=(',', ':'))}
@@ -796,7 +845,7 @@ Return JSON only. Use next_action=evaluate_candidate_packages whenever at least 
 {{
   "strengths_to_preserve":[{{"pattern":"successful behavior","evidence":"match reference"}}],
   "priority_problem":{{"problem":"earliest important shortfall","evidence":["at least one match reference"],"control_class":"strategy_fixable|commander_execution|runtime_execution|observation_limited","confidence":"low|medium|high","consequence":"combat or match consequence"}},
-  "failure_mode_analysis":{{"failure_stage":"before_core_mechanism|during_commitment_or_engagement|after_successful_engagement|mixed","gate_attainment_and_launch":"whether the intended attack became available and launched","commitment_and_contact_timing":"actual timing contrast","own_package_at_contact":"own army and upgrades","opponent_package_and_growth":"enemy army and growth","post_contact_continuity":"reinforcement and continued attack","production_feasibility":"income, queues, upgrades, and bottlenecks","optimization_implication":"concise implication","covered_failures":["match evidence"],"counterexamples":["conflicting or winning evidence"]}},
+  "failure_mode_analysis":{{"failure_stage":"before_core_mechanism|during_commitment_or_engagement|after_successful_engagement|mixed","gate_attainment_and_launch":"whether the intended attack became available and launched","commitment_and_contact_timing":"actual timing contrast","engagement_context":"initiator, contact-zone ownership, recorded terrain or prepared position, and defender advantage","own_package_at_contact":"own army and upgrades","opponent_package_and_growth":"enemy army and growth","post_contact_continuity":"reinforcement, successful-defense counterattack delay, and continued attack","production_feasibility":"income, queues, upgrades, and bottlenecks","optimization_implication":"concise implication","covered_failures":["match evidence"],"counterexamples":["conflicting or winning evidence"]}},
   "candidate_packages":[
     {{
       "id":"P1",
@@ -885,9 +934,12 @@ def _compact_decision_prompt(
     retrieval_evidence: dict[str, Any] | None,
     candidate_package_payload: dict[str, Any] | None,
     package_budget_reports: list[dict[str, Any]] | None,
+    prior_experiences: list[Any] | None,
 ) -> str:
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
-    return f"""You are EvolAgent's Optimization-Package Selector. Select exactly one proposed package after comparing its causal support, preservation of winning behavior, deterministic production feasibility, resource cost, first-commitment time budget, matchup-adjusted strength, and post-contact reinforcement and continuation against the empirical opponent snapshots in each budget report. Do not combine packages or invent a new package. A package with status `unresolved` cannot be selected. A package with status `timing_risk` is selectable only when match evidence supports the later contact window and the expected combat advantage outweighs opponent growth. Prefer a `feasible` package that reaches a favorable relative-power window and can sustain the next engagement, not merely one with more own units. Compare expected force retention, continued production, support contribution, reinforcement flow to the same objective, and the risk that retreat or rebuilding interrupts pressure. If history shows that an implemented timing intervention improved commitment timing but not outcomes, prefer an evidence-supported engagement, support, reinforcement, or continuation mechanism over another semantically equivalent timing adjustment. Exact producer counts, unit ratios, support-unit absence, and fixed same-composition reinforcement are not protected strategy identity. Use each report's package-specific DataAgent status and query IDs; do not repeat a capability claim contradicted by verified data. A partial packet may provide valid costs or unit attributes, but its missing relation remains unknown and must not be invented. Do not select a package that requires strategy.md to create, reserve, replenish, split, transfer, or merge a custom fixed-composition army detachment; the executor owns main-force and reinforcement membership. Treat such a package as unsupported even when its production timing is feasible, and select another executable package.
+    return f"""You are EvolAgent's independent Optimization-Package Selector and semantic judge. First decide whether the proposed packages represent at least two genuinely different causal interventions. Judge meaning from the intended trajectory change, contact window, dependencies, and outcome prediction, never from names or wording. If the packages are duplicates, all repeat failed history, all lack evidence, or all create unsupported timing or runtime risk, reject the whole set with next_action=regenerate_candidate_packages. Do not choose a package merely because one must win.
+
+When a usable set exists, select exactly one package without combining or rewriting it. Preserve the Champion's repeated winning behavior and prefer the smallest evidence-supported causal change. A package with status `unresolved` is ineligible. A `timing_risk` package requires direct trajectory evidence that its later contact remains useful; a self-declared time allowance is not evidence. Treat earliest_feasible_time as a lower bound, use DataAgent facts as estimates rather than guaranteed battle outcomes, and do not default to extra counter units, support, upgrades, scouting, defense, or higher gates. Compare every package semantically with prior experiments. A failed direction may receive at most one material repair that names a dependency which prevented realization; a second repair or a numerical restatement is repeats_failed and ineligible. Select inspect_runtime only when the supported problem is outside strategy control.
 
 Strategy: {strategy_name}
 Race: {race}
@@ -904,19 +956,24 @@ Verified SC2 knowledge:
 Retrieved match/history evidence:
 {render_retrieval_evidence(retrieval_evidence or {})}
 
+Experiment outcome scorecard:
+{_format_experiment_history_scorecard(prior_experiences)}
+
 Proposed optimization packages:
 {json.dumps(candidate_package_payload or {}, ensure_ascii=False, indent=2)}
 
 Program-calculated package budgets:
 {json.dumps(package_budget_reports or [], ensure_ascii=False, indent=2)}
 
-Return JSON only. Copy the selected package's hypothesis and plan without changing its package contents:
+Return JSON only. For regenerate_candidate_packages, leave selected_package_id empty and explain why every package was rejected. Otherwise copy the selected package without changing its contents:
 {{
   "selected_package_id":"P1",
+  "candidate_diversity_assessment":{{"is_diverse":true,"duplicate_groups":[["P1","P2"]],"reason":"semantic comparison of trajectory changes"}},
+  "selected_history_assessment":{{"semantic_relation":"new|extends_supported|reverses_failed|material_repair|repeats_failed","related_experiment_ids":["exact experiment id"],"preserved_gain_ids":["accepted proven-gain experiment retained by this package"],"repaired_dependencies":["concrete failed dependency repaired, or empty"],"reason":"causal comparison based on behavior, timing, dependencies, and intended combat outcome","confidence":"high|medium|low"}},
   "data_agent_assessment":{{"considered_query_ids":["PKG_P1_REQ","PKG_P1_MATCHUP"],"supporting_findings":["verified fact that supports selection"],"contradicted_claims":["proposal claim contradicted by data"],"rejected_package_ids":["P2"],"limitations":["remaining unavailable fact"]}},
   "mechanism_prediction":{{"expected_change":"observable behavior change","minimum_material_change":"minimum trajectory-level realization","outcome_prediction":"expected match effect","combat_success_measure":"combat or continuation measure","disproof_condition":"what result falsifies this package"}},
-  "next_action":"propose_strategy_patch|inspect_runtime",
-  "action_reason":"why this package has the best evidence-to-budget tradeoff",
+  "next_action":"propose_strategy_patch|regenerate_candidate_packages|inspect_runtime",
+  "action_reason":"selection reason or concise rejection feedback for the planner",
   "evidence_limits":["remaining uncertainty"]
 }}
 """
@@ -948,6 +1005,7 @@ def build_cross_match_decision_prompt(
         retrieval_evidence=retrieval_evidence,
         candidate_package_payload=candidate_package_payload,
         package_budget_reports=package_budget_reports,
+        prior_experiences=prior_experiences,
     )
     del knowledge_mode
     capability_text = json.dumps(capability_manifest or {}, ensure_ascii=False, indent=2)

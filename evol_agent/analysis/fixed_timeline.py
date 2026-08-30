@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .support_power import estimate_observation_support_power
+
 
 _LOW_LEVEL_KEYS = {
     "reasoning",
@@ -257,7 +259,21 @@ def build_fixed_match_timeline(
 ) -> str:
     """Render every Commander snapshot as one fixed-schema compact table row."""
     chunks = extracted.get("chunks") if isinstance(extracted.get("chunks"), list) else []
+    support_estimates = {
+        index: estimate
+        for index, chunk in enumerate(chunks)
+        if isinstance(chunk, dict)
+        and isinstance(chunk.get("army_observation"), dict)
+        and (
+            estimate := estimate_observation_support_power(
+                chunk.get("army_observation")
+            )
+        )
+        is not None
+    }
     combat_keys = _union_keys(chunks, "combat")
+    if support_estimates and "support_aware_power" not in combat_keys:
+        combat_keys.append("support_aware_power")
     threat_keys = _union_keys(chunks, "threat_flags")
     truth_by_loop = {
         int(snapshot.get("requested_game_loop")): snapshot
@@ -280,6 +296,10 @@ def build_fixed_match_timeline(
     schema = {
         "schema": "fixed_match_timeline.v2",
         "format": "fixed arrays; read values using this schema; null/empty means absent at that snapshot",
+        "support_power_note": (
+            "support_aware_power keeps recorded direct power and adds a bounded "
+            "Medivac-healing estimate; it is a comparison aid, not a battle outcome"
+        ),
         "columns": [
             "chunk",
             "time_s",
@@ -469,6 +489,11 @@ def build_fixed_match_timeline(
         )
         enemy = observation.get("enemy") if isinstance(observation.get("enemy"), dict) else {}
         combat = observation.get("combat") if isinstance(observation.get("combat"), dict) else {}
+        if chunk_index in support_estimates:
+            combat = {
+                **combat,
+                "support_aware_power": support_estimates[chunk_index],
+            }
         threat = (
             observation.get("threat_flags")
             if isinstance(observation.get("threat_flags"), dict)

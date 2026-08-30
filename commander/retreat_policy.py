@@ -25,9 +25,12 @@ LOCAL_BATTLE_RADIUS = 28.0
 # Friendly reinforcements can support a fight before permanent group membership
 # catches up, so use a wider radius for retreat evaluation.
 RETREAT_SUPPORT_RADIUS = 40.0
-# Mission-wide power may protect only a tiny vanguard/remnant from causing an
-# operation-wide withdrawal. It must not rescue an isolated main force.
-RETREAT_FRAGMENT_POWER_SHARE = 0.25
+# When the persistent main-group id has become a minority of the operation,
+# nearby and mission-wide reinforcements are the effective fighting force. Use
+# their combined power so an old main-force remnant does not trigger a false
+# operation-wide withdrawal. A group that still owns most of the mission must
+# stand on its own local support instead of being rescued by distant inventory.
+RETREAT_FRAGMENT_POWER_SHARE = 0.45
 # Ignore brief pathing and targeting fluctuations; catastrophic losses remain
 # immediate.
 RETREAT_CONFIRM_SECONDS = 2.0

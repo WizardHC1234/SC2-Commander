@@ -149,6 +149,16 @@ def test_tiny_vanguard_uses_mission_ratio_but_main_force_does_not():
     assert main_ratio == 0.2
 
 
+def test_minor_persistent_main_uses_reinforcement_operation_power() -> None:
+    ratio = effective_retreat_ratio(
+        group_ratio=0.33,
+        support_ratio=0.44,
+        mission_ratio=1.11,
+        group_power_share=0.30,
+    )
+    assert ratio == 1.11
+
+
 def test_non_catastrophic_low_ratio_requires_persistence():
     assert retreat_confirmation_ready(
         now=101.0,

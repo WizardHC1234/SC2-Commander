@@ -85,6 +85,10 @@ CANDIDATE_GENERATION_ENABLE_REASONING = True
 PARENT_TIMING_PACKAGE_EXTRACTION_ENABLE_REASONING = True
 CONTACT_TIMING_EXTRACTION_ENABLE_REASONING = False
 STRATEGY_SEMANTIC_VALIDATION_ENABLE_REASONING = False
+# Comparing a proposed intervention with differently worded historical failures is
+# a causal semantic judgement, so it benefits from the same reasoning mode as
+# cross-match package selection.
+MECHANISM_HISTORY_ENABLE_REASONING = True
 EXPERIMENT_AUDIT_ENABLE_REASONING = True
 
 DEFAULT_KNOWLEDGE_MODE = "enabled"

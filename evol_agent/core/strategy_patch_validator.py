@@ -7,6 +7,7 @@ from typing import Any
 from .config import (
     CONTACT_TIMING_EXTRACTION_ENABLE_REASONING,
     DEFAULT_OPTIMIZATION_MODEL,
+    MECHANISM_HISTORY_ENABLE_REASONING,
     STRATEGY_SEMANTIC_VALIDATION_ENABLE_REASONING,
 )
 from .context import json_compact_block, render_knowledge_results, render_optimizer_decision
@@ -142,6 +143,38 @@ def _calculate_timing_package(
     return result
 
 
+def _drop_implicit_supply_rows(package: Any) -> Any:
+    """Drop malformed Depot rows when supply is intentionally simulator-derived.
+
+    Strategies commonly require continuous Supply Depot construction without an
+    absolute pre-commitment count. The simulator already derives the minimum Depot
+    count from requested workers and units. A model-extracted row with neither a
+    positive quantity nor parallel capacity must therefore be omitted instead of
+    making the entire timing report unusable.
+    """
+    if not isinstance(package, dict):
+        return package
+    normalized = dict(package)
+    setup_actions: list[Any] = []
+    for item in package.get("setup_actions") or []:
+        if not isinstance(item, dict):
+            setup_actions.append(item)
+            continue
+        action = str(item.get("action") or "").strip().casefold()
+        if action == "build_supply_depot":
+            quantity = item.get("quantity")
+            slots = item.get("parallel_slots")
+            quantity_missing = (
+                not isinstance(quantity, (int, float)) or quantity <= 0
+            )
+            slots_missing = not isinstance(slots, (int, float)) or slots <= 0
+            if quantity_missing and slots_missing:
+                continue
+        setup_actions.append(dict(item))
+    normalized["setup_actions"] = setup_actions
+    return normalized
+
+
 def _build_contact_timing_report(
     timing_model: Any,
     knowledge_runs: list[dict[str, Any]] | None,
@@ -149,8 +182,10 @@ def _build_contact_timing_report(
     if not isinstance(timing_model, dict):
         return {"complete": False, "errors": ["timing_model is missing"]}
     facts = _knowledge_action_facts(knowledge_runs)
-    parent = _calculate_timing_package(timing_model.get("parent"), facts)
-    candidate = _calculate_timing_package(timing_model.get("candidate"), facts)
+    parent_package = _drop_implicit_supply_rows(timing_model.get("parent"))
+    candidate_package = _drop_implicit_supply_rows(timing_model.get("candidate"))
+    parent = _calculate_timing_package(parent_package, facts)
+    candidate = _calculate_timing_package(candidate_package, facts)
     errors = list(parent.get("errors") or []) + list(candidate.get("errors") or [])
     parent_time = float(parent.get("earliest_feasible_time_seconds") or 0.0)
     candidate_time = float(candidate.get("earliest_feasible_time_seconds") or 0.0)
@@ -177,8 +212,8 @@ def _build_contact_timing_report(
             timing_model.get("fallback_preserves_parent_window")
         ),
         "declared_packages": {
-            "parent": dict(timing_model.get("parent") or {}),
-            "candidate": dict(timing_model.get("candidate") or {}),
+            "parent": dict(parent_package or {}),
+            "candidate": dict(candidate_package or {}),
         },
         "errors": errors,
         "evidence_warnings": list(
@@ -517,8 +552,26 @@ only as non-blocking errors; they must not make valid=false.
 
 
 def _compact_prior_experiences(items: list[Any]) -> list[dict[str, Any]]:
+    experiments = _experiment_history_items(items)
+    durable_ids = {
+        str(item.get("experiment_id") or "")
+        for item in experiments
+        if str(item.get("decision") or "").strip().lower() == "accepted"
+        or str(item.get("hypothesis_verdict") or "").strip().lower()
+        == "contradicted"
+        or str(item.get("implementation_verdict") or "").strip().lower()
+        == "execution_invalid"
+        or item.get("underpowered_retry_exhausted") is True
+    }
+    selected: list[Any] = []
+    for item in items:
+        experiment_id = (
+            str(item.get("experiment_id") or "") if isinstance(item, dict) else ""
+        )
+        if experiment_id in durable_ids or item in items[-8:]:
+            selected.append(item)
     compact: list[dict[str, Any]] = []
-    for item in items[-12:]:
+    for item in selected[-24:]:
         if not isinstance(item, dict):
             continue
         kind = str(item.get("kind") or "").strip()
@@ -1185,6 +1238,53 @@ def validate_strategy_patch_semantics(
             "unchanged until runtime execution is repaired"
         )
         return errors
+
+    failed_history = [
+        item
+        for item in _experiment_history_items(prior_experiences)
+        if str(item.get("decision") or "").strip().lower() != "accepted"
+        and (
+            str(item.get("hypothesis_verdict") or "").strip().lower()
+            == "contradicted"
+            or str(item.get("implementation_verdict") or "").strip().lower()
+            in {"underpowered", "execution_invalid", "unknown"}
+            or item.get("underpowered_retry_exhausted") is True
+            or str(item.get("decision") or "").strip().lower()
+            in {"rejected", "policy_rejected_before_matches"}
+        )
+    ]
+    if failed_history:
+        history_result = call_json_llm(
+            build_mechanism_equivalence_prompt(
+                decision=decision,
+                parent_text=parent_text,
+                candidate_text=candidate_text,
+                patches=patches,
+                prior_experiences=prior_experiences or [],
+            ),
+            model=str(model or "").strip() or DEFAULT_OPTIMIZATION_MODEL,
+            is_reasoning=MECHANISM_HISTORY_ENABLE_REASONING,
+        )
+        history_audit, history_errors = _normalize_mechanism_equivalence_audit(
+            history_result,
+            prior_experiences=prior_experiences,
+        )
+        if audit_output is not None:
+            audit_output["mechanism_equivalence_audit"] = (
+                history_audit
+                if history_audit
+                else {
+                    "status": "unavailable",
+                    "warning": "semantic history judge returned no usable audit",
+                }
+            )
+        # An unavailable judge must not stop a run. A positive equivalence verdict
+        # is blocking because evaluating it would spend matches on a failed causal
+        # direction that has no material repair.
+        if history_audit:
+            errors.extend(history_errors)
+            if history_errors:
+                return errors
     contact_timing_report: dict[str, Any] = {}
     if _timing_audit_required(decision) and str(race).strip().casefold() == "terran":
         extraction = call_json_llm(

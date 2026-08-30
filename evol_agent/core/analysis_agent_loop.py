@@ -32,7 +32,7 @@ from .loop_helpers import (
     normalize_strategy_contract,
 )
 from .match_summary import run_fixed_match_summary
-from .match_summary_cache import MatchSummaryCache
+from .match_summary_cache import MATCH_SUMMARY_FORMAT, MatchSummaryCache
 from .evidence_retrieval import build_retrieval_evidence_packet
 from .prompts import (
     build_cross_match_decision_prompt,
@@ -42,6 +42,7 @@ from .prompts import (
 )
 from .terran_build_order_simulator import simulate_terran_first_commitment
 from .types import AnalysisPipelineResult, BattleAnalysis, GameDigest, ToolObservation
+from ..analysis.support_power import estimate_timing_package_support_power
 from ..sc2_data_agent import (
     build_knowledge_query,
     find_knowledge_run_error,
@@ -101,6 +102,15 @@ _OUTCOME_RELATIONSHIPS = frozenset(
 )
 _WINDOW_EFFECTS = frozenset({"earlier", "similar", "later", "unknown"})
 _PACKAGE_NEXT_ACTIONS = frozenset({"evaluate_candidate_packages", "inspect_runtime"})
+_PACKAGE_HISTORY_RELATIONS = frozenset(
+    {
+        "new",
+        "extends_supported",
+        "reverses_failed",
+        "material_repair",
+        "repeats_failed",
+    }
+)
 _FAILURE_STAGES = frozenset(
     {
         "before_core_mechanism",
@@ -309,6 +319,8 @@ def _discovery_fact_text(discovery: dict[str, Any]) -> str:
         "weaknesses",
         "unknowns",
         "opponent_pressure_patterns",
+        "engagement_initiative_patterns",
+        "defense_counterattack_patterns",
         "matchup_patterns",
     ):
         for item in discovery.get(field) or []:
@@ -331,6 +343,8 @@ def _discovery_evidence_refs(discovery: dict[str, Any]) -> list[str]:
         "strengths",
         "weaknesses",
         "opponent_pressure_patterns",
+        "engagement_initiative_patterns",
+        "defense_counterattack_patterns",
         "matchup_patterns",
     ):
         for item in discovery.get(field) or []:
@@ -510,6 +524,12 @@ def _normalize_cross_match_discovery(
     pressure_patterns = _normalize_pattern_items(
         raw.get("opponent_pressure_patterns"), limit=4
     )
+    initiative_patterns = _normalize_pattern_items(
+        raw.get("engagement_initiative_patterns"), limit=4
+    )
+    counterattack_patterns = _normalize_pattern_items(
+        raw.get("defense_counterattack_patterns"), limit=4
+    )
     matchup_patterns = _normalize_pattern_items(raw.get("matchup_patterns"), limit=4)
     outcome_contrast = _normalize_outcome_contrast(raw.get("outcome_contrast"))
     raw_query_plan = raw.get("query_plan") if isinstance(raw.get("query_plan"), dict) else {}
@@ -532,6 +552,8 @@ def _normalize_cross_match_discovery(
             "evidence": outcome_contrast.get("winning_evidence") or [],
         },
         *pressure_patterns,
+        *initiative_patterns,
+        *counterattack_patterns,
         *matchup_patterns,
     ]
     query_plan = {
@@ -554,6 +576,8 @@ def _normalize_cross_match_discovery(
         "weaknesses": weaknesses,
         "unknowns": unknowns,
         "opponent_pressure_patterns": pressure_patterns,
+        "engagement_initiative_patterns": initiative_patterns,
+        "defense_counterattack_patterns": counterattack_patterns,
         "matchup_patterns": matchup_patterns,
         "knowledge_questions": questions,
         "query_plan": query_plan,
@@ -1152,7 +1176,7 @@ def _compact_window_state(value: Any) -> Any:
         return value
     return {
         key: value.get(key)
-        for key in ("army", "technology", "buildings", "intel")
+        for key in ("army", "technology", "buildings", "intel", "combat_estimate")
         if value.get(key) not in (None, "", [], {})
     }
 
@@ -1218,6 +1242,7 @@ def _empirical_opponent_windows(
                     "enemy_observed",
                     "enemy_truth",
                     "own_force_after",
+                    "support_aware_power_before",
                     "own_reinforcement_after",
                     "retreat_policy",
                     "loss_timing",
@@ -1260,6 +1285,9 @@ def _evaluate_candidate_package_budgets(
     parent = simulate_terran_first_commitment(
         proposal.get("parent_timing_package") or {}
     )
+    parent_support_power = estimate_timing_package_support_power(
+        proposal.get("parent_timing_package") or {}
+    )
     parent_time = parent.get("earliest_feasible_time_seconds")
     parent_cost = (
         parent.get("total_cost")
@@ -1276,6 +1304,9 @@ def _evaluate_candidate_package_budgets(
             else {}
         )
         candidate = simulate_terran_first_commitment(budget.get("package") or {})
+        candidate_support_power = estimate_timing_package_support_power(
+            budget.get("package") or {}
+        )
         candidate_time = candidate.get("earliest_feasible_time_seconds")
         target_latest = budget.get("target_latest_first_commitment_seconds")
         maximum_added = budget.get("maximum_added_feasibility_seconds")
@@ -1337,6 +1368,28 @@ def _evaluate_candidate_package_budgets(
                         3,
                     )
                     for key in ("minerals", "gas", "supply")
+                },
+                "parent_support_aware_combat_estimate": parent_support_power,
+                "candidate_support_aware_combat_estimate": candidate_support_power,
+                "support_aware_combat_delta": {
+                    key: round(
+                        float(candidate_support_power.get(candidate_key) or 0.0)
+                        - float(parent_support_power.get(parent_key) or 0.0),
+                        3,
+                    )
+                    for key, candidate_key, parent_key in (
+                        ("direct_power", "direct_power", "direct_power"),
+                        (
+                            "support_bonus_power",
+                            "support_bonus_power",
+                            "support_bonus_power",
+                        ),
+                        (
+                            "support_adjusted_power",
+                            "support_adjusted_power",
+                            "support_adjusted_power",
+                        ),
+                    )
                 },
                 "declared_candidate_package": dict(budget.get("package") or {}),
                 "empirical_opponent_windows": _empirical_opponent_windows(
@@ -1484,6 +1537,35 @@ def _candidate_package_knowledge_questions(
                     "calculations": [],
                 }
             )
+        support_units = [name for name in unit_names if name.casefold() == "medivac"]
+        support_targets = [
+            name
+            for name in unit_names
+            if name.casefold() in {"marine", "marauder", "reaper", "ghost", "hellbat"}
+        ]
+        if support_units and support_targets:
+            questions.append(
+                {
+                    "id": f"PKG_{package_id}_SUPPORT",
+                    "question": (
+                        f"Verify the support effect, eligible targets, operating limits, "
+                        f"and unit synergy for the support package in optimization package "
+                        f"{package_id}; do not turn the static facts into an exact battle "
+                        "outcome prediction."
+                    ),
+                    "entities": [*support_units, *support_targets][:6],
+                    "actions": [],
+                    "needs": ["effects", "synergy"],
+                    "query_reason": (
+                        f"Package {package_id} relies on a support unit whose sustain value "
+                        "is absent from direct Sharpy army power."
+                    ),
+                    "evidence_refs": list(timing.get("budget_basis") or [])[:4],
+                    "hypothesis_scope": "candidate_package_support",
+                    "plan_ids": [package_id],
+                    "calculations": [],
+                }
+            )
         if upgrade_names:
             questions.append(
                 {
@@ -1578,6 +1660,7 @@ def _normalize_failure_mode_analysis(
         "earliest_strategy_fixable_link",
         "why_later_levers_do_not_outrank_it",
         "commitment_and_contact_timing",
+        "engagement_context",
         "own_package_at_contact",
         "opponent_package_and_growth",
         "post_contact_continuity",
@@ -2065,9 +2148,69 @@ def _normalize_package_selection(
     strategy_name: str,
     fallback_strategy_contract: dict[str, Any] | None,
     fallback_outcome_contrast: dict[str, Any] | None,
+    prior_experiences: list[Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(raw, dict):
         return None, "package selection returned no JSON object"
+    next_action = str(raw.get("next_action") or "").strip().lower()
+    if next_action not in {
+        "propose_strategy_patch",
+        "regenerate_candidate_packages",
+        "inspect_runtime",
+    }:
+        return None, (
+            "next_action must be propose_strategy_patch, "
+            "regenerate_candidate_packages, or inspect_runtime"
+        )
+    proposed_ids = {
+        str(item.get("id") or "").strip().upper()
+        for item in (proposal.get("candidate_packages") or [])
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    diversity_raw = raw.get("candidate_diversity_assessment")
+    diversity = dict(diversity_raw) if isinstance(diversity_raw, dict) else {}
+    is_diverse = diversity.get("is_diverse")
+    if not isinstance(is_diverse, bool):
+        return None, "candidate_diversity_assessment.is_diverse must be boolean"
+    duplicate_groups: list[list[str]] = []
+    for group in diversity.get("duplicate_groups") or []:
+        if not isinstance(group, list):
+            continue
+        normalized_group = list(
+            dict.fromkeys(
+                str(value).strip().upper()
+                for value in group
+                if str(value).strip().upper() in proposed_ids
+            )
+        )
+        if len(normalized_group) >= 2:
+            duplicate_groups.append(normalized_group)
+    diversity_payload = {
+        "is_diverse": is_diverse,
+        "duplicate_groups": duplicate_groups,
+        "reason": str(diversity.get("reason") or "").strip(),
+    }
+    if next_action == "regenerate_candidate_packages" or not is_diverse:
+        if next_action != "regenerate_candidate_packages":
+            return None, (
+                "a semantically duplicate candidate set must use "
+                "next_action=regenerate_candidate_packages"
+            )
+        return {
+            "next_action": "regenerate_candidate_packages",
+            "selected_package_id": "",
+            "candidate_diversity_assessment": diversity_payload,
+            "action_reason": str(raw.get("action_reason") or "").strip(),
+            "evidence_limits": _clean_strings(raw.get("evidence_limits")),
+        }, ""
+    if next_action == "inspect_runtime":
+        return {
+            "next_action": "inspect_runtime",
+            "selected_package_id": "",
+            "candidate_diversity_assessment": diversity_payload,
+            "action_reason": str(raw.get("action_reason") or "").strip(),
+            "evidence_limits": _clean_strings(raw.get("evidence_limits")),
+        }, ""
     selected_id = str(raw.get("selected_package_id") or "").strip().upper()
     selected = next(
         (
@@ -2093,6 +2236,129 @@ def _normalize_package_selection(
         return None, (
             "selected_package_id cannot name a package with unresolved "
             "production dependencies or required DataAgent facts"
+        )
+
+    history = [
+        item
+        for item in (prior_experiences or [])
+        if isinstance(item, dict)
+        and str(item.get("experiment_id") or "").strip()
+    ]
+    known_history = {
+        str(item.get("experiment_id") or "").strip(): item for item in history
+    }
+    history_raw = raw.get("selected_history_assessment")
+    selected_history = dict(history_raw) if isinstance(history_raw, dict) else {}
+    relation = str(selected_history.get("semantic_relation") or "").strip().lower()
+    if history and relation not in _PACKAGE_HISTORY_RELATIONS:
+        return None, (
+            "selected_history_assessment must classify the selected package as one "
+            "of: " + ", ".join(sorted(_PACKAGE_HISTORY_RELATIONS))
+        )
+    related_ids = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in (selected_history.get("related_experiment_ids") or [])
+            if str(value).strip()
+        )
+    )
+    preserved_ids = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in (selected_history.get("preserved_gain_ids") or [])
+            if str(value).strip()
+        )
+    )
+    unknown_ids = [
+        value for value in [*related_ids, *preserved_ids] if value not in known_history
+    ]
+    if unknown_ids:
+        return None, (
+            "selected_history_assessment references unknown experiment ids: "
+            + ", ".join(dict.fromkeys(unknown_ids))
+        )
+    invalid_preserved = []
+    for value in preserved_ids:
+        prior = known_history[value]
+        try:
+            prior_delta = float(prior.get("score_delta"))
+        except (TypeError, ValueError):
+            prior_delta = 0.0
+        if (
+            str(prior.get("decision") or "").strip().lower() != "accepted"
+            or prior_delta <= 0.0
+        ):
+            invalid_preserved.append(value)
+    if invalid_preserved:
+        return None, (
+            "selected_history_assessment.preserved_gain_ids must reference accepted "
+            "score-improving experiments: " + ", ".join(invalid_preserved)
+        )
+    repaired = _clean_strings(
+        selected_history.get("repaired_dependencies"), limit=8
+    )
+    if relation in {
+        "extends_supported",
+        "reverses_failed",
+        "material_repair",
+        "repeats_failed",
+    } and not related_ids:
+        return None, (
+            f"selected_history_assessment relation {relation} must cite an exact "
+            "prior experiment id"
+        )
+    if relation == "extends_supported" and not preserved_ids:
+        return None, (
+            "selected_history_assessment extends_supported must name the accepted "
+            "proven-gain experiment it preserves"
+        )
+    if relation == "material_repair" and not repaired:
+        return None, (
+            "selected_history_assessment material_repair must name a concrete "
+            "repaired dependency"
+        )
+    if relation == "material_repair":
+        related_set = set(related_ids)
+        prior_repairs = []
+        for prior in history:
+            prior_assessment = prior.get("selected_history_assessment")
+            if not isinstance(prior_assessment, dict):
+                continue
+            if (
+                str(prior_assessment.get("semantic_relation") or "").strip().lower()
+                != "material_repair"
+            ):
+                continue
+            prior_related = {
+                str(value).strip()
+                for value in (prior_assessment.get("related_experiment_ids") or [])
+                if str(value).strip()
+            }
+            prior_id = str(prior.get("experiment_id") or "").strip()
+            if related_set.intersection(prior_related) or prior_id in related_set:
+                prior_repairs.append(prior_id)
+        if prior_repairs:
+            return None, (
+                "mechanism history: this failed causal direction already used its "
+                "one material-repair attempt in " + ", ".join(prior_repairs)
+            )
+    selected_history = (
+        {
+            "semantic_relation": relation,
+            "related_experiment_ids": related_ids,
+            "preserved_gain_ids": preserved_ids,
+            "repaired_dependencies": repaired,
+            "reason": str(selected_history.get("reason") or "").strip(),
+            "confidence": str(selected_history.get("confidence") or "").strip().lower(),
+        }
+        if history
+        else {}
+    )
+    if selected_history.get("semantic_relation") == "repeats_failed":
+        return None, (
+            "mechanism history: selected_package_id cannot repeat a failed "
+            "historical intervention; "
+            "select a new direction, a reversal, or a concrete material repair"
         )
     data_agent_raw = (
         raw.get("data_agent_assessment")
@@ -2132,12 +2398,17 @@ def _normalize_package_selection(
     if payload is None:
         return None, error
     payload["selected_package_id"] = selected_id
+    payload["candidate_diversity_assessment"] = diversity_payload
     payload["candidate_packages"] = list(proposal.get("candidate_packages") or [])
     payload["package_budget_reports"] = list(package_budget_reports)
     payload["parent_timing_package"] = dict(
         proposal.get("parent_timing_package") or {}
     )
     payload["selected_package_budget"] = dict(selected_report)
+    if selected_history:
+        payload["selected_package_budget"]["history_assessment"] = dict(
+            selected_history
+        )
     payload["selected_timing_budget"] = dict(selected.get("timing_budget") or {})
     payload["selected_engagement_assessment"] = dict(
         selected.get("engagement_assessment") or {}
@@ -2155,6 +2426,7 @@ def _normalize_package_selection(
         ),
         "limitations": _clean_strings(data_agent_raw.get("limitations"), limit=8),
     }
+    payload["selected_history_assessment"] = dict(selected_history)
     payload["expected_effect"] = str(selected.get("expected_effect") or "").strip()
     payload["main_risk"] = str(selected.get("main_risk") or "").strip()
     return payload, ""
@@ -2279,6 +2551,8 @@ def _run_cross_match_decision(
     checkpoint: EvolCheckpoint | None,
     events: list[dict[str, Any]],
     prefix: str,
+    regeneration_attempt: int = 0,
+    regeneration_feedback: list[str] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str], int]:
     strategy_text = str(skill_texts.get("strategy.md") or "").strip()
     strategy_hash = hashlib.sha256(strategy_text.encode("utf-8")).hexdigest()
@@ -2347,7 +2621,7 @@ def _run_cross_match_decision(
             race=race,
             single_game_analyses=summaries,
             skill_texts=skill_texts,
-            validation_errors=schema_errors,
+            validation_errors=[*(regeneration_feedback or []), *schema_errors],
             prior_experiences=prior_experiences or [],
             discovery=discovery,
             knowledge_runs=knowledge_runs,
@@ -2409,10 +2683,13 @@ def _run_cross_match_decision(
         summaries=summaries,
     )
     for report in budget_reports:
+        combat_estimate = report.get("candidate_support_aware_combat_estimate") or {}
         print(
             f"{prefix}DataAgent: package {report.get('id')} "
             f"earliest={report.get('candidate_earliest_feasible_time_seconds')}s "
             f"delta={report.get('earliest_feasible_timing_delta_seconds')}s "
+            f"combat={combat_estimate.get('direct_power')}->"
+            f"{combat_estimate.get('support_adjusted_power')} "
             f"opponent_windows={len(report.get('empirical_opponent_windows') or [])} "
             f"status={report.get('status')}",
             flush=True,
@@ -2523,14 +2800,94 @@ def _run_cross_match_decision(
             strategy_name=strategy_name,
             fallback_strategy_contract=discovery.get("strategy_contract"),
             fallback_outcome_contrast=discovery.get("outcome_contrast"),
+            prior_experiences=prior_experiences or [],
         ),
         events=events,
         label="optimization_package_selection",
         is_reasoning=CROSS_MATCH_DECISION_ENABLE_REASONING,
     )
     if payload is not None:
+        if payload.get("next_action") == "regenerate_candidate_packages":
+            feedback = str(payload.get("action_reason") or "").strip()
+            diversity_reason = str(
+                (payload.get("candidate_diversity_assessment") or {}).get("reason")
+                or ""
+            ).strip()
+            planner_feedback = [
+                item
+                for item in (
+                    feedback,
+                    diversity_reason,
+                    "Generate a new set whose packages change different causal levers; do not rename or rescale the rejected interventions.",
+                )
+                if item
+            ]
+            events.append(
+                {
+                    "action": "regenerate_candidate_packages",
+                    "attempt": regeneration_attempt + 1,
+                    "feedback": planner_feedback,
+                }
+            )
+            if regeneration_attempt < 2:
+                print(
+                    f"{prefix}AnalysisAgent: selector rejected all packages; "
+                    f"regenerating a semantically new set ({regeneration_attempt + 1}/2)",
+                    flush=True,
+                )
+                regenerated, regenerated_errors, regenerated_calls = (
+                    _run_cross_match_decision(
+                        strategy_name=strategy_name,
+                        race=race,
+                        summaries=summaries,
+                        skill_texts=skill_texts,
+                        knowledge_mode=knowledge_mode,
+                        model=model,
+                        prior_experiences=prior_experiences,
+                        capability_manifest=capability_manifest,
+                        discovery=discovery,
+                        knowledge_questions=knowledge_questions,
+                        knowledge_runs=knowledge_runs,
+                        retrieval_evidence=retrieval_evidence,
+                        checkpoint=checkpoint,
+                        events=events,
+                        prefix=prefix,
+                        regeneration_attempt=regeneration_attempt + 1,
+                        regeneration_feedback=planner_feedback,
+                    )
+                )
+                return (
+                    regenerated,
+                    [
+                        *extraction_errors,
+                        *proposal_errors,
+                        *selection_errors,
+                        *regenerated_errors,
+                    ],
+                    extraction_calls
+                    + proposal_calls
+                    + selection_calls
+                    + regenerated_calls,
+                )
+            return (
+                None,
+                [
+                    *extraction_errors,
+                    *proposal_errors,
+                    *selection_errors,
+                    "selector rejected three package sets; restart analysis with a new causal diagnosis",
+                ],
+                extraction_calls + proposal_calls + selection_calls,
+            )
+        history_relation = str(
+            (payload.get("selected_history_assessment") or {}).get(
+                "semantic_relation"
+            )
+            or "none"
+        )
         print(
-            f"{prefix}AnalysisAgent: next_action={payload.get('next_action')}",
+            f"{prefix}AnalysisAgent: next_action={payload.get('next_action')} "
+            f"history_relation={history_relation}",
             flush=True,
         )
         events.append(
@@ -2538,6 +2895,7 @@ def _run_cross_match_decision(
                 "action": "cross_match_decision",
                 "next_action": payload.get("next_action"),
                 "selected_package_id": payload.get("selected_package_id"),
+                "selected_history_relation": history_relation,
                 "priority_problem": (payload.get("priority_problem") or {}).get("problem"),
             }
         )
@@ -2677,6 +3035,8 @@ def _summarize_matches(
             assume_all_completed = not seed_events and seed_completed >= len(seed_digests)
             seeded = {}
             for digest, analysis in zip(seed_digests, seed_analyses):
+                if str((analysis.raw or {}).get("summary_format") or "") != MATCH_SUMMARY_FORMAT:
+                    continue
                 path = str(Path(digest.record_path).resolve())
                 if assume_all_completed or path in completed_paths:
                     seeded[path] = (digest, analysis)
@@ -2732,7 +3092,7 @@ def _summarize_matches(
         digest.raw["summary"] = digest.summary
         digest.raw["analysis"] = summary
         digest.raw["summary_input"] = {
-            "format": "fixed_match_timeline_v2",
+            "format": MATCH_SUMMARY_FORMAT,
             "source": "persistent_cache",
         }
         analysis = battle_analysis_from_dict(cached["summary"])

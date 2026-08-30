@@ -297,27 +297,108 @@ def _compact_history_item(item: Any) -> dict[str, Any]:
     keep = (
         "experiment_id",
         "generation",
+        "difficulty",
         "parent",
+        "mutation_parent",
+        "comparison_champion",
         "candidate",
+        "mechanism_family",
         "hypothesis",
-        "failure_mode_analysis",
-        "priority_alignment",
-        "mechanism_prediction",
-        "intervention_package",
         "implementation_verdict",
         "hypothesis_verdict",
-        "gate_execution_audit",
-        "first_commitment_timing",
         "plan_direction",
-        "patches",
         "decision",
         "parent_score",
+        "comparison_champion_score",
         "candidate_score",
         "score_delta",
         "primary_change",
         "lesson",
     )
-    return {key: item.get(key) for key in keep if key in item}
+    compact = {key: item.get(key) for key in keep if key in item}
+
+    failure = item.get("failure_mode_analysis")
+    if isinstance(failure, dict):
+        compact["failure_mode_analysis"] = {
+            key: failure.get(key)
+            for key in (
+                "failure_stage",
+                "gate_attainment_and_launch",
+                "commitment_and_contact_timing",
+                "own_package_at_contact",
+                "opponent_package_and_growth",
+                "post_contact_continuity",
+                "production_feasibility",
+                "optimization_implication",
+            )
+            if failure.get(key) not in (None, "", [], {})
+        }
+
+    prediction = item.get("mechanism_prediction")
+    if isinstance(prediction, dict):
+        compact["mechanism_prediction"] = {
+            key: prediction.get(key)
+            for key in (
+                "expected_change",
+                "minimum_material_change",
+                "outcome_prediction",
+                "combat_success_measure",
+                "disproof_condition",
+            )
+            if prediction.get(key) not in (None, "", [], {})
+        }
+
+    intervention = item.get("intervention_package")
+    if isinstance(intervention, dict):
+        compact["intervention_package"] = {
+            key: intervention.get(key)
+            for key in (
+                "direction",
+                "material_behavior_change",
+                "contact_window_effect",
+                "new_hard_prerequisites",
+                "production_tradeoffs",
+                "why_window_remains_favorable",
+            )
+            if intervention.get(key) not in (None, "", [], {})
+        }
+
+    gate_audit = item.get("gate_execution_audit")
+    if isinstance(gate_audit, dict):
+        compact["gate_execution_audit"] = {
+            key: gate_audit.get(key)
+            for key in (
+                "status",
+                "expected_earliest_feasible_time_seconds",
+                "median_actual_gate_reached_time_seconds",
+                "median_actual_first_commitment_time_seconds",
+                "execution_issue_matches",
+                "gate_reached_matches",
+            )
+            if gate_audit.get(key) not in (None, "", [], {})
+        }
+
+    timing = item.get("first_commitment_timing")
+    if isinstance(timing, dict):
+        compact["first_commitment_timing"] = {
+            key: timing.get(key)
+            for key in (
+                "complete",
+                "parent_earliest_feasible_time_seconds",
+                "candidate_earliest_feasible_time_seconds",
+                "earliest_feasible_timing_delta_seconds",
+                "new_hard_gate_components",
+                "fallback_preserves_parent_window",
+                "errors",
+                "evidence_warnings",
+            )
+            if timing.get(key) not in (None, "", [], {})
+        }
+    for key in ("salvageable_changes", "failed_dependencies", "combat_evidence"):
+        values = item.get(key)
+        if isinstance(values, list):
+            compact[key] = [str(value) for value in values[:4] if str(value).strip()]
+    return compact
 
 
 def query_experiment_history(
