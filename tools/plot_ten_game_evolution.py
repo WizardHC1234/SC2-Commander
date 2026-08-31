@@ -325,7 +325,7 @@ def plot_ten_game_evolution(
     ax.set_ylim(0, upper)
     ax.set_xticks(range(0, x_right + 1, 2 if x_right >= 6 else 1))
     ax.yaxis.set_major_locator(MultipleLocator(1.0))
-    ax.set_xlabel("10-game evaluations")
+    ax.set_xlabel("Iteration (evaluation round)")
     ax.set_ylabel("Curriculum progress score")
 
     ax.grid(
