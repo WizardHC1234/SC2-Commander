@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -41,7 +42,9 @@ DEFAULT_DIFFICULTIES = (
     "cheatmoney",
     "cheatinsane",
 )
+ANALYSIS_EXPERIENCE_MODES = ("multi_match", "single_failure")
 MAX_SEARCH_RESTARTS_PER_GENERATION = 3
+MAX_CONSECUTIVE_SEARCH_RESTARTS = 6
 MAX_BATCH_EXECUTION_ATTEMPTS = 3
 HISTORY_FIELDS = (
     "strategy_style",
@@ -82,6 +85,18 @@ def canonical_material_change_signature(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
 
 
+def _match_result(record_path: Path) -> str:
+    """Read the final outcome used only for reproducible ablation sampling."""
+    try:
+        payload = json.loads(record_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return "unknown"
+    metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+    if not isinstance(metadata, dict):
+        return "unknown"
+    return str(metadata.get("result") or "unknown").strip().casefold()
+
+
 @dataclass(frozen=True)
 class EvolutionConfig:
     strategy: str
@@ -100,6 +115,8 @@ class EvolutionConfig:
     mastery_score_threshold: float = 0.90
     analysis_batch_games: int = 10
     max_analysis_games_per_generation: int = 20
+    analysis_experience_mode: str = "multi_match"
+    analysis_sample_seed: int = 0
     max_generations_per_difficulty: int = 10
     max_total_generations: int = 50
     require_full_generation_budget: bool = False
@@ -132,6 +149,11 @@ class EvolutionConfig:
         if self.max_analysis_games_per_generation < self.analysis_batch_games:
             raise ValueError(
                 "max_analysis_games_per_generation must be at least analysis_batch_games"
+            )
+        if self.analysis_experience_mode not in ANALYSIS_EXPERIENCE_MODES:
+            raise ValueError(
+                "analysis_experience_mode must be one of: "
+                + ", ".join(ANALYSIS_EXPERIENCE_MODES)
             )
         if self.max_generations_per_difficulty < 0:
             raise ValueError("max_generations_per_difficulty cannot be negative")
@@ -432,11 +454,13 @@ class EvolutionRunner:
             "candidate_generation_failures": [],
             "mechanism_policy_rejections": [],
             "generation_search_restarts": [],
+            "consecutive_search_restarts": 0,
             "exhausted_search_cycles": [],
             "skipped_generations": [],
             "abandoned_analysis_checkpoints": [],
             "candidate_resume_dir": None,
             "analysis_checkpoints": {},
+            "analysis_input_history": [],
             "evidence_pool": {},
             "updated_at": datetime.now().isoformat(),
         }
@@ -490,6 +514,8 @@ class EvolutionRunner:
                 "max_generations_per_difficulty",
                 "confirmation_matches",
                 "require_full_generation_budget",
+                "analysis_experience_mode",
+                "analysis_sample_seed",
             ):
                 if key not in saved:
                     saved[key] = current[key]
@@ -978,8 +1004,14 @@ class EvolutionRunner:
         if not isinstance(state.get("mechanism_policy_rejections"), list):
             state["mechanism_policy_rejections"] = []
             changed = True
+        if not isinstance(state.get("analysis_input_history"), list):
+            state["analysis_input_history"] = []
+            changed = True
         if not isinstance(state.get("analysis_checkpoints"), dict):
             state["analysis_checkpoints"] = {}
+            changed = True
+        if not isinstance(state.get("consecutive_search_restarts"), int):
+            state["consecutive_search_restarts"] = 0
             changed = True
         for key in (
             "generation_search_restarts",
@@ -1304,7 +1336,121 @@ class EvolutionRunner:
             if isinstance(item, dict)
             and str(item.get("difficulty") or "") in {"", difficulty}
         ][-1:]
-        return selected + latest_restart
+        visible = selected + latest_restart
+        if self.config.analysis_experience_mode != "single_failure":
+            return visible
+
+        # Keep outcome-level evolution history, but do not leak the other nine
+        # trajectories from the post-experiment audit into the next analysis.
+        sanitized: list[dict[str, Any]] = []
+        hidden_fields = (
+            "mechanism_evidence",
+            "combat_evidence",
+            "runtime_findings",
+            "salvageable_changes",
+            "failed_dependencies",
+            "audit_evidence_limits",
+        )
+        for item in visible:
+            copied = json.loads(json.dumps(item, ensure_ascii=False))
+            for field in hidden_fields:
+                copied[field] = []
+            copied["gate_execution_audit"] = {}
+            copied["lesson"] = (
+                "Match-level post-experiment evidence is withheld by the "
+                "single_failure ablation; use only the intervention and aggregate "
+                "outcome scores."
+            )
+            inheritance = copied.get("inheritance")
+            if isinstance(inheritance, dict):
+                for change in inheritance.get("verified_changes") or []:
+                    if isinstance(change, dict):
+                        change.pop("evidence", None)
+            copied["analysis_visibility"] = "aggregate_outcomes_only"
+            sanitized.append(copied)
+        return sanitized
+
+    def _select_analysis_record_paths(
+        self,
+        state: dict[str, Any],
+        *,
+        difficulty: str,
+        strategy: str,
+        record_paths: list[Path],
+    ) -> list[Path]:
+        """Select trajectory evidence visible to EvolAgent for this generation."""
+        unique_paths = list(
+            dict.fromkeys(path.resolve() for path in record_paths if path.is_file())
+        )
+        if self.config.analysis_experience_mode == "multi_match":
+            return unique_paths
+        if not unique_paths:
+            return []
+
+        generation = int(state.get("generation") or 0)
+        history = state.setdefault("analysis_input_history", [])
+        for item in reversed(history):
+            if not isinstance(item, dict):
+                continue
+            if (
+                int(item.get("generation") or -1) != generation
+                or str(item.get("difficulty") or "") != difficulty
+                or str(item.get("strategy") or "") != strategy
+                or str(item.get("mode") or "") != "single_failure"
+            ):
+                continue
+            selected = Path(str(item.get("selected_record") or ""))
+            if selected.is_file() and selected.resolve() in unique_paths:
+                return [selected.resolve()]
+
+        outcomes = [(path, _match_result(path)) for path in sorted(unique_paths)]
+        defeats = [path for path, result in outcomes if result in {"defeat", "loss"}]
+        non_wins = [
+            path
+            for path, result in outcomes
+            if result in {"defeat", "loss", "tie", "draw"}
+        ]
+        if defeats:
+            pool = defeats
+            selection_reason = "fixed_seed_failure_sample"
+        elif non_wins:
+            pool = non_wins
+            selection_reason = "fixed_seed_non_win_fallback"
+        else:
+            # A perfect batch normally advances before analysis. This keeps runs
+            # reproducible at a mastered final difficulty with a forced full budget.
+            pool = [path for path, _result in outcomes]
+            selection_reason = "no_failure_available_fallback"
+        token = (
+            f"{self.config.analysis_sample_seed}|{generation}|"
+            f"{difficulty}|{strategy}"
+        )
+        index = int(hashlib.sha256(token.encode("utf-8")).hexdigest(), 16) % len(pool)
+        selected = pool[index]
+        selected_result = next(
+            (result for path, result in outcomes if path == selected), "unknown"
+        )
+        history.append(
+            {
+                "generation": generation,
+                "difficulty": difficulty,
+                "strategy": strategy,
+                "mode": "single_failure",
+                "sample_seed": int(self.config.analysis_sample_seed),
+                "available_records": len(unique_paths),
+                "available_defeats": len(defeats),
+                "selected_record": str(selected),
+                "selected_result": selected_result,
+                "selection_reason": selection_reason,
+                "created_at": datetime.now().isoformat(),
+            }
+        )
+        print(
+            "Ablation analysis input: single_failure selected "
+            f"{selected.name} ({selected_result}) from {len(unique_paths)} records",
+            flush=True,
+        )
+        return [selected]
 
     def _blocked_mechanism_families(
         self,
@@ -1437,6 +1583,8 @@ class EvolutionRunner:
         }
         restarts = state.setdefault("generation_search_restarts", [])
         restarts.append(restart)
+        consecutive_restarts = int(state.get("consecutive_search_restarts") or 0) + 1
+        state["consecutive_search_restarts"] = consecutive_restarts
         restart_count = sum(
             1
             for item in restarts
@@ -1444,6 +1592,20 @@ class EvolutionRunner:
             and int(item.get("generation", -1)) == generation
             and str(item.get("difficulty") or "") == difficulty
         )
+
+        if consecutive_restarts >= MAX_CONSECUTIVE_SEARCH_RESTARTS:
+            state["status"] = "candidate_search_blocked"
+            state["candidate_search_blocked_reason"] = restart["reason"]
+            state["pending_candidate"] = None
+            state["candidate_resume_dir"] = None
+            print(
+                "EvolAgent candidate search reached the bounded retry limit without "
+                "a basic-valid candidate; stopping this run instead of repeating "
+                "the same analysis indefinitely.",
+                flush=True,
+            )
+            self._save_state(state)
+            return False
 
         state["status"] = "running"
         state["pending_candidate"] = None
@@ -2073,12 +2235,16 @@ class EvolutionRunner:
         resume_dir: Path | None = None,
         analysis_seed_dir: Path | None = None,
         retry_feedback: list[str] | None = None,
+        analysis_record_paths: list[Path] | None = None,
     ) -> EvolRunResult:
         if self._candidate_generator is not None:
             return self._candidate_generator(champion, champion_batch, prior_experiences)
         record_paths: list[Path] = []
-        for batch in evidence_batches or [champion_batch]:
-            record_paths.extend(find_record_jsons(batch.path))
+        if analysis_record_paths is not None:
+            record_paths.extend(analysis_record_paths)
+        else:
+            for batch in evidence_batches or [champion_batch]:
+                record_paths.extend(find_record_jsons(batch.path))
         skill_dir = resolve_skill_dir(
             champion,
             self.config.race,
@@ -2468,6 +2634,13 @@ class EvolutionRunner:
             for batch in parent_evidence_batches
             for path in find_record_jsons(batch.path)
         ]
+        record_paths = self._select_analysis_record_paths(
+            state,
+            difficulty=difficulty,
+            strategy=search_parent,
+            record_paths=record_paths,
+        )
+        self._save_state(state)
         if not resume_value:
             recovered = self._find_resumable_analysis_checkpoint(
                 state=state,
@@ -2517,6 +2690,7 @@ class EvolutionRunner:
                 resume_dir=Path(resume_value) if resume_value else None,
                 analysis_seed_dir=analysis_seed_dir,
                 retry_feedback=retry_feedback,
+                analysis_record_paths=record_paths,
             )
             self._remember_analysis_checkpoint(
                 state,
@@ -2716,6 +2890,8 @@ class EvolutionRunner:
                 else {"status": "passed", "errors": []}
             ),
         }
+        state["consecutive_search_restarts"] = 0
+        state.pop("candidate_search_blocked_reason", None)
         self._save_state(state)
         return True
 
@@ -2729,6 +2905,23 @@ class EvolutionRunner:
     ) -> bool:
         action = result.decision_action
         if action == "request_more_matches":
+            if self.config.analysis_experience_mode == "single_failure":
+                self._record_agent_decision(
+                    state,
+                    result,
+                    difficulty=difficulty,
+                )
+                return self._restart_generation_search(
+                    state,
+                    difficulty=difficulty,
+                    champion=champion,
+                    reason=(
+                        "single_failure ablation fixes the visible trajectory "
+                        "budget at one match; additional match analysis is disabled"
+                    ),
+                    source_action="request_more_matches_disabled_by_ablation",
+                    checkpoint_dir=result.checkpoint_dir,
+                )
             analysis_games = self._analysis_games(
                 state, difficulty=difficulty, strategy=champion
             )

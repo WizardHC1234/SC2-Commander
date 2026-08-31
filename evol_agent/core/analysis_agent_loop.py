@@ -1265,6 +1265,19 @@ def _empirical_opponent_windows(
     return rows
 
 
+def _unresolved_simulation_actions(errors: list[str]) -> set[str]:
+    """Return unresolved action names from deterministic simulator errors."""
+
+    actions: set[str] = set()
+    for error in errors:
+        for match in re.finditer(
+            r"\b([a-z][a-z0-9_]*)\s*:\s*\d+\s*/\s*\d+\b",
+            str(error).casefold(),
+        ):
+            actions.add(match.group(1))
+    return actions
+
+
 def _evaluate_candidate_package_budgets(
     proposal: dict[str, Any],
     *,
@@ -1289,6 +1302,8 @@ def _evaluate_candidate_package_budgets(
         proposal.get("parent_timing_package") or {}
     )
     parent_time = parent.get("earliest_feasible_time_seconds")
+    parent_errors = [str(value) for value in (parent.get("errors") or [])]
+    parent_unresolved_actions = _unresolved_simulation_actions(parent_errors)
     parent_cost = (
         parent.get("total_cost")
         if isinstance(parent.get("total_cost"), dict)
@@ -1308,6 +1323,11 @@ def _evaluate_candidate_package_budgets(
             budget.get("package") or {}
         )
         candidate_time = candidate.get("earliest_feasible_time_seconds")
+        candidate_errors = [str(value) for value in (candidate.get("errors") or [])]
+        candidate_unresolved_actions = _unresolved_simulation_actions(candidate_errors)
+        candidate_only_unresolved_actions = sorted(
+            candidate_unresolved_actions - parent_unresolved_actions
+        )
         target_latest = budget.get("target_latest_first_commitment_seconds")
         maximum_added = budget.get("maximum_added_feasibility_seconds")
         delta = (
@@ -1339,7 +1359,18 @@ def _evaluate_candidate_package_budgets(
             and latest_ok is not False
             and delay_ok is not False
         )
-        if not candidate_complete:
+        if (
+            not candidate_complete
+            and not parent_complete
+            and candidate_unresolved_actions
+            and not candidate_only_unresolved_actions
+        ):
+            # A malformed or over-specified Champion package must not make every
+            # descendant permanently ineligible.  Preserve the uncertainty, but
+            # let a candidate that introduces no new unresolved dependency reach
+            # the full strategy validator and match evaluation.
+            status = "inherited_unresolved"
+        elif not candidate_complete:
             status = "unresolved"
         elif within_budget:
             status = "feasible"
@@ -1407,7 +1438,14 @@ def _evaluate_candidate_package_budgets(
                 ),
                 "bottlenecks": list(candidate.get("bottlenecks") or []),
                 "warnings": list(candidate.get("warnings") or []),
-                "errors": list(candidate.get("errors") or []),
+                "errors": candidate_errors,
+                "parent_errors": parent_errors,
+                "inherited_unresolved_actions": sorted(
+                    candidate_unresolved_actions & parent_unresolved_actions
+                ),
+                "candidate_only_unresolved_actions": (
+                    candidate_only_unresolved_actions
+                ),
             }
         )
     return reports
@@ -2628,6 +2666,7 @@ def _run_cross_match_decision(
             retrieval_evidence=retrieval_evidence,
             parent_timing_package=parent_timing_package,
             capability_manifest=capability_manifest or {},
+            knowledge_mode=knowledge_mode,
         ),
         model=model,
         normalizer=lambda raw: _normalize_candidate_package_proposal(
@@ -2672,35 +2711,58 @@ def _run_cross_match_decision(
             extraction_calls + proposal_calls,
         )
 
-    print(
-        f"{prefix}DataAgent: preflighting "
-        f"{len(proposal.get('candidate_packages') or [])} optimization package(s)",
-        flush=True,
-    )
-    budget_reports = _evaluate_candidate_package_budgets(
-        proposal,
-        race=race,
-        summaries=summaries,
-    )
-    for report in budget_reports:
-        combat_estimate = report.get("candidate_support_aware_combat_estimate") or {}
+    if knowledge_mode == "enabled":
         print(
-            f"{prefix}DataAgent: package {report.get('id')} "
-            f"earliest={report.get('candidate_earliest_feasible_time_seconds')}s "
-            f"delta={report.get('earliest_feasible_timing_delta_seconds')}s "
-            f"combat={combat_estimate.get('direct_power')}->"
-            f"{combat_estimate.get('support_adjusted_power')} "
-            f"opponent_windows={len(report.get('empirical_opponent_windows') or [])} "
-            f"status={report.get('status')}",
+            f"{prefix}DataAgent: preflighting "
+            f"{len(proposal.get('candidate_packages') or [])} optimization package(s)",
             flush=True,
         )
-    events.append(
-        {
-            "action": "optimization_package_preflight",
-            "package_count": len(budget_reports),
-            "reports": budget_reports,
-        }
-    )
+        budget_reports = _evaluate_candidate_package_budgets(
+            proposal,
+            race=race,
+            summaries=summaries,
+        )
+        for report in budget_reports:
+            combat_estimate = report.get("candidate_support_aware_combat_estimate") or {}
+            print(
+                f"{prefix}DataAgent: package {report.get('id')} "
+                f"earliest={report.get('candidate_earliest_feasible_time_seconds')}s "
+                f"delta={report.get('earliest_feasible_timing_delta_seconds')}s "
+                f"combat={combat_estimate.get('direct_power')}->"
+                f"{combat_estimate.get('support_adjusted_power')} "
+                f"opponent_windows={len(report.get('empirical_opponent_windows') or [])} "
+                f"status={report.get('status')}",
+                flush=True,
+            )
+        events.append(
+            {
+                "action": "optimization_package_preflight",
+                "package_count": len(budget_reports),
+                "reports": budget_reports,
+            }
+        )
+    else:
+        budget_reports = [
+            {
+                "id": str(item.get("id") or "").strip(),
+                "status": "model_only",
+                "knowledge_query_ids": [],
+                "external_knowledge_used": False,
+            }
+            for item in (proposal.get("candidate_packages") or [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ]
+        print(
+            f"{prefix}Model-only ablation: skipped DataAgent package preflight",
+            flush=True,
+        )
+        events.append(
+            {
+                "action": "skip_external_package_preflight",
+                "package_count": len(budget_reports),
+                "knowledge_mode": knowledge_mode,
+            }
+        )
 
     if knowledge_mode == "enabled":
         package_questions = _candidate_package_knowledge_questions(proposal)

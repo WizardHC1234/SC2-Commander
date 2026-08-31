@@ -777,6 +777,101 @@ def test_candidate_with_ninety_percent_win_rate_skips_confirmation_and_advances(
     assert decision["audit_evidence_limits"] == []
 
 
+def _record(path: Path, result: str) -> Path:
+    path.write_text(
+        json.dumps({"metadata": {"result": result}}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_single_failure_analysis_selects_one_defeat_reproducibly(
+    tmp_path: Path,
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            analysis_experience_mode="single_failure",
+            analysis_sample_seed=17,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    records = [
+        _record(tmp_path / "match_0.json", "Victory"),
+        _record(tmp_path / "match_1.json", "Defeat"),
+        _record(tmp_path / "match_2.json", "Defeat"),
+        _record(tmp_path / "match_3.json", "Victory"),
+    ]
+    state = runner._new_state()
+
+    first = runner._select_analysis_record_paths(
+        state,
+        difficulty="harder",
+        strategy="tank",
+        record_paths=records,
+    )
+    second = runner._select_analysis_record_paths(
+        state,
+        difficulty="harder",
+        strategy="tank",
+        record_paths=records,
+    )
+
+    assert first == second
+    assert len(first) == 1
+    assert json.loads(first[0].read_text(encoding="utf-8"))["metadata"]["result"] == "Defeat"
+    assert state["analysis_input_history"][0]["available_records"] == 4
+    assert state["analysis_input_history"][0]["available_defeats"] == 2
+
+
+def test_single_failure_history_hides_multi_match_audit_evidence(
+    tmp_path: Path,
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            analysis_experience_mode="single_failure",
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+    )
+    state = runner._new_state()
+    state["experiment_history"] = [
+        {
+            "experiment_id": "tank:g000:harder:tank_opt1",
+            "difficulty": "harder",
+            "candidate": "tank_opt1",
+            "decision": "accepted",
+            "score_delta": 0.2,
+            "mechanism_evidence": [{"game": "Game 1", "evidence": "hidden"}],
+            "combat_evidence": [{"game": "Game 2", "evidence": "hidden"}],
+            "runtime_findings": ["hidden"],
+            "gate_execution_audit": {"hidden": True},
+            "lesson": "hidden multi-match lesson",
+        }
+    ]
+
+    visible = runner._prior_experiences(state, difficulty="harder")
+
+    assert visible[0]["score_delta"] == 0.2
+    assert visible[0]["mechanism_evidence"] == []
+    assert visible[0]["combat_evidence"] == []
+    assert visible[0]["gate_execution_audit"] == {}
+    assert visible[0]["analysis_visibility"] == "aggregate_outcomes_only"
+
+
+def test_evolution_config_rejects_unknown_analysis_experience_mode() -> None:
+    with pytest.raises(ValueError, match="analysis_experience_mode"):
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            analysis_experience_mode="unknown",
+        ).validate()
+
+
 def test_execution_invalid_audit_blocks_candidate_promotion(tmp_path: Path) -> None:
     parent = tmp_path / "skills" / "terran" / "tank"
     parent.mkdir(parents=True)
@@ -1496,6 +1591,46 @@ def test_runtime_action_changes_search_direction_until_budget_completes(
     assert state["generation"] == 2
     assert len(state["generation_search_restarts"]) == 3
     assert len(state["exhausted_search_cycles"]) == 1
+
+
+def test_candidate_search_stops_after_bounded_consecutive_restarts(
+    tmp_path: Path,
+) -> None:
+    attempts = 0
+
+    def play(strategy: str, difficulty: str) -> BatchResult:
+        return _batch(strategy, difficulty, 5, tmp_path)
+
+    def evolve(champion: str, batch: BatchResult, experiences: list[object]) -> EvolRunResult:
+        nonlocal attempts
+        attempts += 1
+        return EvolRunResult(
+            ok=True,
+            message="no evaluable package",
+            decision_action="inspect_runtime",
+            action_reason="all packages have candidate-only unresolved dependencies",
+        )
+
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+            max_total_generations=10,
+            require_full_generation_budget=True,
+        ),
+        run_dir=tmp_path / "run",
+        project_root=tmp_path,
+        batch_executor=play,
+        candidate_generator=evolve,
+    )
+
+    state = runner.run()
+
+    assert attempts == 6
+    assert state["status"] == "candidate_search_blocked"
+    assert state["consecutive_search_restarts"] == 6
+    assert len(state["generation_search_restarts"]) == 6
 
 
 def test_candidate_evaluation_requests_exactly_ten_games(tmp_path: Path) -> None:

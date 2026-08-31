@@ -109,7 +109,7 @@ def build_candidate_prompt(
     knowledge_runs: list[dict[str, Any]] | None = None,
 ) -> str:
     """Generate one coherent complete strategy from a compact evidence brief."""
-    del knowledge_mode, tool_observations
+    del tool_observations
     from .prompts import RUNTIME_CONTRACT
 
     parent_text = str(skill_texts.get("strategy.md") or "")
@@ -134,6 +134,14 @@ Previous candidate:
 """
 
     action = "revise_candidate" if validation_errors else "draft_candidate"
+    knowledge_text = (
+        render_knowledge_results(knowledge_runs or [])
+        if knowledge_mode == "enabled"
+        else (
+            "Disabled for the model-only ablation. Use only the supplied strategy, "
+            "trajectory analysis, experiment history, and your own internal knowledge."
+        )
+    )
     return f"""You are EvolAgent's Strategy Optimizer for StarCraft II. The analysis and package-selection stages are complete. Generate the entire replacement strategy.md as one coherent strategy by implementing only the selected optimization brief. Do not select another hypothesis, repeat the match analysis, combine rejected packages, or fill audit forms.
 
 Rewrite procedure:
@@ -157,7 +165,7 @@ Compact optimization brief:
 {json.dumps(brief, ensure_ascii=False, indent=2)}
 
 Verified deterministic SC2 knowledge:
-{render_knowledge_results(knowledge_runs or [])}
+{knowledge_text}
 
 Executor capability manifest:
 {json.dumps(capability_manifest or {}, ensure_ascii=False, separators=(',', ':'))}

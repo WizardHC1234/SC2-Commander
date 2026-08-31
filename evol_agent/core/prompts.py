@@ -801,13 +801,33 @@ def build_optimization_package_prompt(
     retrieval_evidence: dict[str, Any] | None,
     parent_timing_package: dict[str, Any] | None = None,
     capability_manifest: dict[str, Any] | None = None,
+    knowledge_mode: str = "enabled",
 ) -> str:
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
+    if knowledge_mode == "enabled":
+        package_grounding = (
+            "The deterministic build-order simulator will evaluate every package "
+            "before selection. The parent package below is read-only. Each candidate "
+            "must describe the complete first-commitment production package, including "
+            "unchanged Champion requirements, using exact runtime action identifiers "
+            "(`train_*`, `build_*`, and `research_*`). The program calculates resource "
+            "feasibility and earliest_feasible_time; you provide an evidence-derived "
+            "useful commitment bound."
+        )
+        knowledge_text = render_knowledge_results(knowledge_runs or [])
+    else:
+        package_grounding = (
+            "External knowledge retrieval, deterministic build-order simulation, "
+            "combat estimation, and DataAgent package preflight are disabled for this "
+            "ablation. Estimate feasibility yourself from the supplied strategy, "
+            "trajectories, history, and internal model knowledge."
+        )
+        knowledge_text = "Disabled for the model-only ablation."
     return f"""You are EvolAgent's Optimization-Package Planner. Convert the cross-match evidence into two or three semantically distinct, evidence-supported optimization hypotheses. Each package must change a different causal lever, not merely use different names, quantities, units, or wording for the same behavior. Do not select the winner and do not write strategy.md yet.
 
 {OPTIMIZATION_POLICY}
 
-The deterministic build-order simulator will evaluate every package before selection. The parent package below is read-only. Each candidate must describe the complete first-commitment production package, including unchanged Champion requirements, using exact runtime action identifiers (`train_*`, `build_*`, and `research_*`). The program calculates resource feasibility and earliest_feasible_time; you provide an evidence-derived useful commitment bound. Compare the proposed contact window with opponent forces actually observed near that window. Do not treat a larger force, a counter unit, an upgrade, or an earlier attack as an improvement without trajectory evidence that it addresses the diagnosed loss.
+{package_grounding} Compare the proposed contact window with opponent forces actually observed near that window. Do not treat a larger force, a counter unit, an upgrade, or an earlier attack as an improvement without trajectory evidence that it addresses the diagnosed loss.
 
 Strategy identity protects the defining combat style and win mechanism, not every current number. Composition, production, economy, technology, attack timing, and continuation may change when evidence supports them, but a package must preserve the Champion behavior repeatedly associated with wins.
 
@@ -830,7 +850,7 @@ Evidence digest:
 {render_discovery_findings(discovery or {})}
 
 Verified SC2 knowledge:
-{render_knowledge_results(knowledge_runs or [])}
+{knowledge_text}
 
 Retrieved match/history evidence:
 {render_retrieval_evidence(retrieval_evidence or {})}
@@ -932,11 +952,30 @@ def _compact_decision_prompt(
     candidate_package_payload: dict[str, Any] | None,
     package_budget_reports: list[dict[str, Any]] | None,
     prior_experiences: list[Any] | None,
+    knowledge_mode: str,
 ) -> str:
     errors = "\n".join(f"- {error}" for error in validation_errors) or "None"
+    if knowledge_mode == "enabled":
+        grounding_rule = (
+            "Treat earliest_feasible_time as a lower bound and use DataAgent facts "
+            "as estimates rather than guaranteed battle outcomes."
+        )
+        knowledge_text = render_knowledge_results(knowledge_runs or [])
+        budget_text = json.dumps(
+            package_budget_reports or [], ensure_ascii=False, indent=2
+        )
+    else:
+        grounding_rule = (
+            "External SC2 knowledge, deterministic package timing, combat estimates, "
+            "and DataAgent assistance are disabled for this ablation. Judge the "
+            "packages only from the supplied trajectories, strategy, experiment "
+            "history, and your own internal knowledge."
+        )
+        knowledge_text = "Disabled for the model-only ablation."
+        budget_text = "Disabled for the model-only ablation."
     return f"""You are EvolAgent's independent Optimization-Package Selector and semantic judge. First decide whether the proposed packages represent at least two genuinely different causal interventions. Judge meaning from the intended trajectory change, contact window, dependencies, and outcome prediction, never from names or wording. If the packages are duplicates, all repeat failed history, all lack evidence, or all create unsupported timing or runtime risk, reject the whole set with next_action=regenerate_candidate_packages. Do not choose a package merely because one must win.
 
-When a usable set exists, select exactly one package without combining or rewriting it. Preserve the Champion's repeated winning behavior and prefer the smallest evidence-supported causal change. A package with status `unresolved` is ineligible. A `timing_risk` package requires direct trajectory evidence that its later contact remains useful; a self-declared time allowance is not evidence. Treat earliest_feasible_time as a lower bound, use DataAgent facts as estimates rather than guaranteed battle outcomes, and do not default to extra counter units, support, upgrades, scouting, defense, or higher gates. Compare every package semantically with prior experiments. A failed direction may receive at most one material repair that names a dependency which prevented realization; a second repair or a numerical restatement is repeats_failed and ineligible. Select inspect_runtime only when the supported problem is outside strategy control.
+When a usable set exists, select exactly one package without combining or rewriting it. Preserve the Champion's repeated winning behavior and prefer the smallest evidence-supported causal change. A package with status `unresolved` is ineligible. Status `inherited_unresolved` means the timing simulator inherited an unresolved action from the Champion and the candidate introduced no new unresolved action; it remains eligible for full strategy validation and empirical match evaluation, but its timing must be treated as unknown. A `timing_risk` package requires direct trajectory evidence that its later contact remains useful; a self-declared time allowance is not evidence. {grounding_rule} Do not default to extra counter units, support, upgrades, scouting, defense, or higher gates. Compare every package semantically with prior experiments. A failed direction may receive at most one material repair that names a dependency which prevented realization; a second repair or a numerical restatement is repeats_failed and ineligible. Select inspect_runtime only when the supported problem is outside strategy control.
 
 Strategy: {strategy_name}
 Race: {race}
@@ -948,7 +987,7 @@ Evidence digest:
 {render_discovery_findings(discovery or {})}
 
 Verified SC2 knowledge:
-{render_knowledge_results(knowledge_runs or [])}
+{knowledge_text}
 
 Retrieved match/history evidence:
 {render_retrieval_evidence(retrieval_evidence or {})}
@@ -960,7 +999,7 @@ Proposed optimization packages:
 {json.dumps(candidate_package_payload or {}, ensure_ascii=False, indent=2)}
 
 Program-calculated package budgets:
-{json.dumps(package_budget_reports or [], ensure_ascii=False, indent=2)}
+{budget_text}
 
 Return JSON only. For regenerate_candidate_packages, leave selected_package_id empty and explain why every package was rejected. Otherwise copy the selected package without changing its contents:
 {{
@@ -1003,6 +1042,7 @@ def build_cross_match_decision_prompt(
         candidate_package_payload=candidate_package_payload,
         package_budget_reports=package_budget_reports,
         prior_experiences=prior_experiences,
+        knowledge_mode=knowledge_mode,
     )
     del knowledge_mode
     capability_text = json.dumps(capability_manifest or {}, ensure_ascii=False, indent=2)

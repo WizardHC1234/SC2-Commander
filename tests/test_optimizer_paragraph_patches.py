@@ -4,6 +4,7 @@ from pathlib import Path
 
 from evol_agent.core.optimization_agent_loop import (
     _candidate_knowledge_run,
+    _fallback_is_safe,
     _knowledge_runs_for_optimizer,
     _normalize_optimizer_candidate,
     _patches_to_operations,
@@ -19,6 +20,22 @@ from evol_agent.validation import validate_strategy_markdown
 
 
 TANK_STRATEGY = Path("skills/terran/tank/strategy.md").read_text(encoding="utf-8")
+
+
+def test_retry_exhausted_mechanism_history_can_use_basic_valid_candidate() -> None:
+    assert _fallback_is_safe(
+        failure_stage="semantic",
+        errors=[
+            "decision_grounding — mechanism history — semantically equivalent"
+        ],
+    )
+    assert not _fallback_is_safe(
+        failure_stage="semantic",
+        errors=[
+            "decision_grounding — mechanism history — semantically equivalent",
+            "missing_dependency — Starport is required",
+        ],
+    )
 
 
 def test_verified_inheritance_collects_realized_accepted_change() -> None:
@@ -293,6 +310,57 @@ def test_optimizer_includes_outer_generation_retry_feedback(monkeypatch) -> None
     assert result.ok is True
     assert improvement is not None
     assert "Candidate-generation attempt 1/4 failed" in prompts[0]
+
+
+def test_model_only_optimizer_skips_data_agent_and_semantic_preflight(
+    monkeypatch,
+) -> None:
+    document = StrategyDocument.parse(TANK_STRATEGY)
+
+    def fake_llm(prompt: str, **kwargs):
+        assert "Disabled for the model-only ablation" in prompt
+        return {
+            "action": "draft_candidate",
+            "patches": [
+                _patch(
+                    document,
+                    "main_attack_gate",
+                    "Begin the planned attack with 36 Marines and 8 Siege Tanks.",
+                    "This changes the readiness rule selected by the hypothesis.",
+                )
+            ],
+            "expected_effect": "earlier first attack",
+            "main_risk": "smaller force",
+        }
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("model-only mode must not call deterministic knowledge")
+
+    monkeypatch.setattr("evol_agent.core.optimization_agent_loop.call_json_llm", fake_llm)
+    monkeypatch.setattr(
+        "evol_agent.core.optimization_agent_loop._candidate_knowledge_run",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "evol_agent.core.optimization_agent_loop.validate_strategy_patch_semantics",
+        forbidden,
+    )
+
+    result, improvement, _obs, _errors, events = run_optimization_agent_loop(
+        strategy_name="tank",
+        race="terran",
+        battle_analysis=_decision_analysis(),
+        skill_texts={"strategy.md": TANK_STRATEGY},
+        initial_tool_observations=[],
+        knowledge_mode="disabled",
+    )
+
+    assert result.ok is True
+    assert improvement is not None
+    assert any(
+        item.get("action") == "skip_external_candidate_validation"
+        for item in events
+    )
 
 
 def test_apply_patch_allows_five_detail_replacements() -> None:

@@ -560,9 +560,18 @@ def _fallback_is_safe(*, failure_stage: str, errors: list[str]) -> bool:
     """
     if failure_stage != "semantic" or not errors:
         return False
-    return all(
-        str(error).strip().lower().startswith("non-blocking") for error in errors
-    )
+    normalized = [str(error).strip().lower() for error in errors if str(error).strip()]
+    if not normalized:
+        return False
+    if all(error.startswith("non-blocking") for error in normalized):
+        return True
+    # The exact-document duplicate guard in the outer evolution runner still
+    # prevents replaying an identical strategy.  After every semantic retry has
+    # been used, a basic-valid, non-identical candidate may be evaluated even if
+    # the model-only history judge still considers its causal family similar.
+    # Match outcomes are the final evidence and this avoids an endless analysis
+    # loop caused solely by an over-broad semantic equivalence verdict.
+    return all("mechanism history" in error for error in normalized)
 
 
 def _verified_inheritance(
@@ -783,7 +792,11 @@ def run_optimization_agent_loop(
         error = "Optimizer requires a Cross-match hypothesis and plan.direction"
         return ValidationResult(ok=False, error=error), None, observations, [error], events
 
-    base_knowledge_runs = _knowledge_runs_for_optimizer(decision, observations)
+    base_knowledge_runs = (
+        _knowledge_runs_for_optimizer(decision, observations)
+        if knowledge_mode == "enabled"
+        else []
+    )
     knowledge_runs = list(base_knowledge_runs)
     print(
         f"{prefix}OptimizationAgent: generating complete strategy.md for "
@@ -981,21 +994,36 @@ def run_optimization_agent_loop(
         draft_improvement.raw["files"] = dict(draft_improvement.files)
         latest_applied_improvement = draft_improvement
         last_improvement = draft_improvement
-        print(
-            f"{prefix}DataAgent: validating candidate action dependencies",
-            flush=True,
-        )
-        candidate_knowledge = _candidate_knowledge_run(
-            candidate_text=patched_text,
-            parent_text=parent_text,
-            race=race,
-            capability_manifest=capability_manifest,
-        )
         knowledge_runs = [
             run
             for run in base_knowledge_runs
             if str(run.get("question_id") or "") != "QCANDIDATE"
         ]
+        candidate_knowledge = None
+        if knowledge_mode == "enabled":
+            print(
+                f"{prefix}DataAgent: validating candidate action dependencies",
+                flush=True,
+            )
+            candidate_knowledge = _candidate_knowledge_run(
+                candidate_text=patched_text,
+                parent_text=parent_text,
+                race=race,
+                capability_manifest=capability_manifest,
+            )
+        elif attempt == 1:
+            print(
+                f"{prefix}Model-only ablation: skipped DataAgent candidate validation",
+                flush=True,
+            )
+            events.append(
+                {
+                    "attempt": attempt,
+                    "action": "skip_external_candidate_validation",
+                    "valid": True,
+                    "llm_calls": llm_calls,
+                }
+            )
         if candidate_knowledge is not None:
             knowledge_runs.append(candidate_knowledge)
             draft_improvement.raw["candidate_knowledge"] = candidate_knowledge
@@ -1027,18 +1055,22 @@ def run_optimization_agent_loop(
                     )
                 continue
         semantic_audit: dict[str, Any] = {}
-        semantic_errors = validate_strategy_patch_semantics(
-            decision=decision,
-            parent_text=parent_text,
-            candidate_text=patched_text,
-            patches=normalized["patches"],
-            capability_manifest=capability_manifest,
-            knowledge_runs=knowledge_runs,
-            inheritance=inheritance,
-            prior_experiences=prior_experiences,
-            audit_output=semantic_audit,
-            race=race,
-            model=model,
+        semantic_errors = (
+            validate_strategy_patch_semantics(
+                decision=decision,
+                parent_text=parent_text,
+                candidate_text=patched_text,
+                patches=normalized["patches"],
+                capability_manifest=capability_manifest,
+                knowledge_runs=knowledge_runs,
+                inheritance=inheritance,
+                prior_experiences=prior_experiences,
+                audit_output=semantic_audit,
+                race=race,
+                model=model,
+            )
+            if knowledge_mode == "enabled"
+            else []
         )
         if semantic_audit:
             draft_improvement.raw["deterministic_feasibility_audit"] = semantic_audit
@@ -1162,14 +1194,6 @@ def run_optimization_agent_loop(
                     f"{prefix}OptimizationAgent: candidate semantics failed; "
                     f"retrying ({attempt}/{MAX_VALIDATION_RETRIES}): {error}",
                     flush=True,
-                )
-            if any("mechanism history" in item.lower() for item in semantic_errors):
-                return (
-                    ValidationResult(ok=False, error=error),
-                    None,
-                    observations,
-                    validation_errors,
-                    events,
                 )
             continue
 

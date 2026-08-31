@@ -1576,6 +1576,45 @@ def test_package_preflight_reports_medivac_support_power() -> None:
     assert p2["support_aware_combat_delta"]["support_bonus_power"] > 0
 
 
+def test_package_preflight_keeps_parent_inherited_deadlock_evaluable(
+    monkeypatch,
+) -> None:
+    proposal = _package_proposal()
+    calls = 0
+
+    def fake_simulator(_package):
+        nonlocal calls
+        calls += 1
+        unresolved = (
+            "build_barracks_techlab"
+            if calls < 3
+            else "build_starport"
+        )
+        return {
+            "complete": False,
+            "earliest_feasible_time_seconds": None,
+            "total_cost": {},
+            "bottlenecks": [],
+            "warnings": [],
+            "errors": [
+                "simulation deadlocked with unresolved targets: "
+                f"{unresolved}:2/3"
+            ],
+        }
+
+    monkeypatch.setattr(
+        "evol_agent.core.analysis_agent_loop.simulate_terran_first_commitment",
+        fake_simulator,
+    )
+
+    reports = _evaluate_candidate_package_budgets(proposal, race="terran")
+
+    assert reports[0]["status"] == "inherited_unresolved"
+    assert reports[0]["candidate_only_unresolved_actions"] == []
+    assert reports[1]["status"] == "unresolved"
+    assert reports[1]["candidate_only_unresolved_actions"] == ["build_starport"]
+
+
 def test_failed_package_requirement_query_marks_only_that_package_unresolved() -> None:
     reports = [
         {"id": "P1", "status": "feasible"},
@@ -2020,6 +2059,12 @@ def test_selector_rejection_regenerates_packages_before_strategy_edit(monkeypatc
         "evol_agent.core.analysis_agent_loop._summarize_matches",
         lambda **kwargs: _stub_summaries(),
     )
+    monkeypatch.setattr(
+        "evol_agent.core.analysis_agent_loop._evaluate_candidate_package_budgets",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("model-only mode must not run DataAgent preflight")
+        ),
+    )
     result = run_analysis_agent_loop(
         strategy_name="tank",
         race="terran",
@@ -2032,6 +2077,10 @@ def test_selector_rejection_regenerates_packages_before_strategy_edit(monkeypatc
     assert selector_calls == 2
     assert any(
         item.get("action") == "regenerate_candidate_packages"
+        for item in result.events
+    )
+    assert any(
+        item.get("action") == "skip_external_package_preflight"
         for item in result.events
     )
 

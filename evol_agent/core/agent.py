@@ -221,7 +221,11 @@ class EvolAgent:
             "override": model_override,
             "analysis": analysis_model,
             "optimization": optimization_model,
-            "knowledge": "deterministic",
+            "knowledge": (
+                "deterministic"
+                if request.knowledge_mode == "enabled"
+                else "model-only"
+            ),
         }
         capability_manifest = build_executor_capability_manifest(race)
 
@@ -395,7 +399,8 @@ class EvolAgent:
             print(
                 f"  EvolAgent running match summaries and one batch analysis "
                 f"for {len(records)} records: {race}/{strategy_name} "
-                f"(analysis={analysis_model}, knowledge=deterministic, "
+                f"(analysis={analysis_model}, knowledge="
+                f"{'deterministic' if request.knowledge_mode == 'enabled' else 'model-only'}, "
                 f"stage={checkpoint.stage})",
                 flush=True,
             )

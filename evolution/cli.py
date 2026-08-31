@@ -3,7 +3,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .runner import DEFAULT_DIFFICULTIES, EvolutionConfig, EvolutionRunner
+from .runner import (
+    ANALYSIS_EXPERIENCE_MODES,
+    DEFAULT_DIFFICULTIES,
+    EvolutionConfig,
+    EvolutionRunner,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -34,6 +39,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mastery-score-threshold", type=float, default=0.90)
     parser.add_argument("--analysis-batch-games", type=int, default=10)
     parser.add_argument("--max-analysis-games-per-generation", type=int, default=20)
+    parser.add_argument(
+        "--analysis-experience-mode",
+        choices=ANALYSIS_EXPERIENCE_MODES,
+        default="multi_match",
+        help=(
+            "multi_match analyzes every supplied trajectory; single_failure "
+            "analyzes one deterministically sampled failed trajectory while "
+            "retaining all matches for evaluation"
+        ),
+    )
+    parser.add_argument(
+        "--analysis-sample-seed",
+        type=int,
+        default=0,
+        help="Fixed seed used by the single_failure ablation",
+    )
     parser.add_argument("--max-generations-per-difficulty", type=int, default=10)
     parser.add_argument("--max-total-generations", "--max-generations", type=int, default=50)
     parser.add_argument(
@@ -80,6 +101,8 @@ def main() -> None:
         mastery_score_threshold=args.mastery_score_threshold,
         analysis_batch_games=args.analysis_batch_games,
         max_analysis_games_per_generation=args.max_analysis_games_per_generation,
+        analysis_experience_mode=args.analysis_experience_mode,
+        analysis_sample_seed=args.analysis_sample_seed,
         max_generations_per_difficulty=args.max_generations_per_difficulty,
         max_total_generations=args.max_total_generations,
         require_full_generation_budget=args.require_full_generation_budget,

@@ -11,6 +11,12 @@
     [Nullable[int]]$MAX_GENERATIONS = $null,
     [Nullable[int]]$MAX_GENERATIONS_PER_DIFFICULTY = $null,
     [Nullable[double]]$MASTERY_SCORE_THRESHOLD = $null,
+    [Nullable[int]]$ANALYSIS_BATCH_GAMES = $null,
+    [Nullable[int]]$MAX_ANALYSIS_GAMES_PER_GENERATION = $null,
+    [string]$ANALYSIS_EXPERIENCE_MODE = "",
+    [Nullable[int]]$ANALYSIS_SAMPLE_SEED = $null,
+    [string]$KNOWLEDGE_MODE = "",
+    [switch]$REQUIRE_FULL_GENERATION_BUDGET,
     [string]$RUN_DIR = "",
     [string]$BASELINE_BATCH_DIR = "",
     [string]$RECORDS_DIR = ""
@@ -35,6 +41,12 @@ $CFG_CONCURRENCY = 5
 $CFG_MAX_GENERATIONS = 10
 $CFG_MAX_GENERATIONS_PER_DIFFICULTY = 10
 $CFG_MASTERY_SCORE_THRESHOLD = 0.90
+$CFG_ANALYSIS_BATCH_GAMES = 10
+$CFG_MAX_ANALYSIS_GAMES_PER_GENERATION = 20
+$CFG_ANALYSIS_EXPERIENCE_MODE = "multi_match" # multi_match | single_failure
+$CFG_ANALYSIS_SAMPLE_SEED = 0
+$CFG_KNOWLEDGE_MODE = "enabled"                # enabled | disabled (model-only ablation)
+$CFG_REQUIRE_FULL_GENERATION_BUDGET = $false
 $CFG_RUN_DIR = ""                       # resume: evolution_runs\...
 $CFG_BASELINE_BATCH_DIR = ""  # reuse the retained 10-game tank baseline
 $CFG_RECORDS_DIR = "game_records_tank_evol"
@@ -54,6 +66,12 @@ if ($null -ne $CONCURRENCY) { $CFG_CONCURRENCY = [int]$CONCURRENCY }
 if ($null -ne $MAX_GENERATIONS) { $CFG_MAX_GENERATIONS = [int]$MAX_GENERATIONS }
 if ($null -ne $MAX_GENERATIONS_PER_DIFFICULTY) { $CFG_MAX_GENERATIONS_PER_DIFFICULTY = [int]$MAX_GENERATIONS_PER_DIFFICULTY }
 if ($null -ne $MASTERY_SCORE_THRESHOLD) { $CFG_MASTERY_SCORE_THRESHOLD = [double]$MASTERY_SCORE_THRESHOLD }
+if ($null -ne $ANALYSIS_BATCH_GAMES) { $CFG_ANALYSIS_BATCH_GAMES = [int]$ANALYSIS_BATCH_GAMES }
+if ($null -ne $MAX_ANALYSIS_GAMES_PER_GENERATION) { $CFG_MAX_ANALYSIS_GAMES_PER_GENERATION = [int]$MAX_ANALYSIS_GAMES_PER_GENERATION }
+if (-not [string]::IsNullOrWhiteSpace($ANALYSIS_EXPERIENCE_MODE)) { $CFG_ANALYSIS_EXPERIENCE_MODE = $ANALYSIS_EXPERIENCE_MODE }
+if ($null -ne $ANALYSIS_SAMPLE_SEED) { $CFG_ANALYSIS_SAMPLE_SEED = [int]$ANALYSIS_SAMPLE_SEED }
+if (-not [string]::IsNullOrWhiteSpace($KNOWLEDGE_MODE)) { $CFG_KNOWLEDGE_MODE = $KNOWLEDGE_MODE }
+if ($REQUIRE_FULL_GENERATION_BUDGET.IsPresent) { $CFG_REQUIRE_FULL_GENERATION_BUDGET = $true }
 if (-not [string]::IsNullOrWhiteSpace($RUN_DIR)) { $CFG_RUN_DIR = $RUN_DIR }
 if (-not [string]::IsNullOrWhiteSpace($BASELINE_BATCH_DIR)) { $CFG_BASELINE_BATCH_DIR = $BASELINE_BATCH_DIR }
 if (-not [string]::IsNullOrWhiteSpace($RECORDS_DIR)) { $CFG_RECORDS_DIR = $RECORDS_DIR }
@@ -83,6 +101,10 @@ Write-Host "Confirmation : $CFG_CONFIRMATION_MATCHES extra games per strategy wh
 Write-Host "Selection    : candidate score > champion score and the planned mechanism was implemented"
 Write-Host "Mastery      : Champion win rate >= $CFG_MASTERY_SCORE_THRESHOLD"
 Write-Host "Budget       : per-difficulty=$CFG_MAX_GENERATIONS_PER_DIFFICULTY, total=$CFG_MAX_GENERATIONS"
+Write-Host "Analysis     : $CFG_ANALYSIS_EXPERIENCE_MODE (sample_seed=$CFG_ANALYSIS_SAMPLE_SEED)"
+Write-Host "Analysis cap : batch=$CFG_ANALYSIS_BATCH_GAMES, per_generation=$CFG_MAX_ANALYSIS_GAMES_PER_GENERATION"
+Write-Host "Knowledge    : $CFG_KNOWLEDGE_MODE"
+Write-Host "Full budget  : $CFG_REQUIRE_FULL_GENERATION_BUDGET"
 Write-Host "Records dir  : $CFG_RECORDS_DIR"
 if (-not [string]::IsNullOrWhiteSpace($CFG_RUN_DIR)) {
     Write-Host "Resume dir   : $CFG_RUN_DIR"
@@ -104,8 +126,16 @@ $arguments = @(
     "--max-total-generations", $CFG_MAX_GENERATIONS,
     "--max-generations-per-difficulty", $CFG_MAX_GENERATIONS_PER_DIFFICULTY,
     "--mastery-score-threshold", $CFG_MASTERY_SCORE_THRESHOLD
+    "--analysis-batch-games", $CFG_ANALYSIS_BATCH_GAMES,
+    "--max-analysis-games-per-generation", $CFG_MAX_ANALYSIS_GAMES_PER_GENERATION,
+    "--analysis-experience-mode", $CFG_ANALYSIS_EXPERIENCE_MODE,
+    "--analysis-sample-seed", $CFG_ANALYSIS_SAMPLE_SEED,
+    "--knowledge-mode", $CFG_KNOWLEDGE_MODE,
     "--records-dir", $CFG_RECORDS_DIR
 )
+if ($CFG_REQUIRE_FULL_GENERATION_BUDGET) {
+    $arguments += "--require-full-generation-budget"
+}
 if (-not [string]::IsNullOrWhiteSpace($CFG_EVOLUTION_MODEL)) {
     $arguments += @("--evolution-model", $CFG_EVOLUTION_MODEL)
 }
