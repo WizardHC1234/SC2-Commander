@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -259,7 +260,10 @@ def _string_list(value: Any) -> list[str]:
 
 def _safe_name(value: str, limit: int = 24) -> str:
     text = re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_") or "run"
-    return text[:limit]
+    while "__" in text:
+        text = text.replace("__", "_")
+    trimmed = text[:limit].rstrip("_")
+    return trimmed or "run"
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -375,6 +379,25 @@ def completed_record_indices(batch_dir: Path, *, strategy: str) -> set[int]:
         if match:
             indices.add(int(match.group(1)))
     return indices
+
+
+def contiguous_index_ranges(indices: list[int] | set[int]) -> list[tuple[int, int]]:
+    """Collapse sorted indices into ``(start_index, total_matches)`` ranges."""
+    ordered = sorted({int(index) for index in indices})
+    if not ordered:
+        return []
+    ranges: list[tuple[int, int]] = []
+    start = ordered[0]
+    count = 1
+    for index in ordered[1:]:
+        if index == start + count:
+            count += 1
+            continue
+        ranges.append((start, count))
+        start = index
+        count = 1
+    ranges.append((start, count))
+    return ranges
 
 
 class EvolutionRunner:
@@ -716,7 +739,7 @@ class EvolutionRunner:
                     ("cand_confirm", str(pending.get("strategy") or "")),
                 ):
                     name = self._batch_name(generation, role, difficulty)
-                    add_path(self.records_root / name, strategy, difficulty)
+                    add_path(self._batch_dir_for(name), strategy, difficulty)
 
         previous_games = int(state.get("games_used") or 0)
         self._sync_games_used(state)
@@ -1982,8 +2005,8 @@ class EvolutionRunner:
             state, difficulty=difficulty, strategy=candidate
         ):
             return False
-        candidate_batch_dir = self.records_root / self._batch_name(
-            int(state.get("generation") or 0), "cand", difficulty
+        candidate_batch_dir = self._batch_dir_for(
+            self._batch_name(int(state.get("generation") or 0), "cand", difficulty)
         )
         if completed_record_count(candidate_batch_dir, strategy=candidate):
             return False
@@ -2034,6 +2057,17 @@ class EvolutionRunner:
             parts.append(difficulty)
         parts.append(role)
         return _safe_name("_".join(parts), 56)
+
+    def _batch_dir_for(self, batch_name: str) -> Path:
+        """Resolve the on-disk batch folder, collapsing duplicate underscores.
+
+        ``run_vs_ai`` writes into a collapsed slug, so a truncated run id that
+        ends with ``_`` must not look for a sibling ``__`` directory.
+        """
+        collapsed = self.records_root / _safe_name(batch_name, 56)
+        if collapsed.is_dir():
+            return collapsed
+        return self.records_root / batch_name
 
     def _strategy_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -2104,7 +2138,7 @@ class EvolutionRunner:
         if expected_games <= 0:
             raise ValueError("target_games must be positive")
         batch_name = self._batch_name(generation, role, difficulty)
-        batch_dir = self.records_root / batch_name
+        batch_dir = self._batch_dir_for(batch_name)
         completed = completed_record_count(batch_dir, strategy=strategy)
         if completed == expected_games:
             return read_batch_result(
@@ -2164,6 +2198,7 @@ class EvolutionRunner:
                 command.extend(["--bot-instruct", self.config.bot_instruct])
         total_flag = "-TOTAL_MATCHES" if os.name == "nt" else "--total-matches"
         start_flag = "-START_INDEX" if os.name == "nt" else "--start-index"
+        concurrency_flag = "-CONCURRENCY" if os.name == "nt" else "--concurrency"
         last_return_code = 0
         for batch_attempt in range(1, MAX_BATCH_EXECUTION_ATTEMPTS + 1):
             completed_indices = completed_record_indices(
@@ -2176,22 +2211,62 @@ class EvolutionRunner:
                     for index in range(expected_games)
                     if index not in completed_indices
                 ]
-                invocations = [(index, 1) for index in missing_indices]
+                # Fill contiguous holes in one start_batch call so concurrency
+                # applies; run disjoint hole ranges in parallel.
+                invocations = contiguous_index_ranges(missing_indices)
             else:
                 # Compatibility with imported records that predate run-indexed
                 # match directories. Such records are assumed to form a prefix.
                 invocations = [(completed, expected_games - completed)]
 
-            for start_index, total_matches in invocations:
-                command[command.index(total_flag) + 1] = str(total_matches)
-                command[command.index(start_flag) + 1] = str(start_index)
+            def _execute_invocation(
+                start_index: int,
+                total_matches: int,
+                *,
+                force_serial_matches: bool,
+            ) -> int:
+                cmd = list(command)
+                cmd[cmd.index(total_flag) + 1] = str(total_matches)
+                cmd[cmd.index(start_flag) + 1] = str(start_index)
+                if force_serial_matches:
+                    cmd[cmd.index(concurrency_flag) + 1] = "1"
                 process = subprocess.run(
-                    command,
+                    cmd,
                     cwd=self.project_root,
                     check=False,
                     env=self._strategy_env(),
                 )
-                last_return_code = int(getattr(process, "returncode", 0) or 0)
+                return int(getattr(process, "returncode", 0) or 0)
+
+            if len(invocations) <= 1:
+                for start_index, total_matches in invocations:
+                    last_return_code = _execute_invocation(
+                        start_index,
+                        total_matches,
+                        force_serial_matches=False,
+                    )
+                    self._copy_strategy_sidecar(strategy, batch_dir)
+            else:
+                workers = min(len(invocations), max(1, int(self.config.concurrency)))
+                print(
+                    f"Batch {batch_name}: filling {len(invocations)} hole ranges "
+                    f"in parallel (workers={workers}).",
+                    flush=True,
+                )
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [
+                        pool.submit(
+                            _execute_invocation,
+                            start_index,
+                            total_matches,
+                            force_serial_matches=True,
+                        )
+                        for start_index, total_matches in invocations
+                    ]
+                    for future in as_completed(futures):
+                        code = int(future.result() or 0)
+                        if code:
+                            last_return_code = code
                 self._copy_strategy_sidecar(strategy, batch_dir)
             observed = completed_record_count(batch_dir, strategy=strategy)
             if observed == expected_games:
@@ -2730,9 +2805,7 @@ class EvolutionRunner:
                         failure
                     )
                     checkpoint_value = str(candidate_result.checkpoint_dir or resume_value)
-                    state["candidate_resume_dir"] = checkpoint_value
                     retry_feedback.append(message)
-                    self._save_state(state)
                     print(
                         "EvolAgent rejected an unplayed historical-strategy duplicate; "
                         f"regenerating ({attempt}/{total_attempts}): "
@@ -2740,8 +2813,21 @@ class EvolutionRunner:
                         flush=True,
                     )
                     if attempt < total_attempts:
-                        resume_value = checkpoint_value
+                        # A candidate-stage checkpoint cannot emit a different
+                        # strategy.md. Abandon it and regenerate with feedback.
+                        if checkpoint_value:
+                            resolved = str(Path(checkpoint_value).resolve())
+                            abandoned = state.setdefault(
+                                "abandoned_analysis_checkpoints", []
+                            )
+                            if resolved not in abandoned:
+                                abandoned.append(resolved)
+                        resume_value = ""
+                        state["candidate_resume_dir"] = None
+                        self._save_state(state)
                         continue
+                    state["candidate_resume_dir"] = checkpoint_value
+                    self._save_state(state)
                     candidate_result = EvolRunResult(
                         ok=False,
                         message=message,
@@ -2793,11 +2879,20 @@ class EvolutionRunner:
             retry_feedback.append(
                 f"Candidate-generation attempt {attempt}/{total_attempts} failed: {message}"
             )
-            # A broken resume checkpoint cannot repair itself; restart from the
-            # compatible analysis seed while retaining the explicit feedback.
-            if message.startswith("failed to load checkpoint:") or message.startswith(
-                "strategy mismatch with checkpoint:"
+            # A broken or already-consumed resume checkpoint cannot repair
+            # itself; restart from a compatible analysis seed with feedback.
+            if (
+                message.startswith("failed to load checkpoint:")
+                or message.startswith("strategy mismatch with checkpoint:")
+                or message.startswith("checkpoint already produced a candidate")
             ):
+                if checkpoint_value:
+                    resolved = str(Path(checkpoint_value).resolve())
+                    abandoned = state.setdefault(
+                        "abandoned_analysis_checkpoints", []
+                    )
+                    if resolved not in abandoned:
+                        abandoned.append(resolved)
                 resume_value = ""
                 state["candidate_resume_dir"] = ""
             else:

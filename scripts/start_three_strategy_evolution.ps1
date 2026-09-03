@@ -1,13 +1,13 @@
 param(
-    [string]$COMMANDER_MODEL = "kimi-k2.5",
-    [string]$EVOLUTION_MODEL = "kimi-k2.5",
+    [string]$COMMANDER_MODEL = "qwen3.8-flash",
+    [string]$EVOLUTION_MODEL = "deepseek-v4-flash",
     [string]$DIFFICULTIES = "harder,veryhard,cheatvision,cheatmoney,cheatinsane",
     # Do not name this MATCHES: PowerShell's automatic $Matches is a Hashtable
     # written by -match/-notmatch and would clash with [int]$MATCHES.
     [int]$MATCH_COUNT = 10,
     [int]$CANDIDATE_MATCHES = 10,
     [int]$CONFIRMATION_MATCHES = 4,
-    [int]$CONCURRENCY_PER_STRATEGY = 2,
+    [int]$CONCURRENCY_PER_STRATEGY = 3,
     [int]$MAX_GENERATIONS = 10,
     [double]$MASTERY_SCORE_THRESHOLD = 0.90,
     [int]$ANALYSIS_BATCH_GAMES = 10,
@@ -17,11 +17,11 @@ param(
     [int]$ANALYSIS_SAMPLE_SEED = 0,
     [ValidateSet("enabled", "disabled")]
     [string]$KNOWLEDGE_MODE = "enabled",
-    [string]$RECORDS_GROUP = "",
+    [string]$RECORDS_GROUP = "evol_qwen38",
     [string]$MARINE_BASELINE_BATCH_DIR = "",
     [string]$TANK_BASELINE_BATCH_DIR = "",
     [string]$BATTLECRUISER_BASELINE_BATCH_DIR = "",
-    [string]$RUN_STAMP = "",
+    [string]$RUN_STAMP = "evol_qwen38_20260901",
     [switch]$WAIT
 )
 
@@ -49,8 +49,16 @@ foreach ($strategy in $strategies) {
         throw "Strategy file not found: $strategyFile"
     }
     $baselineDir = [string]$baselineByStrategy[$strategy]
-    if (-not [string]::IsNullOrWhiteSpace($baselineDir) -and -not (Test-Path -LiteralPath $baselineDir -PathType Container)) {
-        throw "Baseline batch directory not found for ${strategy}: $baselineDir"
+    if (-not [string]::IsNullOrWhiteSpace($baselineDir)) {
+        # Resolve relative baselines against repo root so resume path matches state.json.
+        if (-not [System.IO.Path]::IsPathRooted($baselineDir)) {
+            $baselineDir = Join-Path $repoRoot $baselineDir
+        }
+        $baselineDir = [string](Resolve-Path -LiteralPath $baselineDir)
+        $baselineByStrategy[$strategy] = $baselineDir
+        if (-not (Test-Path -LiteralPath $baselineDir -PathType Container)) {
+            throw "Baseline batch directory not found for ${strategy}: $baselineDir"
+        }
     }
 }
 
@@ -150,10 +158,11 @@ Write-Host "Match records: $recordsRoot\<strategy>"
 if ($WAIT) {
     Write-Host "Waiting for all three evolution processes..."
     foreach ($item in $processes) {
-        Wait-Process -Id $item.process_id
-        $finished = Get-Process -Id $item.process_id -ErrorAction SilentlyContinue
-        if ($null -eq $finished) {
-            Write-Host "$($item.strategy) process finished. See $($item.stdout) and $($item.stderr)."
+        # Process may already have exited before we reach Wait-Process.
+        $alive = Get-Process -Id $item.process_id -ErrorAction SilentlyContinue
+        if ($null -ne $alive) {
+            Wait-Process -Id $item.process_id -ErrorAction SilentlyContinue
         }
+        Write-Host "$($item.strategy) process finished. See $($item.stdout) and $($item.stderr)."
     }
 }

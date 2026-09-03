@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
 $env:PYTHONIOENCODING = "utf-8"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -9,7 +9,8 @@ if (-not $env:SC2PATH -or -not (Test-Path -LiteralPath $env:SC2PATH)) {
 
 # =============================================================================
 # start_experiments_matrix.ps1
-# 按实验列表批量跑对局；每组实验委�?scripts/start_batch.ps1�?# =============================================================================
+# 按实验列表批量跑对局；每组实验委托 scripts/start_batch.ps1
+# =============================================================================
 
 # =============================================================================
 # 1. Shared game config
@@ -21,26 +22,34 @@ $BOT_RACE = "terran"
 $BOT_INSTRUCT = ""
 
 # Default strategy when an experiment row omits Strategy.
-$FORCE_STRATEGY = "tank"
+$FORCE_STRATEGY = "marine"
 
 # =============================================================================
 # 2. Commander model (must exist in llm/config.json -> llm_agents_pool)
 # =============================================================================
 # $COMMANDER_MODEL = "qwen3-32b"
 # $COMMANDER_MODEL = "qwen3.5-27b"
-$COMMANDER_MODEL = "kimi-k2.5"
-# $COMMANDER_MODEL = "deepseek-v4-flash"
+# $COMMANDER_MODEL = "kimi-k2.5"
+$COMMANDER_MODEL = "deepseek-v4-flash"
 # $COMMANDER_MODEL = "qwen3-32b-reasoning"
 
 # =============================================================================
-# 3. Run control
+# 3. Run control + records root
 # =============================================================================
-$DEFAULT_MATCHES_PER_EXPERIMENT = 10
-$CONCURRENCY = 5
-
+$DEFAULT_MATCHES_PER_EXPERIMENT = 20
+$CONCURRENCY = 10
+# Match records root passed to start_batch.ps1 as -OUTPUT_BASE_DIR.
+# Empty  -> <repo>\game_records
+# Relative -> <repo>\<this>
+# Absolute -> that folder
+# $OUTPUT_BASE_DIR = ""
+$OUTPUT_BASE_DIR = "game_records_opt_final_ds4"
 # =============================================================================
 # 4. Experiment list
 # =============================================================================
+# Held-out eval of final evolved skills, same protocol as Experiment 1:
+# Kairos Junction LE, Terran macro AI, 20 matches, 4 difficulties.
+# Each skill is executed by the model that evolved it.
 # EnemyRace       : terran / zerg / protoss / random
 # EnemyDifficulty : veryeasy / easy / medium / mediumhard / hard / harder /
 #                   veryhard / cheatvision / cheatmoney / cheatinsane
@@ -49,38 +58,31 @@ $CONCURRENCY = 5
 # Matches         : omit to use $DEFAULT_MATCHES_PER_EXPERIMENT
 # Model           : 省略则用 $COMMANDER_MODEL（须存在于 llm/config.json）
 $EXPERIMENTS = @(
+    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" }
 
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank_opt1"; Matches = 10 }
-
-
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryeasy"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryeasy"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "veryeasy"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "easy"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20 }
-    # @{ EnemyRace = "terran";  EnemyDifficulty = "medium"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
-
-    @{ EnemyRace="terran"; EnemyDifficulty="mediumhard"; EnemyBuild="macro"; Strategy="none"; Matches=20;}
-    @{ EnemyRace="terran"; EnemyDifficulty="hard"; EnemyBuild="macro"; Strategy="none"; Matches=20;}
-    @{ EnemyRace="terran"; EnemyDifficulty="harder"; EnemyBuild="macro"; Strategy="none"; Matches=20;}
-    @{ EnemyRace="terran"; EnemyDifficulty="veryhard"; EnemyBuild="macro"; Strategy="none"; Matches=20;}
-    
-    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20}
-    @{ EnemyRace = "terran";  EnemyDifficulty = "mediumhard"; EnemyBuild = "macro";  Strategy = "battlecruiser"; Matches = 20 }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "tank"; Matches = 20  }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "hard"; EnemyBuild = "macro"; Strategy = "battlecruiser"; Matches = 20 }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro"; Strategy = "marine"; Matches = 20 }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20  }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "harder"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20 }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "marine"; Matches = 20  }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";  Strategy = "tank"; Matches = 20  }
-    @{ EnemyRace = "terran";  EnemyDifficulty = "veryhard"; EnemyBuild = "macro";    Strategy = "battlecruiser"; Matches = 20  }
-
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "qwen38_marine_opt_final";        Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "qwen38_tank_opt_final";          Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "qwen38_battlecruiser_opt_final"; Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "qwen38_marine_opt_final";        Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "qwen38_tank_opt_final";          Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "qwen38_battlecruiser_opt_final"; Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "qwen38_marine_opt_final";        Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "qwen38_tank_opt_final";          Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "qwen38_battlecruiser_opt_final"; Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "qwen38_marine_opt_final";        Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "qwen38_tank_opt_final";          Matches = 20; Model = "qwen3.8-flash" }
+    # @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "qwen38_battlecruiser_opt_final"; Matches = 20; Model = "qwen3.8-flash" }
 )
 
 function Get-SafeName {
@@ -142,6 +144,14 @@ Write-Host "Preparing to run $($EXPERIMENTS.Count) experiment(s)."
 Write-Host "Work dir: $currentPath"
 Write-Host "Batch launcher: $batchScript"
 Write-Host "Commander model (default): $COMMANDER_MODEL"
+$recordsRootDisplay = if ([string]::IsNullOrWhiteSpace($OUTPUT_BASE_DIR)) {
+    Join-Path $currentPath "game_records"
+} elseif ([System.IO.Path]::IsPathRooted($OUTPUT_BASE_DIR)) {
+    $OUTPUT_BASE_DIR
+} else {
+    Join-Path $currentPath $OUTPUT_BASE_DIR
+}
+Write-Host "Records root: $recordsRootDisplay"
 
 $totalFailures = 0
 for ($experimentIndex = 0; $experimentIndex -lt $EXPERIMENTS.Count; $experimentIndex++) {
@@ -238,6 +248,9 @@ for ($experimentIndex = 0; $experimentIndex -lt $EXPERIMENTS.Count; $experimentI
     )
     if (-not [string]::IsNullOrWhiteSpace($BOT_INSTRUCT)) {
         $batchArgs += @("-BOT_INSTRUCT", $BOT_INSTRUCT)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OUTPUT_BASE_DIR)) {
+        $batchArgs += @("-OUTPUT_BASE_DIR", $OUTPUT_BASE_DIR)
     }
 
     & $powerShellExe @batchArgs

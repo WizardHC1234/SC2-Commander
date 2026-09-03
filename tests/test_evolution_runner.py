@@ -12,6 +12,7 @@ from evolution.runner import (
     BatchResult,
     EvolutionConfig,
     EvolutionRunner,
+    _safe_name,
     close_batch_results,
     completed_record_count,
     curriculum_progress_score,
@@ -32,6 +33,31 @@ def _batch(strategy: str, difficulty: str, wins: int, root: Path) -> BatchResult
         draws=0,
         losses=10 - wins,
     )
+
+
+def test_safe_name_strips_trailing_underscore_after_truncation() -> None:
+    assert _safe_name("ablation_model_only_20260831", 15) == "ablation_model"
+    assert "__" not in _safe_name("ev_ablation_model__g000_harder_cand", 56)
+
+
+def test_batch_name_does_not_insert_double_underscore_for_truncated_run_id(
+    tmp_path: Path,
+) -> None:
+    runner = EvolutionRunner(
+        EvolutionConfig(
+            strategy="tank",
+            commander_model="model",
+            difficulties=("harder",),
+        ),
+        run_dir=tmp_path / "ablation_model_only_20260831",
+        project_root=tmp_path,
+    )
+    name = runner._batch_name(0, "cand", "harder")
+    assert "__" not in name
+    assert name == "ev_ablation_model_g000_harder_cand"
+    collapsed = tmp_path / "game_records" / "ev_ablation_model_g000_harder_cand"
+    collapsed.mkdir(parents=True)
+    assert runner._batch_dir_for("ev_ablation_model__g000_harder_cand") == collapsed
 
 
 def test_generate_candidate_passes_shared_match_summary_cache(
@@ -1414,6 +1440,7 @@ def test_historical_strategy_duplicate_is_rejected_before_matches(
     assert attempts == 2
     assert not (runner.strategies_dir / "marine_opt1").exists()
     assert state["pending_candidate"]["strategy"] == "marine_opt2"
+    assert not state.get("candidate_resume_dir")
     failure = state["candidate_generation_failures"][0]
     assert failure["failure_reason"] == "historical_strategy_duplicate"
     assert failure["duplicate_matches"][0]["strategy"] == "marine"

@@ -162,7 +162,11 @@ def _apply_reasoning_disable(model: str, request_kwargs: Dict[str, Any]) -> None
             "thinking": {"type": "disabled"},
             "chat_template_kwargs": {"thinking": False},
         })
-    elif "glm" in model_name_l or "deepseek" in model_name_l:
+    elif "glm" in model_name_l:
+        # SenseNova/GLM-5.2: thinking.disabled 必须与 reasoning_effort=none 成对。
+        extra_body["thinking"] = {"type": "disabled"}
+        extra_body["reasoning_effort"] = "none"
+    elif "deepseek" in model_name_l:
         extra_body["thinking"] = {"type": "disabled"}
     else:
         extra_body["chat_template_kwargs"] = {"enable_thinking": False}
@@ -180,7 +184,11 @@ def _apply_reasoning_enable(model: str, request_kwargs: Dict[str, Any]) -> None:
             "thinking": {"type": "enabled"},
             "chat_template_kwargs": {"thinking": True},
         })
-    elif "glm" in model_name_l or "deepseek" in model_name_l:
+    elif "glm" in model_name_l:
+        # SenseNova/GLM-5.2: thinking.enabled 必须与非 none 的 reasoning_effort 成对。
+        extra_body["thinking"] = {"type": "enabled"}
+        extra_body["reasoning_effort"] = "medium"
+    elif "deepseek" in model_name_l:
         extra_body["thinking"] = {"type": "enabled"}
     else:
         extra_body["chat_template_kwargs"] = {"enable_thinking": True}
