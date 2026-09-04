@@ -167,7 +167,12 @@ def _apply_reasoning_disable(model: str, request_kwargs: Dict[str, Any]) -> None
         extra_body["thinking"] = {"type": "disabled"}
         extra_body["reasoning_effort"] = "none"
     elif "deepseek" in model_name_l:
-        extra_body["thinking"] = {"type": "disabled"}
+        # This gateway ignores thinking.type; chat_template_kwargs is what
+        # actually toggles DeepSeek think / reasoning_tokens.
+        extra_body["chat_template_kwargs"] = {
+            "thinking": False,
+            "enable_thinking": False,
+        }
     else:
         extra_body["chat_template_kwargs"] = {"enable_thinking": False}
 
@@ -189,7 +194,12 @@ def _apply_reasoning_enable(model: str, request_kwargs: Dict[str, Any]) -> None:
         extra_body["thinking"] = {"type": "enabled"}
         extra_body["reasoning_effort"] = "medium"
     elif "deepseek" in model_name_l:
-        extra_body["thinking"] = {"type": "enabled"}
+        # Live probe: thinking.type=enabled leaves reasoning_tokens=0.
+        # chat_template_kwargs thinking + enable_thinking is what works.
+        extra_body["chat_template_kwargs"] = {
+            "thinking": True,
+            "enable_thinking": True,
+        }
     else:
         extra_body["chat_template_kwargs"] = {"enable_thinking": True}
 

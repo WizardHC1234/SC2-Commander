@@ -47,6 +47,16 @@ class MatchSummaryCache:
             return None
         return stat.st_size, stat.st_mtime_ns
 
+    @staticmethod
+    def _focus_fingerprint(audit_focus: dict[str, Any] | None) -> dict[str, str]:
+        if not isinstance(audit_focus, dict):
+            return {}
+        return {
+            str(key): str(value).strip()
+            for key, value in sorted(audit_focus.items())
+            if str(value or "").strip()
+        }
+
     def get(
         self,
         record: GameEvidence,
@@ -54,16 +64,21 @@ class MatchSummaryCache:
         strategy_name: str,
         race: str,
         model: str = "",
+        audit_focus: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         fingerprint = self._fingerprint(record.file)
         if fingerprint is None:
             return None
+        required_focus = self._focus_fingerprint(audit_focus)
         with self._lock:
             entry = self._entries.get(self.key(record.file))
             if not isinstance(entry, dict):
                 return None
             cached_model = str(entry.get("model") or "").strip()
             cached_format = str(entry.get("summary_format") or "").strip()
+            cached_focus = self._focus_fingerprint(
+                entry.get("audit_focus") if isinstance(entry.get("audit_focus"), dict) else None
+            )
             if (
                 int(entry.get("size") or -1) != fingerprint[0]
                 or int(entry.get("mtime_ns") or -1) != fingerprint[1]
@@ -73,6 +88,11 @@ class MatchSummaryCache:
                 or (cached_format and cached_format != MATCH_SUMMARY_FORMAT)
                 or not isinstance(entry.get("summary"), dict)
             ):
+                return None
+            # A focused audit must not reuse a generic summary that may have
+            # omitted the pre-registered mechanism. Generic analysis may reuse a
+            # focused summary: it is a superset of the same match evidence.
+            if required_focus and cached_focus != required_focus:
                 return None
             digest = entry.get("digest")
             return {
@@ -93,6 +113,7 @@ class MatchSummaryCache:
         errors: list[str],
         source: str,
         digest: dict[str, Any] | None = None,
+        audit_focus: dict[str, Any] | None = None,
     ) -> None:
         fingerprint = self._fingerprint(record.file)
         if fingerprint is None or not summary:
@@ -106,6 +127,7 @@ class MatchSummaryCache:
                 "race": race,
                 "model": str(model or "").strip(),
                 "summary_format": MATCH_SUMMARY_FORMAT,
+                "audit_focus": self._focus_fingerprint(audit_focus),
                 "summary": summary,
                 "digest": dict(digest or {}),
                 "errors": errors,

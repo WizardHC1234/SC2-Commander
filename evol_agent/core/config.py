@@ -73,23 +73,18 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_ANALYSIS_MODEL = DEFAULT_MODEL
 DEFAULT_OPTIMIZATION_MODEL = DEFAULT_MODEL
 
-# Reasoning is enabled only for stages that make causal or strategic judgments.
-# Factual extraction, deterministic calculation, and checklist validation remain
-# non-reasoning calls to control latency and token usage.
+# All EvolAgent stages keep think off. DeepSeek think on discovery/timing/
+# package/writer calls stalls for minutes.
 MATCH_SUBAGENT_ENABLE_REASONING = False
-CROSS_MATCH_DISCOVERY_ENABLE_REASONING = True
-CROSS_MATCH_DECISION_ENABLE_REASONING = True
-CANDIDATE_GENERATION_ENABLE_REASONING = True
-# Determining which requirements belong to the first commitment is a semantic
-# chronology task rather than a literal field copy, so keep reasoning enabled.
-PARENT_TIMING_PACKAGE_EXTRACTION_ENABLE_REASONING = True
+CROSS_MATCH_DISCOVERY_ENABLE_REASONING = False
+OPTIMIZATION_PACKAGE_GENERATION_ENABLE_REASONING = False
+OPTIMIZATION_PACKAGE_SELECTION_ENABLE_REASONING = False
+CANDIDATE_GENERATION_ENABLE_REASONING = False
+PARENT_TIMING_PACKAGE_EXTRACTION_ENABLE_REASONING = False
 CONTACT_TIMING_EXTRACTION_ENABLE_REASONING = False
 STRATEGY_SEMANTIC_VALIDATION_ENABLE_REASONING = False
-# Comparing a proposed intervention with differently worded historical failures is
-# a causal semantic judgement, so it benefits from the same reasoning mode as
-# cross-match package selection.
-MECHANISM_HISTORY_ENABLE_REASONING = True
-EXPERIMENT_AUDIT_ENABLE_REASONING = True
+MECHANISM_HISTORY_ENABLE_REASONING = False
+EXPERIMENT_AUDIT_ENABLE_REASONING = False
 
 DEFAULT_KNOWLEDGE_MODE = "enabled"
 KNOWLEDGE_MODES = ("enabled", "disabled")

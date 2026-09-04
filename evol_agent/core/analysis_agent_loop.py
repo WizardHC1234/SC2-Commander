@@ -15,11 +15,12 @@ from .checkpoint import (
 )
 from .config import (
     CONTACT_TIMING_EXTRACTION_ENABLE_REASONING,
-    CROSS_MATCH_DECISION_ENABLE_REASONING,
     CROSS_MATCH_DISCOVERY_ENABLE_REASONING,
     DEFAULT_ANALYSIS_MODEL,
     MAX_CONCURRENT_MATCH_SUBAGENTS,
     MAX_KNOWLEDGE_QUERIES,
+    OPTIMIZATION_PACKAGE_GENERATION_ENABLE_REASONING,
+    OPTIMIZATION_PACKAGE_SELECTION_ENABLE_REASONING,
     PARENT_TIMING_PACKAGE_EXTRACTION_ENABLE_REASONING,
 )
 from .llm import call_json_llm
@@ -34,6 +35,7 @@ from .loop_helpers import (
 from .match_summary import run_fixed_match_summary
 from .match_summary_cache import MATCH_SUMMARY_FORMAT, MatchSummaryCache
 from .evidence_retrieval import build_retrieval_evidence_packet
+from .optimization_policy import package_forbidden_static_defense_reason
 from .prompts import (
     build_cross_match_decision_prompt,
     build_cross_match_discovery_prompt,
@@ -43,6 +45,7 @@ from .prompts import (
 from .terran_build_order_simulator import simulate_terran_first_commitment
 from .types import AnalysisPipelineResult, BattleAnalysis, GameDigest, ToolObservation
 from ..analysis.support_power import estimate_timing_package_support_power
+from ..analysis.optimization_direction_audit import normalize_audit_result
 from ..sc2_data_agent import (
     build_knowledge_query,
     find_knowledge_run_error,
@@ -111,6 +114,79 @@ _PACKAGE_HISTORY_RELATIONS = frozenset(
         "repeats_failed",
     }
 )
+
+# Unit-specific upgrades must have at least one beneficiary in the declared
+# first-commitment package.  This catches mechanically inert proposals (for
+# example Concussive Shells without Marauders) before spending match budget.
+# Economy/building upgrades are intentionally omitted because they do not have
+# a combat-unit beneficiary requirement.
+_UPGRADE_BENEFICIARIES = {
+    "research_shieldwall": {"train_marine"},
+    "research_stimpack": {"train_marine", "train_marauder"},
+    "research_concussive_shells": {"train_marauder"},
+    "research_personal_cloaking": {"train_ghost"},
+    "research_infernal_preigniter": {"train_hellion", "train_hellbat"},
+    "research_drilling_claws": {"train_widow_mine"},
+    "research_magfield_accelerator": {"train_cyclone"},
+    "research_smart_servos": {
+        "train_hellion",
+        "train_hellbat",
+        "train_thor",
+        "train_viking",
+    },
+    "research_banshee_cloak": {"train_banshee"},
+    "research_banshee_speed": {"train_banshee"},
+    "research_raven_corvid_reactor": {"train_raven"},
+    "research_liberator_range": {"train_liberator"},
+    "research_yamato_cannon": {"train_battlecruiser"},
+}
+for _upgrade_level in (1, 2, 3):
+    _UPGRADE_BENEFICIARIES.update(
+        {
+            f"research_infantry_weapons_{_upgrade_level}": {
+                "train_marine",
+                "train_marauder",
+                "train_reaper",
+                "train_ghost",
+            },
+            f"research_infantry_armor_{_upgrade_level}": {
+                "train_marine",
+                "train_marauder",
+                "train_reaper",
+                "train_ghost",
+            },
+            f"research_vehicle_weapons_{_upgrade_level}": {
+                "train_hellion",
+                "train_hellbat",
+                "train_widow_mine",
+                "train_cyclone",
+                "train_siege_tank",
+                "train_thor",
+            },
+            f"research_ship_weapons_{_upgrade_level}": {
+                "train_viking",
+                "train_banshee",
+                "train_liberator",
+                "train_battlecruiser",
+            },
+            f"research_vehicle_and_ship_armor_{_upgrade_level}": {
+                "train_hellion",
+                "train_hellbat",
+                "train_widow_mine",
+                "train_cyclone",
+                "train_siege_tank",
+                "train_thor",
+                "train_viking",
+                "train_medivac",
+                "train_liberator",
+                "train_banshee",
+                "train_raven",
+                "train_battlecruiser",
+            },
+        }
+    )
+
+_SUPPORT_GATE_ACTIONS = frozenset({"train_medivac", "train_raven"})
 _FAILURE_STAGES = frozenset(
     {
         "before_core_mechanism",
@@ -1098,6 +1174,7 @@ def _normalize_candidate_package_proposal(
 
     packages: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    forbidden_reasons: list[str] = []
     for index, item in enumerate(raw.get("candidate_packages") or [], 1):
         if not isinstance(item, dict):
             continue
@@ -1128,6 +1205,10 @@ def _normalize_candidate_package_proposal(
             or not budget_basis
         ):
             continue
+        forbidden = package_forbidden_static_defense_reason(item)
+        if forbidden:
+            forbidden_reasons.append(f"{package_id}: {forbidden}")
+            continue
         seen_ids.add(package_id)
         packages.append(
             {
@@ -1154,6 +1235,9 @@ def _normalize_candidate_package_proposal(
                     if isinstance(item.get("engagement_assessment"), dict)
                     else {}
                 ),
+                "hard_gate_evidence": _clean_strings(
+                    item.get("hard_gate_evidence"), limit=6
+                ),
                 "expected_effect": str(item.get("expected_effect") or "").strip(),
                 "main_risk": str(item.get("main_risk") or "").strip(),
             }
@@ -1161,8 +1245,13 @@ def _normalize_candidate_package_proposal(
         if len(packages) >= 3:
             break
     if len(packages) < 2:
+        suffix = (
+            "; " + "; ".join(forbidden_reasons[:3]) if forbidden_reasons else ""
+        )
         return None, (
-            "evaluate_candidate_packages requires two or three usable hypothesis packages"
+            "evaluate_candidate_packages requires two or three usable hypothesis "
+            "packages that do not add Bunkers or missile turrets"
+            + suffix
         )
     return {
         **common,
@@ -1278,6 +1367,57 @@ def _unresolved_simulation_actions(errors: list[str]) -> set[str]:
     return actions
 
 
+def _package_upgrade_applicability_issues(package: dict[str, Any]) -> list[str]:
+    """Return unit upgrades that have no beneficiary in the contact package."""
+
+    components = [
+        item
+        for field in ("gate_components", "setup_actions")
+        for item in (package.get(field) or [])
+        if isinstance(item, dict)
+    ]
+    actions = {
+        str(item.get("action") or "").strip().casefold()
+        for item in components
+        if str(item.get("action") or "").strip()
+    }
+    issues: list[str] = []
+    for upgrade, beneficiaries in _UPGRADE_BENEFICIARIES.items():
+        if upgrade not in actions or actions.intersection(beneficiaries):
+            continue
+        issues.append(
+            f"{upgrade} has no beneficiary unit in the declared first-commitment package"
+        )
+    return issues
+
+
+def _new_sensitive_hard_gate_actions(
+    parent_package: dict[str, Any], candidate_package: dict[str, Any]
+) -> list[str]:
+    """Identify newly blocking support units and upgrades.
+
+    These changes are not rejected by name.  They are surfaced to the semantic
+    selector because they require trajectory evidence that waiting is better
+    than producing the item in parallel with the first commitment.
+    """
+
+    parent_actions = {
+        str(item.get("action") or "").strip().casefold()
+        for item in (parent_package.get("gate_components") or [])
+        if isinstance(item, dict) and str(item.get("action") or "").strip()
+    }
+    candidate_actions = {
+        str(item.get("action") or "").strip().casefold()
+        for item in (candidate_package.get("gate_components") or [])
+        if isinstance(item, dict) and str(item.get("action") or "").strip()
+    }
+    return sorted(
+        action
+        for action in candidate_actions - parent_actions
+        if action.startswith("research_") or action in _SUPPORT_GATE_ACTIONS
+    )
+
+
 def _evaluate_candidate_package_budgets(
     proposal: dict[str, Any],
     *,
@@ -1304,6 +1444,11 @@ def _evaluate_candidate_package_budgets(
     parent_time = parent.get("earliest_feasible_time_seconds")
     parent_errors = [str(value) for value in (parent.get("errors") or [])]
     parent_unresolved_actions = _unresolved_simulation_actions(parent_errors)
+    parent_applicability_issues = set(
+        _package_upgrade_applicability_issues(
+            proposal.get("parent_timing_package") or {}
+        )
+    )
     parent_cost = (
         parent.get("total_cost")
         if isinstance(parent.get("total_cost"), dict)
@@ -1327,6 +1472,18 @@ def _evaluate_candidate_package_budgets(
         candidate_unresolved_actions = _unresolved_simulation_actions(candidate_errors)
         candidate_only_unresolved_actions = sorted(
             candidate_unresolved_actions - parent_unresolved_actions
+        )
+        candidate_applicability_issues = set(
+            _package_upgrade_applicability_issues(budget.get("package") or {})
+        )
+        candidate_only_applicability_issues = sorted(
+            candidate_applicability_issues - parent_applicability_issues
+        )
+        sensitive_hard_gates = _new_sensitive_hard_gate_actions(
+            proposal.get("parent_timing_package") or {}, budget.get("package") or {}
+        )
+        hard_gate_evidence = _clean_strings(
+            item.get("hard_gate_evidence"), limit=6
         )
         target_latest = budget.get("target_latest_first_commitment_seconds")
         maximum_added = budget.get("maximum_added_feasibility_seconds")
@@ -1372,6 +1529,10 @@ def _evaluate_candidate_package_budgets(
             status = "inherited_unresolved"
         elif not candidate_complete:
             status = "unresolved"
+        elif candidate_only_applicability_issues:
+            status = "ineffective"
+        elif sensitive_hard_gates and not hard_gate_evidence:
+            status = "unsupported_hard_gate"
         elif within_budget:
             status = "feasible"
         else:
@@ -1446,6 +1607,14 @@ def _evaluate_candidate_package_budgets(
                 "candidate_only_unresolved_actions": (
                     candidate_only_unresolved_actions
                 ),
+                "upgrade_applicability_issues": sorted(
+                    candidate_applicability_issues
+                ),
+                "candidate_only_upgrade_applicability_issues": (
+                    candidate_only_applicability_issues
+                ),
+                "new_sensitive_hard_gate_actions": sensitive_hard_gates,
+                "hard_gate_evidence": hard_gate_evidence,
             }
         )
     return reports
@@ -2270,10 +2439,12 @@ def _normalize_package_selection(
         ),
         {},
     )
-    if str(selected_report.get("status") or "") == "unresolved":
+    selected_status = str(selected_report.get("status") or "")
+    if selected_status in {"unresolved", "ineffective", "unsupported_hard_gate"}:
         return None, (
-            "selected_package_id cannot name a package with unresolved "
-            "production dependencies or required DataAgent facts"
+            "selected_package_id cannot name an ineligible package with status "
+            f"{selected_status}; resolve dependencies, upgrade applicability, or "
+            "hard-gate evidence before selection"
         )
 
     history = [
@@ -2398,6 +2569,66 @@ def _normalize_package_selection(
             "historical intervention; "
             "select a new direction, a reversal, or a concrete material repair"
         )
+    try:
+        direction_audit = normalize_audit_result(raw.get("direction_audit"))
+    except ValueError as exc:
+        return None, f"direction_audit: {exc}"
+    audit_verdict = str(direction_audit.get("verdict") or "")
+    if audit_verdict == "inspect_runtime":
+        return {
+            "next_action": "inspect_runtime",
+            "selected_package_id": "",
+            "candidate_diversity_assessment": diversity_payload,
+            "direction_audit": direction_audit,
+            "action_reason": str(raw.get("action_reason") or "").strip()
+            or "The independent direction audit attributes the problem to runtime execution.",
+            "evidence_limits": _clean_strings(raw.get("evidence_limits")),
+        }, ""
+    if audit_verdict in {"revise_before_trial", "reject_repeated_direction"}:
+        blocking = "; ".join(direction_audit.get("blocking_reasons") or [])
+        revision = str(
+            (direction_audit.get("recommended_revision") or {}).get("change") or ""
+        ).strip()
+        reason = blocking or revision or "The selected direction did not pass semantic audit."
+        return {
+            "next_action": "regenerate_candidate_packages",
+            "selected_package_id": "",
+            "candidate_diversity_assessment": diversity_payload,
+            "direction_audit": direction_audit,
+            "action_reason": reason,
+            "evidence_limits": _clean_strings(raw.get("evidence_limits")),
+        }, ""
+    equivalent_ids = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in (
+                (direction_audit.get("history_comparison") or {}).get(
+                    "equivalent_rejected_experiment_ids"
+                )
+                or []
+            )
+            if str(value).strip()
+        )
+    )
+    unknown_equivalent_ids = [
+        value for value in equivalent_ids if value not in known_history
+    ]
+    if unknown_equivalent_ids:
+        return None, (
+            "direction_audit references unknown experiment ids: "
+            + ", ".join(unknown_equivalent_ids)
+        )
+    repeated_rejections = [
+        value
+        for value in equivalent_ids
+        if str(known_history[value].get("decision") or "").strip().lower()
+        in {"rejected", "reject"}
+    ]
+    if len(repeated_rejections) >= 2:
+        return None, (
+            "direction_audit cannot approve a behavior family rejected at least twice: "
+            + ", ".join(repeated_rejections)
+        )
     data_agent_raw = (
         raw.get("data_agent_assessment")
         if isinstance(raw.get("data_agent_assessment"), dict)
@@ -2436,6 +2667,14 @@ def _normalize_package_selection(
     if payload is None:
         return None, error
     payload["selected_package_id"] = selected_id
+    payload["direction_audit"] = direction_audit
+    semantic_family = str(
+        (direction_audit.get("history_comparison") or {}).get("semantic_family") or ""
+    ).strip()
+    if semantic_family:
+        payload["mechanism_family"] = _normalize_mechanism_family(
+            semantic_family, payload.get("plan")
+        )
     payload["candidate_diversity_assessment"] = diversity_payload
     payload["candidate_packages"] = list(proposal.get("candidate_packages") or [])
     payload["package_budget_reports"] = list(package_budget_reports)
@@ -2675,7 +2914,7 @@ def _run_cross_match_decision(
         ),
         events=events,
         label="optimization_package_generation",
-        is_reasoning=CROSS_MATCH_DECISION_ENABLE_REASONING,
+        is_reasoning=OPTIMIZATION_PACKAGE_GENERATION_ENABLE_REASONING,
     )
     if proposal is None:
         return (
@@ -2801,9 +3040,59 @@ def _run_cross_match_decision(
     selectable_reports = [
         report
         for report in budget_reports
-        if str(report.get("status") or "") != "unresolved"
+        if str(report.get("status") or "")
+        not in {"unresolved", "ineffective", "unsupported_hard_gate"}
     ]
     if not selectable_reports:
+        rejection_feedback = [
+            (
+                f"Package {report.get('id')} is ineligible: status={report.get('status')}; "
+                f"upgrade_issues={report.get('candidate_only_upgrade_applicability_issues') or []}; "
+                f"new_sensitive_hard_gates={report.get('new_sensitive_hard_gate_actions') or []}."
+            )
+            for report in budget_reports
+        ]
+        if regeneration_attempt < 2:
+            events.append(
+                {
+                    "action": "regenerate_ineligible_candidate_packages",
+                    "attempt": regeneration_attempt + 1,
+                    "feedback": rejection_feedback,
+                }
+            )
+            print(
+                f"{prefix}DataAgent: all packages were ineligible; regenerating a "
+                f"different package set ({regeneration_attempt + 1}/2)",
+                flush=True,
+            )
+            regenerated, regenerated_errors, regenerated_calls = _run_cross_match_decision(
+                strategy_name=strategy_name,
+                race=race,
+                summaries=summaries,
+                skill_texts=skill_texts,
+                knowledge_mode=knowledge_mode,
+                model=model,
+                prior_experiences=prior_experiences,
+                capability_manifest=capability_manifest,
+                discovery=discovery,
+                knowledge_questions=knowledge_questions,
+                knowledge_runs=knowledge_runs,
+                retrieval_evidence=retrieval_evidence,
+                checkpoint=checkpoint,
+                events=events,
+                prefix=prefix,
+                regeneration_attempt=regeneration_attempt + 1,
+                regeneration_feedback=rejection_feedback,
+            )
+            return (
+                regenerated,
+                [
+                    *extraction_errors,
+                    *proposal_errors,
+                    *regenerated_errors,
+                ],
+                extraction_calls + proposal_calls + regenerated_calls,
+            )
         payload = {
             "strategy_name": strategy_name,
             "strategy_contract": normalize_strategy_contract(
@@ -2823,12 +3112,13 @@ def _run_cross_match_decision(
             "parent_timing_package": parent_timing_package,
             "next_action": "inspect_runtime",
             "action_reason": (
-                "Every proposed package has unresolved deterministic production "
-                "dependencies or required DataAgent facts; regenerate complete "
-                "packages before strategy editing."
+                "Every proposed package is ineligible because of unresolved production "
+                "dependencies, an upgrade without a beneficiary unit, or a new support/"
+                "upgrade hard gate without trajectory evidence; regenerate packages "
+                "before strategy editing."
             ),
             "evidence_limits": [
-                "No candidate package passed deterministic dependency resolution."
+                "No candidate package passed deterministic feasibility and applicability checks after regeneration."
             ],
         }
         return (
@@ -2866,7 +3156,7 @@ def _run_cross_match_decision(
         ),
         events=events,
         label="optimization_package_selection",
-        is_reasoning=CROSS_MATCH_DECISION_ENABLE_REASONING,
+        is_reasoning=OPTIMIZATION_PACKAGE_SELECTION_ENABLE_REASONING,
     )
     if payload is not None:
         if payload.get("next_action") == "regenerate_candidate_packages":

@@ -1,8 +1,8 @@
 """Read-only semantic audit for an EvolAgent optimization direction.
 
-This module deliberately does not participate in evolution state transitions. It
-reviews an existing analysis/candidate pair and prints a JSON verdict without
-editing strategies, records, checkpoints, or state.json.
+The CLI in this module is read-only and never performs evolution state
+transitions.  Its normalized verdict schema is also reused by the in-process
+package selector before candidate generation.
 """
 
 from __future__ import annotations

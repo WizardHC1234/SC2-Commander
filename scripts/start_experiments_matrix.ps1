@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $env:PYTHONIOENCODING = "utf-8"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -58,32 +58,27 @@ $OUTPUT_BASE_DIR = "game_records_opt_final_ds4"
 # Matches         : omit to use $DEFAULT_MATCHES_PER_EXPERIMENT
 # Model           : 省略则用 $COMMANDER_MODEL（须存在于 llm/config.json）
 $EXPERIMENTS = @(
-    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" }
-    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" }
+    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "ds4_marine_opt_final";        Matches = 20; Model = "deepseek-v4-flash" },
+    @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "ds4_tank_opt_final";          Matches = 20; Model = "deepseek-v4-flash" },
     @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "ds4_battlecruiser_opt_final"; Matches = 20; Model = "deepseek-v4-flash" }
-
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "qwen38_marine_opt_final";        Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "qwen38_tank_opt_final";          Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "mediumhard"; EnemyBuild = "macro"; Strategy = "qwen38_battlecruiser_opt_final"; Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "qwen38_marine_opt_final";        Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "qwen38_tank_opt_final";          Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "hard";       EnemyBuild = "macro"; Strategy = "qwen38_battlecruiser_opt_final"; Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "qwen38_marine_opt_final";        Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "qwen38_tank_opt_final";          Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "harder";     EnemyBuild = "macro"; Strategy = "qwen38_battlecruiser_opt_final"; Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "qwen38_marine_opt_final";        Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "qwen38_tank_opt_final";          Matches = 20; Model = "qwen3.8-flash" }
-    # @{ EnemyRace = "terran"; EnemyDifficulty = "veryhard";   EnemyBuild = "macro"; Strategy = "qwen38_battlecruiser_opt_final"; Matches = 20; Model = "qwen3.8-flash" }
 )
+
+# Qwen3.8 rows: keep them outside the array. A commented hashtable inside @( )
+# still counts its closing paren and breaks Windows PowerShell parsing.
+# To run Qwen, copy these hashtables into $EXPERIMENTS above, with commas.
+#   EnemyRace=terran EnemyBuild=macro Matches=20 Model=qwen3.8-flash
+#   mediumhard/hard/harder/veryhard x qwen38_marine_opt_final
+#   mediumhard/hard/harder/veryhard x qwen38_tank_opt_final
+#   mediumhard/hard/harder/veryhard x qwen38_battlecruiser_opt_final
 
 function Get-SafeName {
     param([Parameter(Mandatory = $true)][string]$Value)

@@ -16,6 +16,10 @@ param(
     [int]$TOTAL_MATCHES = 20,
     [int]$CONCURRENCY = 2,
     [int]$START_INDEX = 0,
+    # Space out SC2 process creation; launching many clients at once often
+    # fails before python-sc2 writes a log.
+    [int]$LAUNCH_STAGGER_SECONDS = 2,
+    [int]$MATCH_RETRIES = 2,
 
     [string]$BATCH_NAME = "",
     # Match records root (default: <repo>/game_records). Skill-bot matrices use game_records_bot.
@@ -266,7 +270,7 @@ Write-Host "Map      : $MAP_NAME"
 Write-Host "Strategy : $FORCE_STRATEGY"
 Write-Host "Model    : $COMMANDER_MODEL"
 Write-Host "Records  : $recordRoot"
-Write-Host "Run      : $TOTAL_MATCHES matches, concurrency=$CONCURRENCY"
+Write-Host "Run      : $TOTAL_MATCHES matches, concurrency=$CONCURRENCY, stagger=${LAUNCH_STAGGER_SECONDS}s, retries=$MATCH_RETRIES"
 Write-Host "=================================================="
 Write-Host ""
 
@@ -286,6 +290,7 @@ if ($TOTAL_MATCHES -le 1) {
     # Native python/sc2 INFO on stderr must not abort under $ErrorActionPreference=Stop.
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
+    $env:PYTHONUNBUFFERED = "1"
     & $PYTHON_EXE @pythonArgs *>> $outFile
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = $prevEap
@@ -315,21 +320,24 @@ Write-Host "Temporary logs (failed startup only): $logDir"
 Write-Host ""
 
 $jobs = @{}
-$failedMatches = 0
+$failedIndices = New-Object System.Collections.Generic.List[int]
 
 for ($i = 0; $i -lt $TOTAL_MATCHES; $i++) {
     while (($jobs.Values | Where-Object { $_.State -eq 'Running' }).Count -ge $CONCURRENCY) {
         $completedJob = Wait-Job -Any -Job @($jobs.Values) 2>$null
         if ($completedJob) {
-            $result = Receive-Job $completedJob
-            Remove-Job $completedJob
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $result = Receive-Job $completedJob 2>$null
+            $ErrorActionPreference = $prevEap
+            Remove-Job $completedJob -Force -ErrorAction SilentlyContinue
             $jobs.Remove($completedJob.Id)
 
             foreach ($item in @($result)) {
                 if ($item -and $null -ne $item.ExitCode) {
                     Write-Host "[Job $($item.Index)] completed, exit=$($item.ExitCode), log=$($item.LogFile)"
-                    if ([int]$item.ExitCode -ne 0) {
-                        $failedMatches++
+                    if ([int]$item.ExitCode -ne 0 -and -not $failedIndices.Contains([int]$item.Index)) {
+                        $failedIndices.Add([int]$item.Index)
                     }
                 }
                 elseif ($item) {
@@ -339,8 +347,13 @@ for ($i = 0; $i -lt $TOTAL_MATCHES; $i++) {
         }
     }
 
+    if ($i -gt 0 -and $LAUNCH_STAGGER_SECONDS -gt 0) {
+        Start-Sleep -Seconds $LAUNCH_STAGGER_SECONDS
+    }
+
     $matchIndex = $START_INDEX + $i
-    $job = Start-Job -ScriptBlock {
+    if ($null -eq $script:MatchWorker) {
+        $script:MatchWorker = {
         param(
             $idx,
             $myBot,
@@ -363,6 +376,7 @@ for ($i = 0; $i -lt $TOTAL_MATCHES; $i++) {
 
         $ErrorActionPreference = "Continue"
         $env:PYTHONIOENCODING = "utf-8"
+        $env:PYTHONUNBUFFERED = "1"
         $env:SC2PATH = $sc2
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -397,7 +411,12 @@ for ($i = 0; $i -lt $TOTAL_MATCHES; $i++) {
             }
 
             & $pyExe @pythonArgs *>> $outFile
-            $exitCode = $LASTEXITCODE
+            if ($null -eq $LASTEXITCODE) {
+                $exitCode = 1
+            }
+            else {
+                $exitCode = [int]$LASTEXITCODE
+            }
         }
         catch {
             "Job $idx exception: $_" | Out-File -LiteralPath $outFile -Append -Encoding utf8
@@ -435,7 +454,9 @@ for ($i = 0; $i -lt $TOTAL_MATCHES; $i++) {
             ExitCode = $exitCode
             LogFile = $outFile
         }
-    } -ArgumentList $matchIndex, $MY_BOT_NAME, $MAP_NAME, $REAL_TIME, $ENEMY_RACE, $ENEMY_DIFFICULTY, $ENEMY_BUILD, `
+        }
+    }
+    $job = Start-Job -ScriptBlock $script:MatchWorker -ArgumentList $matchIndex, $MY_BOT_NAME, $MAP_NAME, $REAL_TIME, $ENEMY_RACE, $ENEMY_DIFFICULTY, $ENEMY_BUILD, `
         $BOT_INSTRUCT, $BOT_RACE, $COMMANDER_MODEL, `
         $FORCE_STRATEGY, $recordRoot, $BATCH_NAME, $logDir, $currentPath, $PYTHON_EXE, $sc2Path
 
@@ -446,14 +467,20 @@ for ($i = 0; $i -lt $TOTAL_MATCHES; $i++) {
 Write-Host "Waiting for all batch jobs..."
 $jobs.Values | Wait-Job | Out-Null
 foreach ($j in @($jobs.Values)) {
-    $result = Receive-Job $j
-    Remove-Job $j
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $result = Receive-Job $j 2>$null
+    $ErrorActionPreference = $prevEap
+    Remove-Job $j -Force -ErrorAction SilentlyContinue
 
     foreach ($item in @($result)) {
         if ($item -and $null -ne $item.ExitCode) {
             Write-Host "[Job $($item.Index)] completed, exit=$($item.ExitCode), log=$($item.LogFile)"
-            if ([int]$item.ExitCode -ne 0) {
-                $failedMatches++
+            if ([int]$item.ExitCode -ne 0 -and -not $failedIndices.Contains([int]$item.Index)) {
+                $failedIndices.Add([int]$item.Index)
+            }
+            elseif ([int]$item.ExitCode -eq 0) {
+                [void]$failedIndices.Remove([int]$item.Index)
             }
         }
         elseif ($item) {
@@ -462,8 +489,70 @@ foreach ($j in @($jobs.Values)) {
     }
 }
 
-if ($failedMatches -gt 0) {
-    Write-Error "Batch finished, but $failedMatches match(es) failed. Check the log files above."
+$retryAttempt = 0
+while ($failedIndices.Count -gt 0 -and $retryAttempt -lt $MATCH_RETRIES) {
+    $retryAttempt++
+    $toRetry = @($failedIndices)
+    $failedIndices.Clear()
+    Write-Host ""
+    Write-Host "Retrying $($toRetry.Count) failed match(es) (attempt $retryAttempt / $MATCH_RETRIES): $($toRetry -join ', ')"
+    $jobs = @{}
+    foreach ($matchIndex in $toRetry) {
+        while (($jobs.Values | Where-Object { $_.State -eq 'Running' }).Count -ge $CONCURRENCY) {
+            $completedJob = Wait-Job -Any -Job @($jobs.Values) 2>$null
+            if ($completedJob) {
+                $prevEap = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                $result = Receive-Job $completedJob 2>$null
+                $ErrorActionPreference = $prevEap
+                Remove-Job $completedJob -Force -ErrorAction SilentlyContinue
+                $jobs.Remove($completedJob.Id)
+                foreach ($item in @($result)) {
+                    if ($item -and $null -ne $item.ExitCode) {
+                        Write-Host "[Job $($item.Index)] completed, exit=$($item.ExitCode), log=$($item.LogFile)"
+                        if ([int]$item.ExitCode -ne 0 -and -not $failedIndices.Contains([int]$item.Index)) {
+                            $failedIndices.Add([int]$item.Index)
+                        }
+                    }
+                    elseif ($item) {
+                        Write-Host $item
+                    }
+                }
+            }
+        }
+        if ($LAUNCH_STAGGER_SECONDS -gt 0) {
+            Start-Sleep -Seconds $LAUNCH_STAGGER_SECONDS
+        }
+        $job = Start-Job -ScriptBlock $script:MatchWorker -ArgumentList $matchIndex, $MY_BOT_NAME, $MAP_NAME, $REAL_TIME, $ENEMY_RACE, $ENEMY_DIFFICULTY, $ENEMY_BUILD, `
+            $BOT_INSTRUCT, $BOT_RACE, $COMMANDER_MODEL, `
+            $FORCE_STRATEGY, $recordRoot, $BATCH_NAME, $logDir, $currentPath, $PYTHON_EXE, $sc2Path
+        $jobs[$job.Id] = $job
+        Write-Host "  Retry submitted match $matchIndex (Job ID: $($job.Id))"
+    }
+    Write-Host "Waiting for retry jobs..."
+    $jobs.Values | Wait-Job | Out-Null
+    foreach ($j in @($jobs.Values)) {
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $result = Receive-Job $j 2>$null
+        $ErrorActionPreference = $prevEap
+        Remove-Job $j -Force -ErrorAction SilentlyContinue
+        foreach ($item in @($result)) {
+            if ($item -and $null -ne $item.ExitCode) {
+                Write-Host "[Job $($item.Index)] completed, exit=$($item.ExitCode), log=$($item.LogFile)"
+                if ([int]$item.ExitCode -ne 0 -and -not $failedIndices.Contains([int]$item.Index)) {
+                    $failedIndices.Add([int]$item.Index)
+                }
+            }
+            elseif ($item) {
+                Write-Host $item
+            }
+        }
+    }
+}
+
+if ($failedIndices.Count -gt 0) {
+    Write-Error "Batch finished, but $($failedIndices.Count) match(es) failed: $($failedIndices -join ', '). Check the log files above."
     exit 1
 }
 

@@ -72,6 +72,113 @@ def test_experiment_audit_reuses_persistent_match_summary_cache(
     assert second[0]["summary"] == {"result": "cached-summary"}
 
 
+def test_focused_audit_summaries_are_reused_by_later_generic_analysis(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    record = _record(tmp_path / "match.json")
+    cache_path = tmp_path / "summary_cache.json"
+    calls: list[str] = []
+    focus = {"expected_change": "add four Vikings to the attack gate"}
+
+    def summarize(**kwargs):
+        calls.append(kwargs["record"].file)
+        return (
+            SimpleNamespace(raw={"summary": "digest"}),
+            SimpleNamespace(raw={"result": "focused-summary"}),
+            True,
+            [],
+            [],
+        )
+
+    monkeypatch.setattr(experiment_audit, "run_fixed_match_summary", summarize)
+    cache = MatchSummaryCache(cache_path)
+    focused = experiment_audit._summarize_records(
+        [record],
+        strategy_name="tank_opt3",
+        race="terran",
+        model="test-model",
+        label="candidate",
+        cache=cache,
+        audit_focus=focus,
+    )
+    generic_cache = MatchSummaryCache(cache_path)
+    reused = generic_cache.get(
+        record,
+        strategy_name="tank_opt3",
+        race="terran",
+        model="test-model",
+    )
+    later_generic = experiment_audit._summarize_records(
+        [record],
+        strategy_name="tank_opt3",
+        race="terran",
+        model="test-model",
+        label="analysis",
+        cache=generic_cache,
+    )
+    later_same_focus = experiment_audit._summarize_records(
+        [record],
+        strategy_name="tank_opt3",
+        race="terran",
+        model="test-model",
+        label="candidate",
+        cache=MatchSummaryCache(cache_path),
+        audit_focus=focus,
+    )
+
+    assert calls == [record.file]
+    assert focused[0]["summary"] == {"result": "focused-summary"}
+    assert reused is not None
+    assert reused["summary"] == {"result": "focused-summary"}
+    assert later_generic == focused
+    assert later_same_focus == focused
+
+
+def test_focused_audit_does_not_reuse_a_generic_summary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    record = _record(tmp_path / "match.json")
+    cache_path = tmp_path / "summary_cache.json"
+    calls: list[str] = []
+
+    def summarize(**kwargs):
+        calls.append(str(kwargs.get("audit_focus") or {}))
+        payload = "focused" if kwargs.get("audit_focus") else "generic"
+        return (
+            None,
+            SimpleNamespace(raw={"result": payload}),
+            True,
+            [],
+            [],
+        )
+
+    monkeypatch.setattr(experiment_audit, "run_fixed_match_summary", summarize)
+    cache = MatchSummaryCache(cache_path)
+    generic = experiment_audit._summarize_records(
+        [record],
+        strategy_name="tank_opt3",
+        race="terran",
+        model="test-model",
+        label="parent",
+        cache=cache,
+    )
+    focused = experiment_audit._summarize_records(
+        [record],
+        strategy_name="tank_opt3",
+        race="terran",
+        model="test-model",
+        label="candidate",
+        cache=MatchSummaryCache(cache_path),
+        audit_focus={"material_behavior_change": "research Stimpack"},
+    )
+
+    assert calls == ["{}", "{'material_behavior_change': 'research Stimpack'}"]
+    assert generic[0]["summary"] == {"result": "generic"}
+    assert focused[0]["summary"] == {"result": "focused"}
+
+
 def test_experiment_audit_compacts_prior_parent_analysis() -> None:
     compact = experiment_audit._compact_parent_analysis(
         {
@@ -266,3 +373,31 @@ def test_gate_execution_audit_detects_repeated_gate_met_without_attack(
     )
     assert normalized["implementation_verdict"] == "execution_invalid"
     assert normalized["hypothesis_verdict"] == "not_tested"
+
+
+def test_upgrade_gate_matches_runtime_upgrade_ids() -> None:
+    snapshot = {
+        "observation_full": {
+            "technology": {
+                "completed_upgrades": [
+                    "TERRANINFANTRYWEAPONSLEVEL1",
+                    "PUNISHERGRENADES",
+                    "HIGHCAPACITYBARRELS",
+                    "LIBERATORAGRANGEUPGRADE",
+                ]
+            }
+        }
+    }
+
+    assert experiment_audit._upgrade_completed(
+        snapshot, "research_infantry_weapons_1"
+    )
+    assert experiment_audit._upgrade_completed(
+        snapshot, "research_concussive_shells"
+    )
+    assert experiment_audit._upgrade_completed(
+        snapshot, "research_infernal_preigniter"
+    )
+    assert experiment_audit._upgrade_completed(
+        snapshot, "research_liberator_range"
+    )

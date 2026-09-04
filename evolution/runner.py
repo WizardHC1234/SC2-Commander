@@ -1779,6 +1779,13 @@ class EvolutionRunner:
                 if isinstance(selected_history, dict)
                 else {}
             )
+        if "direction_audit" not in spec:
+            direction_audit = rationale.get("direction_audit")
+            spec["direction_audit"] = (
+                dict(direction_audit)
+                if isinstance(direction_audit, dict)
+                else {}
+            )
         if "first_commitment_timing" not in spec:
             feasibility = rationale.get("deterministic_feasibility_audit")
             timing = (
@@ -2978,6 +2985,11 @@ class EvolutionRunner:
                 if isinstance(rationale.get("selected_history_assessment"), dict)
                 else {}
             ),
+            "direction_audit": (
+                dict(rationale.get("direction_audit"))
+                if isinstance(rationale.get("direction_audit"), dict)
+                else {}
+            ),
             "document_changes": _dict_list(rationale.get("document_changes")),
             "semantic_validation": (
                 dict(rationale.get("semantic_validation"))
@@ -3712,6 +3724,11 @@ class EvolutionRunner:
                 if isinstance(
                     experiment_spec.get("selected_history_assessment"), dict
                 )
+                else {}
+            ),
+            "direction_audit": (
+                dict(experiment_spec.get("direction_audit"))
+                if isinstance(experiment_spec.get("direction_audit"), dict)
                 else {}
             ),
             "patches": _dict_list(experiment_spec.get("patches")),

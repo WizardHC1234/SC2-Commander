@@ -41,7 +41,38 @@ _ACTION_ENTITY_ALIASES = {
     "trainviking": "vikingfighter",
     "trainhellbat": "helliontank",
     "researchyamatocannon": "yamatocannon",
+    # Runtime observations expose python-sc2 UpgradeId names, which are not
+    # always a character-level match for the Commander action identifier.
+    # Keep the audit on the same canonical vocabulary so completed upgrades do
+    # not get reported as an unreached attack gate.
+    "researchconcussiveshells": "punishergrenades",
+    "researchshieldwall": "shieldwall",
+    "researchinfernalpreigniter": "highcapacitybarrels",
+    "researchdrillingclaws": "drillclaws",
+    "researchmagfieldaccelerator": "magfieldlaunchers",
+    "researchbansheecloak": "bansheecloak",
+    "researchbansheespeed": "bansheespeed",
+    "researchravencorvidreactor": "ravencorvidreactor",
+    "researchliberatorrange": "liberatoragrangeupgrade",
+    "researchneosteelarmor": "terranbuildingarmor",
 }
+
+# Spelling these out is intentional: action names use short user-facing terms,
+# while observations use UpgradeId enum names (including ``LEVEL`` and, for
+# infantry armor, plural ``ARMORS``).  Generate the regular levelled aliases
+# here instead of relying on unsafe substring matching.
+for _level in (1, 2, 3):
+    _ACTION_ENTITY_ALIASES.update(
+        {
+            f"researchinfantryweapons{_level}": f"terraninfantryweaponslevel{_level}",
+            f"researchinfantryarmor{_level}": f"terraninfantryarmorslevel{_level}",
+            f"researchvehicleweapons{_level}": f"terranvehicleweaponslevel{_level}",
+            f"researchshipweapons{_level}": f"terranshipweaponslevel{_level}",
+            f"researchvehicleandshiparmor{_level}": (
+                f"terranvehicleandshiparmorslevel{_level}"
+            ),
+        }
+    )
 
 
 _PARENT_ANALYSIS_FIELDS = (
@@ -57,6 +88,7 @@ _PARENT_ANALYSIS_FIELDS = (
     "failure_mode_analysis",
     "priority_alignment",
     "mechanism_prediction",
+    "direction_audit",
     "retrieval_assessment",
     "winning_mechanism",
     "repeated_failures",
@@ -374,13 +406,12 @@ def _summarize_records(
     summaries: dict[int, dict[str, Any]] = {}
     pending: list[tuple[int, GameEvidence]] = []
     for index, record in enumerate(records, 1):
-        # Focused audit summaries are experiment-specific and must never reuse a
-        # generic summary that may have omitted the pre-registered mechanism.
-        cached = None if audit_focus else cache.get(
+        cached = cache.get(
             record,
             strategy_name=strategy_name,
             race=race,
             model=model,
+            audit_focus=audit_focus,
         )
         if cached is None:
             pending.append((index, record))
@@ -426,7 +457,7 @@ def _summarize_records(
                     "summary": analysis.raw,
                     "errors": errors,
                 }
-                if ok and not audit_focus:
+                if ok:
                     cache.put(
                         records[index - 1],
                         strategy_name=strategy_name,
@@ -440,6 +471,7 @@ def _summarize_records(
                             if digest is not None and isinstance(digest.raw, dict)
                             else {}
                         ),
+                        audit_focus=audit_focus,
                     )
             except Exception as exc:  # preserve the evolution run on audit failure
                 summaries[index] = {

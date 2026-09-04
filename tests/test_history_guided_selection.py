@@ -18,6 +18,45 @@ def _proposal() -> dict:
     }
 
 
+def _direction_audit(verdict: str) -> dict:
+    return {
+        "verdict": verdict,
+        "root_cause": {
+            "primary": "attack_gate_timing",
+            "reason": "The rejected direction keeps delaying contact.",
+            "evidence_refs": ["Game 3 @ 600s"],
+        },
+        "behavioral_change": {
+            "pre_contact": {
+                "changes_observable_trajectory": True,
+                "description": "Contact is delayed for a larger package.",
+                "deadline_supported": False,
+            },
+            "engagement": {
+                "changes_observable_trajectory": False,
+                "description": "The same engagement remains.",
+            },
+            "post_contact": {
+                "changes_observable_trajectory": False,
+                "description": "Continuation remains unchanged.",
+            },
+        },
+        "history_comparison": {
+            "semantic_family": "delay_for_larger_pre_attack_package",
+            "equivalent_rejected_experiment_ids": [],
+            "why_new_or_repeated": "The package repeats the same trajectory.",
+        },
+        "preserved_gain_experiment_ids": [],
+        "blocking_reasons": ["The later window is not supported."],
+        "recommended_revision": {
+            "change": "Use a different causal lever.",
+            "preserve": [],
+            "avoid": ["another larger opening gate"],
+        },
+        "confidence": "high",
+    }
+
+
 def test_scorecard_separates_proven_gain_from_regression() -> None:
     rows = _experiment_history_scorecard(
         [
@@ -121,6 +160,42 @@ def test_selector_can_reject_a_semantically_duplicate_package_set() -> None:
     assert payload is not None
     assert payload["next_action"] == "regenerate_candidate_packages"
     assert payload["candidate_diversity_assessment"]["is_diverse"] is False
+
+
+def test_direction_audit_revision_regenerates_before_trial() -> None:
+    raw = {
+        "next_action": "propose_strategy_patch",
+        "selected_package_id": "P1",
+        "candidate_diversity_assessment": {
+            "is_diverse": True,
+            "duplicate_groups": [],
+            "reason": "The packages use different causal levers.",
+        },
+        "selected_history_assessment": {
+            "semantic_relation": "new",
+            "related_experiment_ids": [],
+            "preserved_gain_ids": [],
+            "repaired_dependencies": [],
+            "reason": "No matching prior experiment.",
+            "confidence": "high",
+        },
+        "direction_audit": _direction_audit("revise_before_trial"),
+    }
+
+    payload, error = _normalize_package_selection(
+        raw,
+        proposal=_proposal(),
+        package_budget_reports=[{"id": "P1", "status": "feasible"}],
+        strategy_name="tank",
+        fallback_strategy_contract={},
+        fallback_outcome_contrast={},
+        prior_experiences=[],
+    )
+
+    assert error == ""
+    assert payload is not None
+    assert payload["next_action"] == "regenerate_candidate_packages"
+    assert "later window" in payload["action_reason"]
 
 
 def test_selector_allows_only_one_material_repair_for_same_failed_direction() -> None:

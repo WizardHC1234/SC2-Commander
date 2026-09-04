@@ -1314,6 +1314,9 @@ def _package_proposal(**overrides) -> dict:
                 },
                 "expected_effect": "Stronger first engagement",
                 "main_risk": "Support tech may miss the contact window",
+                "hard_gate_evidence": [
+                    "Game 2 @ 430s: unsupported army loses the decisive contact"
+                ],
             },
         ],
         "next_action": "evaluate_candidate_packages",
@@ -1386,6 +1389,38 @@ def _package_selection(package_id: str = "P1") -> dict:
             "contradicted_claims": [],
             "rejected_package_ids": [],
             "limitations": [],
+        },
+        "direction_audit": {
+            "verdict": "approve_for_trial",
+            "root_cause": {
+                "primary": "production_readiness",
+                "reason": "The selected package addresses the earliest supported shortfall.",
+                "evidence_refs": ["Game 2 @ 430s"],
+            },
+            "behavioral_change": {
+                "pre_contact": {
+                    "changes_observable_trajectory": True,
+                    "description": "The required force becomes ready earlier.",
+                    "deadline_supported": True,
+                },
+                "engagement": {
+                    "changes_observable_trajectory": False,
+                    "description": "The engagement objective is preserved.",
+                },
+                "post_contact": {
+                    "changes_observable_trajectory": False,
+                    "description": "Continuation behavior is preserved.",
+                },
+            },
+            "history_comparison": {
+                "semantic_family": "earlier_force_readiness",
+                "equivalent_rejected_experiment_ids": [],
+                "why_new_or_repeated": "No rejected experiment used this behavior.",
+            },
+            "preserved_gain_experiment_ids": [],
+            "blocking_reasons": [],
+            "recommended_revision": {"change": "", "preserve": [], "avoid": []},
+            "confidence": "high",
         },
         "mechanism_prediction": copy.deepcopy(
             _propose_decision()["mechanism_prediction"]
@@ -1501,6 +1536,7 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
     assert "Composition, production, economy, technology" in proposal_prompt
     assert "post-contact continuation" in proposal_prompt
     assert "do not replay a failed direction" in proposal_prompt
+    assert "Never add Bunkers or missile turrets" in proposal_prompt
     assert "earliest_feasible_time" in proposal_prompt
     assert "Optimization-Package Selector" in prompt
     assert "independent Optimization-Package Selector and semantic judge" in prompt
@@ -1510,6 +1546,23 @@ def test_round2_prompt_reuses_discovery_findings() -> None:
     assert "regenerate_candidate_packages" in prompt
     assert "A `timing_risk` package requires direct trajectory evidence" in prompt
     assert "at most one material repair" in prompt
+    assert "Reject any package that adds Bunkers or missile turrets" in prompt
+    assert "direction_audit" in prompt
+    assert "parallel objective by default" in proposal_prompt
+
+
+def test_package_normalizer_rejects_bunkers_and_missile_turrets() -> None:
+    raw = _package_proposal()
+    raw["candidate_packages"][0]["timing_budget"]["package"]["setup_actions"].append(
+        {"action": "build_bunker", "quantity": 2, "parallel_slots": 1}
+    )
+    raw["candidate_packages"][1]["plan"]["material_behavior_change"] = (
+        "Build missile turrets at the natural before the push"
+    )
+    payload, error = _normalize_candidate_package_proposal(raw)
+    assert payload is None
+    assert error is not None
+    assert "Bunkers or missile turrets" in error
 
 
 def test_package_preflight_marks_a_missed_time_budget() -> None:
@@ -1524,6 +1577,46 @@ def test_package_preflight_marks_a_missed_time_budget() -> None:
     first = next(item for item in reports if item["id"] == "P1")
     assert first["target_latest_satisfied"] is False
     assert first["status"] == "timing_risk"
+
+
+def test_package_preflight_rejects_upgrade_without_beneficiary() -> None:
+    raw = _package_proposal()
+    first_package = raw["candidate_packages"][0]["timing_budget"]["package"]
+    first_package["gate_components"].append(
+        {
+            "action": "research_concussive_shells",
+            "quantity": 1,
+            "production_slots": 1,
+        }
+    )
+    raw["candidate_packages"][0]["hard_gate_evidence"] = [
+        "Game 2 @ 430s: the upgrade must be ready before contact"
+    ]
+    proposal, error = _normalize_candidate_package_proposal(raw)
+    assert error == ""
+    assert proposal is not None
+
+    reports = _evaluate_candidate_package_budgets(proposal, race="terran")
+    first = next(item for item in reports if item["id"] == "P1")
+
+    assert first["status"] == "ineffective"
+    assert "research_concussive_shells" in first[
+        "candidate_only_upgrade_applicability_issues"
+    ][0]
+
+
+def test_package_preflight_requires_evidence_for_new_support_hard_gate() -> None:
+    raw = _package_proposal()
+    raw["candidate_packages"][1]["hard_gate_evidence"] = []
+    proposal, error = _normalize_candidate_package_proposal(raw)
+    assert error == ""
+    assert proposal is not None
+
+    reports = _evaluate_candidate_package_budgets(proposal, race="terran")
+    second = next(item for item in reports if item["id"] == "P2")
+
+    assert second["status"] == "unsupported_hard_gate"
+    assert second["new_sensitive_hard_gate_actions"] == ["train_medivac"]
 
 
 def test_candidate_packages_create_requirements_and_matchup_queries() -> None:

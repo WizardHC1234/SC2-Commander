@@ -89,6 +89,7 @@ def _compact_optimization_brief(decision: dict[str, Any]) -> dict[str, Any]:
             "history_assessment": dict(
                 decision.get("selected_history_assessment") or {}
             ),
+            "direction_audit": dict(decision.get("direction_audit") or {}),
         },
         "evidence_limits": list(decision.get("evidence_limits") or []),
     }
@@ -146,9 +147,9 @@ Previous candidate:
 
 Rewrite procedure:
 1. Start from the Current Champion. Treat champion_lineage and strengths_to_preserve as winning evidence, and copy unrelated sections without redesigning them.
-2. Implement only the selected material behavior change and its necessary dependencies. Preserve cited gains, make a reversal genuinely reverse the failed behavior, and make a material repair address only its named missing dependency.
+2. Implement only the selected material behavior change and its necessary dependencies. Preserve cited gains, make a reversal genuinely reverse the failed behavior, and make a material repair address only its named missing dependency. Do not add Bunkers or missile turrets, including entrance missile turrets.
 3. Review the complete strategy chronologically across economy, production, technology, composition, attack timing, reinforcement, and recovery. Treat program_preflight earliest_feasible_time_seconds as a lower bound, keep the selected useful opponent window, and ensure post-commitment production continues without displacing a preserved priority.
-4. If the intervention changes the first attack, state one observable gate and attack when it is met. Do not copy its numerical threshold into recovery, and do not interrupt a favorable ongoing attack merely to rebuild the opening gate.
+4. If the intervention changes the first attack, state one observable gate and attack when it is met. A support unit or upgrade described as parallel or non-blocking in the brief must not be added to that gate. Do not copy its numerical threshold into recovery, and do not interrupt a favorable ongoing attack merely to rebuild the opening gate.
 5. Give every newly introduced or newly resumed unit or production facility a practical stage target and a final cap when production continues. Do not add targets for unaffected units. Keep the explicit final composition at no more than 200 supply including workers and support units.
 6. Use only supported high-level macro and army objectives. Do not require hidden state, coordinates, unit tags, fixed-composition detachments, or scripted group splitting and merging.
 7. Keep the strategy concise and internally consistent. Do not add a second optimization mechanism, duplicate warnings, or prose that behaves like a detailed state machine.

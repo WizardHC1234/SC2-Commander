@@ -185,6 +185,11 @@ def extract_final_cross_match_decision(battle_analysis: BattleAnalysis) -> dict[
             if isinstance(raw.get("selected_history_assessment"), dict)
             else {}
         ),
+        "direction_audit": (
+            dict(raw.get("direction_audit"))
+            if isinstance(raw.get("direction_audit"), dict)
+            else {}
+        ),
         "package_budget_reports": [
             dict(item)
             for item in (raw.get("package_budget_reports") or [])
@@ -718,6 +723,7 @@ def _candidate_rationale(
         "selected_history_assessment": dict(
             decision.get("selected_history_assessment") or {}
         ),
+        "direction_audit": dict(decision.get("direction_audit") or {}),
         "candidate_package_evaluations": [
             dict(item)
             for item in (decision.get("package_budget_reports") or [])
